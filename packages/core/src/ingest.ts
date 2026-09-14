@@ -288,8 +288,11 @@ export async function ingest(project: Project, messages: IncomingMessage[], meta
   // the sender says it is: taken from there, anyone could backdate an alias to
   // 1970 and win that argMin against the real link, pulling another person's
   // whole history onto their own person_id.
+  let linkIndex = 0;
+  const arrival = meta.receivedAt ?? new Date();
   for (const [from, to] of links) {
-    identityLinks.push({ anonymous_id: from, user_id: to, created_at: now });
+    // Same batch, same arrival: offset by insertion order so a tie never resolves arbitrarily.
+    identityLinks.push({ anonymous_id: from, user_id: to, created_at: fmt(new Date(arrival.getTime() + linkIndex++)) });
   }
 
   // --- person_id: resolve anonymous rows against links known before this batch and within it ---

@@ -100,6 +100,8 @@ async function run<T extends unknown[]>(fn: (...args: T) => Promise<Response>, a
     return error("Cross-origin request blocked. Set FOURIER_ALLOWED_ORIGINS to allow a separately-deployed dashboard.", 403);
   }
   try {
+    // The body can only be read once, so keep an unread copy for the retry below.
+    const retryArgs = req ? ([req.clone(), ...args.slice(1)] as unknown as T) : args;
     try {
       return await fn(...args);
     } catch (err) {
@@ -107,7 +109,7 @@ async function run<T extends unknown[]>(fn: (...args: T) => Promise<Response>, a
       if (!isMissingSchemaError(err)) throw err;
       console.warn("[fourier] schema missing, re-running migrations");
       resetReady();
-      return await fn(...args);
+      return await fn(...retryArgs);
     }
   } catch (err) {
     console.error(err);
