@@ -9,7 +9,7 @@ export const dynamic = "force-dynamic";
 export const GET = handle(
   requireAuth(async (req: Request) => {
     const user = await currentUser(req);
-    return json({ keys: await listApiKeys(user!.id) }, {}, req);
+    return json({ keys: await listApiKeys(user!.id) }, {});
   }),
 );
 
@@ -20,7 +20,7 @@ export const POST = handle(
     if (!body.name?.trim()) return error("name is required");
     const { key, plaintext } = await createApiKey(user!.id, body.name);
     // The only time the plaintext exists outside the caller's hands.
-    return json({ key, plaintext }, { status: 201 }, req);
+    return json({ key, plaintext }, { status: 201 });
   }),
 );
 export const OPTIONS = options;

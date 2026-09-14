@@ -172,7 +172,9 @@ AnalyticsBrowser.load(
   // Subdomains of one domain share the anonymous id through the cookie:
   cookieDomain=".example.com"
   // Different domains can't share cookies, so links to these hosts carry the id
-  // (?ajs_aid=… / ?ajs_uid=…, same parameters analytics.js uses) and it is read on arrival:
+  // (?ajs_aid=… / ?ajs_uid=…, same parameters analytics.js uses) and it is read on arrival.
+  // List every domain you exchange identity with, on BOTH sites: ids are only
+  // handed to a listed host, and only accepted from one you arrived from.
   crossDomain={["example.io", "app.example.io"]}
 >
 

@@ -310,19 +310,50 @@ export class Fourier extends Emitter {
 
   // ---- cross-domain ----
 
-  /** On arrival from a decorated link, adopt the ids and clean the URL. */
+  /**
+   * On arrival from a decorated link, adopt the ids and clean the URL.
+   *
+   * Both ends of this handshake are gated, because `ajs_uid` in a URL is an
+   * assertion about who the visitor is and anyone can write one. `decorateUrl`
+   * only hands ids to a host in `crossDomain`; this only accepts them back from
+   * one. Without the second check, `?ajs_uid=someone@else.com` on any link into
+   * the site re-identifies whoever clicks it, persistently, on every install —
+   * including installs that never turned cross-domain identity on.
+   *
+   * The referrer is what tells us which site handed over. Under the default
+   * `strict-origin-when-cross-origin` policy a cross-site navigation still
+   * carries its origin, so the supported flow works; a sending site that sets
+   * `no-referrer` or `rel="noreferrer"` deliberately withholds it, and there we
+   * drop the ids rather than trust an unattributable claim.
+   */
   private adoptCrossDomainIds() {
     if (!isBrowser) return;
+    const domains = this.options.crossDomain ?? [];
+    if (domains.length === 0) return;
     const ids = readCrossDomainIds(location.search);
     if (!ids.anonymousId && !ids.userId) return;
-    if (ids.anonymousId) this.store.set(ANON_KEY, ids.anonymousId);
-    if (ids.userId) this.store.set(USER_KEY, ids.userId);
+    if (this.referrerIsTrusted(domains)) {
+      if (ids.anonymousId) this.store.set(ANON_KEY, ids.anonymousId);
+      if (ids.userId) this.store.set(USER_KEY, ids.userId);
+    }
+    // Strip the parameters either way: adopted they are spent, rejected they are
+    // noise we don't want leaking onward in referrers or shared links.
     try {
       const url = new URL(location.href);
       url.searchParams.delete(CROSS_DOMAIN_ANON_PARAM);
       url.searchParams.delete(CROSS_DOMAIN_USER_PARAM);
       history.replaceState(history.state, "", url.toString());
     } catch {}
+  }
+
+  /** Did this navigation come from a site we were told shares an identity with us? */
+  private referrerIsTrusted(domains: string[]): boolean {
+    try {
+      const host = new URL(document.referrer).host;
+      return !!host && hostMatches(host, domains);
+    } catch {
+      return false;
+    }
   }
 
   /** Append identity params to a URL that points at one of the crossDomain hosts. */

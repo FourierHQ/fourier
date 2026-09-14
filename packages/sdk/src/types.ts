@@ -94,6 +94,11 @@ export interface FourierOptions {
    * Domains that share this user's identity but can't share cookies, e.g. ["app.example.io", "example.io"].
    * Links to them get `ajs_aid` (and `ajs_uid` when identified) appended so the visitor stays one person
    * across sites. Matches the domain and its subdomains. On arrival, those parameters are read and removed.
+   *
+   * The list gates both directions, so set it on every site in the group and name the others in it:
+   * ids are only appended to a listed host, and only accepted when the visitor arrived from one.
+   * Unset (the default), incoming `ajs_aid` / `ajs_uid` are ignored — an id in a URL is an assertion
+   * about who the visitor is, and anyone can put one in a link.
    */
   crossDomain?: string[];
   /** Override the fetch implementation. */
