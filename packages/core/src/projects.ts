@@ -155,7 +155,7 @@ export async function resolveWriteKey(writeKey: string): Promise<{ project: Proj
   if (hit && Date.now() - hit.at < 30_000) return hit;
   const res = await getClient().query({
     query: `SELECT s.id AS id, s.project_id AS project_id, s.name AS name, s.write_key AS write_key, s.created_at AS created_at, s.updated_at AS updated_at
-            FROM sources FINAL AS s WHERE s.write_key = {k:String} LIMIT 1`,
+            FROM sources AS s FINAL WHERE s.write_key = {k:String} LIMIT 1`,
     query_params: { k: writeKey },
     format: "JSONEachRow",
   });

@@ -4,6 +4,8 @@ Thanks for your interest. This is a short guide to getting a change in.
 
 ## Setup
 
+Node 22 (`.nvmrc` — `nvm use` or `fnm use` picks it up) and pnpm.
+
 ```bash
 pnpm install
 cp .env.example .env

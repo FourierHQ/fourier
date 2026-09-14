@@ -4,7 +4,7 @@
 </p>
 
 <p align="center">
-  <a href="https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FFourierHQ%2Ffourier&root-directory=apps%2Fweb&project-name=fourier&repository-name=fourier&env=CLICKHOUSE_URL,CLICKHOUSE_USER,CLICKHOUSE_PASSWORD,CLICKHOUSE_DATABASE&envDescription=ClickHouse%20connection%20(ClickHouse%20Cloud%20works%20out%20of%20the%20box)&envLink=https%3A%2F%2Fgithub.com%2FFourierHQ%2Ffourier%23clickhouse-cloud"><img src="https://vercel.com/button" alt="Deploy with Vercel" /></a>
+  <a href="https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FFourierHQ%2Ffourier&root-directory=apps%2Fweb&project-name=fourier&repository-name=fourier&env=CLICKHOUSE_URL,CLICKHOUSE_USER,CLICKHOUSE_PASSWORD,CLICKHOUSE_DATABASE,FOURIER_SECRET,FOURIER_SETUP_TOKEN&envDescription=ClickHouse%20connection%20%28ClickHouse%20Cloud%20works%20out%20of%20the%20box%29.%20FOURIER_SECRET%20signs%20sessions%20-%20paste%20any%20long%20random%20string.%20FOURIER_SETUP_TOKEN%20is%20optional%20and%20gates%20the%20create-first-account%20screen.&envLink=https%3A%2F%2Fgithub.com%2FFourierHQ%2Ffourier%23clickhouse-cloud"><img src="https://vercel.com/button" alt="Deploy with Vercel" /></a>
 </p>
 
 ---
@@ -20,7 +20,7 @@ Fourier replaces the Segment + Amplitude (or Mixpanel) pair with one thing you r
 
 ## Quick start
 
-Requirements: Node 20+, pnpm, and ClickHouse (a local binary, Docker, or ClickHouse Cloud).
+Requirements: Node 22+ (see `.nvmrc`), pnpm, and ClickHouse (a local binary, Docker, or ClickHouse Cloud).
 
 ```bash
 git clone https://github.com/FourierHQ/fourier.git && cd fourier
@@ -55,6 +55,18 @@ Fourier does the rest: database, tables, materialised views, migrations on boot.
 ### Deploy to Vercel
 
 Click the button above, or import the repo manually with **Root Directory** set to `apps/web` and the four `CLICKHOUSE_*` variables from your ClickHouse Cloud service. Your deployment URL is both the dashboard and the ingest host; put it in `NEXT_PUBLIC_FOURIER_HOST` in the apps you instrument.
+
+Two more worth setting on Vercel specifically:
+
+```bash
+openssl rand -base64 32   # FOURIER_SECRET
+```
+
+`FOURIER_SECRET` signs session cookies. Fourier generates one on first boot if you leave it unset, but Vercel runs many instances and two of them starting at once briefly disagree about which generated secret won — which shows up as being signed out at random for the first minute. Setting it removes that window and gives you a way to end every session at once (change it).
+
+`FOURIER_SETUP_TOKEN` is optional and closes the gap between "deployment is live" and "you created your account" — in that window, whoever opens the URL first becomes the admin. Set it and the setup screen asks for it too.
+
+**Opening it for the first time** takes you to a create-your-account screen; the first account is the admin, and after that the same URL is a sign-in page. Ingest needs none of this — write keys work from the moment the deployment is live. If the first load says it can't reach the server, that is usually a ClickHouse Cloud service still waking up: wait a moment and press Try again.
 
 ## Instrument a Next.js app
 
@@ -136,13 +148,40 @@ Every arrival is a **touch**: the first message of a session, and any page view 
 
 Sessions come from the SDK: 30 minutes of inactivity starts a new one, configurable with `sessionTimeout`. Server-side events have no session and only create touches when they carry UTMs.
 
+## Accounts and access
+
+Two kinds of credential, because sending data and reading it are different jobs.
+
+**Write keys** (`fk_…`) send data in. They ship in your website's JavaScript, they are public by design, and they never need an account — a browser or a backend job must never have to log in to report an event. Nothing about accounts changes ingest.
+
+**Sessions and read keys** (`fr_…`) read data back. The dashboard API, the SQL endpoint and the MCP server all require one.
+
+Getting there is a ladder, so nothing is in your way until it needs to be:
+
+| | |
+|---|---|
+| `pnpm dev` | No login. Clone, point at ClickHouse, look at data. The sidebar says *No sign-in (dev)*. Run `FOURIER_REQUIRE_AUTH=true pnpm dev` to exercise the real flow locally. |
+| First deploy | A create-your-account screen. Until someone claims it, every read endpoint is closed. |
+| After that | Sign in, or send `Authorization: Bearer fr_…`. |
+
+Accounts live in ClickHouse alongside everything else — no second database to run. Sessions are signed tokens rather than rows, so signing in doesn't write to ClickHouse, and `FOURIER_SECRET` rotation invalidates every one of them. Passwords are hashed with scrypt from Node's standard library, so there is no native dependency to build.
+
+The `accounts` table carries `auth_provider` and `provider_user_id` from the first release, so adding Google or another OIDC provider later is additive rather than a migration.
+
+Today every signed-in account can see every project — one install is one team, which is what self-hosting means. That rule lives in exactly one function, `canAccessProject` in `packages/core/src/auth.ts`, so growing into organisations and memberships later is a change there and nowhere else.
+
+See `.env.example` for `FOURIER_SECRET`, `FOURIER_SETUP_TOKEN`, `FOURIER_REQUIRE_AUTH` and the cross-origin settings.
+
 ## Agents: API and MCP
 
-There is no authentication in v1. Everything the dashboard shows comes from `/api/*`; the **API & MCP** page in the dashboard lists every endpoint and has a SQL playground.
+Everything the dashboard shows comes from `/api/*`; the **API & MCP** page lists every endpoint, mints read keys, and has a SQL playground.
 
 ```bash
-claude mcp add --transport http fourier http://localhost:5050/api/mcp
+claude mcp add --transport http fourier http://localhost:5050/api/mcp \
+  --header "Authorization: Bearer fr_YOUR_READ_KEY"
 ```
+
+The header is only needed once the instance has accounts — in development, MCP works without it.
 
 Tools: `list_projects`, `list_sources`, `get_overview`, `list_event_names`, `list_events`, `event_timeseries`, `event_property_keys`, `list_users`, `get_user`, `list_groups`, `get_group`, `list_touches`, `attribution_report`, `describe_schema`, `run_sql`. All read-only. `run_sql` runs arbitrary ClickHouse SELECTs with `readonly=1`, a keyword guard, and the project bound server-side via the `{project_id}` placeholder.
 
@@ -172,7 +211,7 @@ pnpm build        all packages
 
 ## Roadmap
 
-Authentication and API keys, saved reports (funnels, retention, trends), an event and property explorer, multi-project UI, and a single-process Docker image for non-Vercel self-hosting.
+Saved reports (funnels, retention, trends), an event and property explorer, multi-project UI, OIDC sign-in, per-write-key rate limiting, and a single-process Docker image for non-Vercel self-hosting.
 
 ## Contributing
 

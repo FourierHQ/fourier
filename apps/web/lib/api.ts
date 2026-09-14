@@ -44,11 +44,123 @@ export type {
 export const PROJECT = "default";
 export const LIVE_INTERVAL = 5_000;
 
+/**
+ * Empty by default, because the dashboard and the API normally share an origin.
+ * Set NEXT_PUBLIC_FOURIER_API_URL to point this build at a Fourier server
+ * deployed somewhere else — that server must then name this origin in
+ * FOURIER_ALLOWED_ORIGINS so the browser will send the session cookie.
+ */
+export const API_BASE = (process.env.NEXT_PUBLIC_FOURIER_API_URL ?? "").replace(/\/+$/, "");
+
+export function apiUrl(path: string): string {
+  return `${API_BASE}${path}`;
+}
+
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly setupRequired = false,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, { ...init, headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) } });
+  const res = await fetch(apiUrl(path), {
+    ...init,
+    // The session is an HttpOnly cookie; without this a cross-origin dashboard
+    // would send every request anonymously.
+    credentials: "include",
+    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+  });
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error((body as { error?: string }).error ?? `Request failed: ${res.status}`);
+  if (!res.ok) {
+    const b = body as { error?: string; setup_required?: boolean };
+    throw new ApiError(b.error ?? `Request failed: ${res.status}`, res.status, Boolean(b.setup_required));
+  }
   return body as T;
+}
+
+// ---------- auth ----------
+
+export interface SessionUser {
+  id: string;
+  email: string;
+  name: string;
+  role: string;
+}
+
+export interface AuthStatus {
+  setup_required: boolean;
+  setup_token_required: boolean;
+  auth_disabled: boolean;
+  user: SessionUser | null;
+}
+
+export function useAuthStatus() {
+  return useQuery({
+    queryKey: ["auth-status"],
+    queryFn: () => api<AuthStatus>("/api/auth/status"),
+    retry: false,
+    staleTime: 0,
+    refetchOnWindowFocus: true,
+  });
+}
+
+export function useLogin() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { email: string; password: string }) => api<{ user: SessionUser }>("/api/auth/login", { method: "POST", body: JSON.stringify(input) }),
+    onSuccess: () => qc.invalidateQueries(),
+  });
+}
+
+export function useSetup() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { email: string; password: string; name?: string; token?: string }) =>
+      api<{ user: SessionUser }>("/api/auth/setup", { method: "POST", body: JSON.stringify(input) }),
+    onSuccess: () => qc.invalidateQueries(),
+  });
+}
+
+export function useLogout() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api<{ ok: true }>("/api/auth/logout", { method: "POST" }),
+    onSuccess: () => qc.invalidateQueries(),
+  });
+}
+
+export interface ApiKey {
+  id: string;
+  account_id: string;
+  name: string;
+  prefix: string;
+  last_used_at: string;
+  created_at: string;
+}
+
+export function useApiKeys() {
+  return useQuery({ queryKey: ["api-keys"], queryFn: () => api<{ keys: ApiKey[] }>("/api/keys").then((r) => r.keys), retry: false });
+}
+
+export function useCreateApiKey() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => api<{ key: ApiKey; plaintext: string }>("/api/keys", { method: "POST", body: JSON.stringify({ name }) }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["api-keys"] }),
+  });
+}
+
+export function useRevokeApiKey() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api<{ ok: true }>(`/api/keys/${encodeURIComponent(id)}`, { method: "DELETE" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["api-keys"] }),
+  });
 }
 
 function qs(params: object): string {
