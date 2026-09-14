@@ -1,0 +1,9 @@
+node_modules
+.next
+dist
+.env
+.env.local
+.clickhouse
+*.log
+.DS_Store
+*.tsbuildinfo

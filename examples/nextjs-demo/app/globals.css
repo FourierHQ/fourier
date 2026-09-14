@@ -1,0 +1,14 @@
+* { box-sizing: border-box; }
+body { margin: 0; font-family: ui-sans-serif, system-ui, sans-serif; background: #0a0a0a; color: #ededed; }
+main { max-width: 640px; margin: 0 auto; padding: 48px 24px; }
+h1 { font-size: 24px; margin: 0 0 4px; }
+p { color: #a1a1aa; margin: 0 0 24px; }
+section { border: 1px solid #27272a; border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+section h2 { font-size: 14px; margin: 0 0 12px; color: #a1a1aa; text-transform: uppercase; letter-spacing: .04em; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; }
+button, a.btn { font: inherit; font-size: 14px; padding: 8px 14px; border-radius: 8px; border: 1px solid #3f3f46; background: #18181b; color: #ededed; cursor: pointer; text-decoration: none; }
+button:hover, a.btn:hover { background: #27272a; }
+button.primary { background: #ededed; color: #0a0a0a; border-color: #ededed; }
+code { font-family: ui-monospace, monospace; font-size: 12px; background: #18181b; padding: 2px 6px; border-radius: 4px; }
+.log { font-family: ui-monospace, monospace; font-size: 12px; color: #a1a1aa; max-height: 200px; overflow: auto; }
+.log div { padding: 2px 0; border-bottom: 1px solid #18181b; }

@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "fourier-web",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--filter", "@fourier/web", "dev"],
+      "port": 5050
+    },
+    {
+      "name": "fourier-demo",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--filter", "@fourier/example-nextjs", "dev"],
+      "port": 5051
+    }
+  ]
+}

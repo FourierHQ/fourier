@@ -1,0 +1,19 @@
+import { runSql } from "@fourier/core";
+import { resolveProject } from "@/lib/db";
+import { error, handle, int, json, options } from "@/lib/http";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+type Ctx = { params: Promise<{ id: string }> };
+
+export const POST = handle(async (req: Request, { params }: Ctx) => {
+  const { id } = await params;
+  const project = await resolveProject(id);
+  if (!project) return error("Project not found", 404);
+  const body = (await req.json().catch(() => ({}))) as { sql?: string; limit?: number };
+  if (!body.sql) return error("sql is required");
+  return json({ project_id: project.id, ...(await runSql(project.id, body.sql, { limit: body.limit })) });
+});
+void int;
+export const OPTIONS = options;
