@@ -7,7 +7,7 @@ export const dynamic = "force-dynamic";
 export const GET = handle(
   requireAuth(async (req: Request) => {
     const user = await currentUser(req);
-    return json({ user: user && { id: user.id, email: user.email, name: user.name, role: user.role } }, {}, req);
+    return json({ user: user && { id: user.id, email: user.email, name: user.name, role: user.role } }, {});
   }),
 );
 export const OPTIONS = options;

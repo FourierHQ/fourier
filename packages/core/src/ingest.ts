@@ -260,7 +260,7 @@ export async function ingest(project: Project, messages: IncomingMessage[], meta
   const groupTraitUpdates = new Map<string, Record<string, unknown>>();
   const identityLinks: { anonymous_id: string; user_id: string; created_at: string }[] = [];
 
-  const now = fmt(new Date());
+  const now = fmt(meta.receivedAt ?? new Date());
   const links = new Map<string, string>(); // from_id -> to_id, this batch
   for (const [i, r] of rows.entries()) {
     const src = accepted[i];
@@ -280,9 +280,16 @@ export async function ingest(project: Project, messages: IncomingMessage[], meta
       groupTraitUpdates.set(r.group_id, { ...(groupTraitUpdates.get(r.group_id) ?? {}), ...t });
     }
   }
+  // `created_at` is stamped here, on arrival, and never from the message. The
+  // identity_map view breaks conflicts with argMin(user_id, created_at) — one
+  // anonymous id claimed by two users resolves to the earliest link — so this
+  // column decides who owns a contested identity. A write key is public by
+  // design (it ships in the page source), and a message timestamp is whatever
+  // the sender says it is: taken from there, anyone could backdate an alias to
+  // 1970 and win that argMin against the real link, pulling another person's
+  // whole history onto their own person_id.
   for (const [from, to] of links) {
-    const first = rows.find((r) => (r.anonymous_id === from && r.user_id === to) || (r.type === "alias" && r.user_id === to));
-    identityLinks.push({ anonymous_id: from, user_id: to, created_at: first?.timestamp ?? now });
+    identityLinks.push({ anonymous_id: from, user_id: to, created_at: now });
   }
 
   // --- person_id: resolve anonymous rows against links known before this batch and within it ---

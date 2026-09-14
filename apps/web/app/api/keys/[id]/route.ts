@@ -13,7 +13,7 @@ export const DELETE = handle(
     const { id } = await ctx.params;
     const revoked = await revokeApiKey(user!.id, id);
     if (!revoked) return error("Key not found", 404);
-    return json({ ok: true }, {}, req);
+    return json({ ok: true }, {});
   }),
 );
 export const OPTIONS = options;

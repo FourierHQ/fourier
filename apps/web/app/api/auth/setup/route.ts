@@ -34,6 +34,6 @@ export const POST = handle(async (req: Request) => {
     return error(err instanceof Error ? err.message : "Could not create the account", 400);
   }
   const token = await signSessionToken(user);
-  return json({ user: { id: user.id, email: user.email, name: user.name, role: user.role } }, { status: 201, headers: { "Set-Cookie": sessionCookie(token) } }, req);
+  return json({ user: { id: user.id, email: user.email, name: user.name, role: user.role } }, { status: 201, headers: { "Set-Cookie": sessionCookie(token) } });
 });
 export const OPTIONS = options;

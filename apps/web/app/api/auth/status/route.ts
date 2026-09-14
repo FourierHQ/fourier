@@ -17,7 +17,6 @@ export const GET = handle(async (req: Request) => {
       user: state.user ? { id: state.user.id, email: state.user.email, name: state.user.name, role: state.user.role } : null,
     },
     {},
-    req,
   );
 });
 export const OPTIONS = options;

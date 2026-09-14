@@ -14,7 +14,7 @@ export const dynamic = "force-dynamic";
 export const GET = handle(async (req: Request) => {
   const h = await health();
   const user = await currentUser(req);
-  if (user) return json(h, { status: h.ok ? 200 : 503 }, req);
-  return json({ ok: h.ok }, { status: h.ok ? 200 : 503 }, req);
+  if (user) return json(h, { status: h.ok ? 200 : 503 });
+  return json({ ok: h.ok }, { status: h.ok ? 200 : 503 });
 });
 export const OPTIONS = options;
