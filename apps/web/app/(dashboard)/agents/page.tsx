@@ -9,6 +9,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PageHeader } from "@/components/page-header";
 import { CodeBlock } from "@/components/code-block";
 import { useHost } from "@/components/setup-guide";
+import { ReadKeys } from "@/components/read-keys";
 import { runSql, type SqlResult } from "@/lib/api";
 
 const EXAMPLE_SQL = `-- Signup → first report funnel, last 30 days.
@@ -65,17 +66,23 @@ export default function AgentsPage() {
     }
   };
 
-  const mcpJson = JSON.stringify({ mcpServers: { fourier: { type: "http", url: `${host}/api/mcp` } } }, null, 2);
+  const mcpJson = JSON.stringify(
+    { mcpServers: { fourier: { type: "http", url: `${host}/api/mcp`, headers: { Authorization: "Bearer fr_YOUR_READ_KEY" } } } },
+    null,
+    2,
+  );
 
   return (
     <>
       <PageHeader title="API & MCP" description="Everything in the dashboard is queryable by agents" />
       <div className="mx-auto w-full max-w-5xl space-y-6 p-4 md:p-6">
+        <ReadKeys />
+
         <Card>
           <CardHeader>
             <CardTitle>MCP server</CardTitle>
             <CardDescription>
-              Streamable HTTP at <code className="font-mono text-xs">{host}/api/mcp</code>. Tools: list_sources, list_event_names, list_events, event_timeseries, list_users, get_user, list_groups, get_group, list_touches, attribution_report, describe_schema, run_sql and more. Read-only.
+              Streamable HTTP at <code className="font-mono text-xs">{host}/api/mcp</code>, authenticated with a read key from above. Tools: list_sources, list_event_names, list_events, event_timeseries, list_users, get_user, list_groups, get_group, list_touches, attribution_report, describe_schema, run_sql and more. Read-only.
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -86,7 +93,7 @@ export default function AgentsPage() {
                 <TabsTrigger value="stdio">stdio</TabsTrigger>
               </TabsList>
               <TabsContent value="claude-code" className="pt-3">
-                <CodeBlock code={`claude mcp add --transport http fourier ${host}/api/mcp`} />
+                <CodeBlock code={`claude mcp add --transport http fourier ${host}/api/mcp \\\n  --header "Authorization: Bearer fr_YOUR_READ_KEY"`} />
               </TabsContent>
               <TabsContent value="json" className="pt-3">
                 <CodeBlock title="Claude Desktop, Cursor, Windsurf…" code={mcpJson} />

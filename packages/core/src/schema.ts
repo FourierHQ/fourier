@@ -12,7 +12,7 @@
  * - Materialised views maintain per-user, per-group and per-event rollups.
  */
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 export const statements: string[] = [
   `CREATE TABLE IF NOT EXISTS projects (
@@ -312,6 +312,59 @@ export const statements: string[] = [
   FROM touches AS t
   LEFT JOIN identity_map AS i
     ON i.project_id = t.project_id AND i.from_id = if(t.user_id != '', t.user_id, t.anonymous_id)`,
+
+  // ---- auth / app state ----
+  //
+  // Small, low-write, edit-in-place tables. Same ReplacingMergeTree + FINAL pattern
+  // as `projects` and `sources`, so auth adds no second database: the install stays
+  // a Next.js app and a ClickHouse service. `deleted` is a tombstone because
+  // ClickHouse deletes are async mutations — every read filters it out.
+
+  // Named `accounts` rather than `users`: in this product a "user" is someone
+  // you track, and these are the people who sign in to look at them.
+  `CREATE TABLE IF NOT EXISTS accounts (
+    id               String,
+    email            String,
+    name             String,
+    password_hash    String,
+    role             LowCardinality(String) DEFAULT 'admin',
+    -- Present from the first release so adding Google/OIDC later is additive
+    -- rather than a migration: local accounts simply carry provider = 'local'.
+    auth_provider    LowCardinality(String) DEFAULT 'local',
+    provider_user_id String,
+    -- Bumped to invalidate every outstanding token for this user (logout
+    -- everywhere, password change). Stateless sessions need this to be revocable.
+    token_version    UInt32 DEFAULT 1,
+    last_login_at    DateTime64(3, 'UTC') DEFAULT toDateTime64(0, 3),
+    deleted          UInt8 DEFAULT 0,
+    created_at       DateTime64(3, 'UTC') DEFAULT now64(3),
+    updated_at       DateTime64(3, 'UTC') DEFAULT now64(3)
+  ) ENGINE = ReplacingMergeTree(updated_at)
+  ORDER BY id`,
+
+  // Read credentials for agents, MCP clients and scripts. Only the hash is
+  // stored; the plaintext key is shown once at creation.
+  `CREATE TABLE IF NOT EXISTS api_keys (
+    id           String,
+    account_id   String,
+    name         String,
+    key_hash     String,
+    prefix       String,
+    last_used_at DateTime64(3, 'UTC') DEFAULT toDateTime64(0, 3),
+    deleted      UInt8 DEFAULT 0,
+    created_at   DateTime64(3, 'UTC') DEFAULT now64(3),
+    updated_at   DateTime64(3, 'UTC') DEFAULT now64(3)
+  ) ENGINE = ReplacingMergeTree(updated_at)
+  ORDER BY id`,
+
+  // Instance-wide key/value. Holds the generated signing secret so a fresh
+  // install needs no environment variable to have working sessions.
+  `CREATE TABLE IF NOT EXISTS settings (
+    key        String,
+    value      String,
+    updated_at DateTime64(3, 'UTC') DEFAULT now64(3)
+  ) ENGINE = ReplacingMergeTree(updated_at)
+  ORDER BY key`,
 
   `CREATE TABLE IF NOT EXISTS _migrations (
     version    UInt32,

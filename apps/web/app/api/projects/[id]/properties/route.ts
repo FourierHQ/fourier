@@ -1,19 +1,20 @@
 import { propertyKeys } from "@fourier/core";
 import { resolveProject } from "@/lib/db";
 import { error, handle, int, json, options } from "@/lib/http";
+import { requireProjectAccess } from "@/lib/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type Ctx = { params: Promise<{ id: string }> };
 
-export const GET = handle(async (req: Request, { params }: Ctx) => {
+export const GET = handle(requireProjectAccess(async (req: Request, { params }: Ctx) => {
   const { id } = await params;
   const project = await resolveProject(id);
   if (!project) return error("Project not found", 404);
   const event = new URL(req.url).searchParams.get("event");
   if (!event) return error("event is required");
   return json({ keys: await propertyKeys(project.id, event) });
-});
+}));
 void int;
 export const OPTIONS = options;

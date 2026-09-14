@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
-import { Activity, Bot, Building2, Database, LayoutDashboard, Moon, Plug, Sun, Users } from "lucide-react";
+import { usePathname, useRouter } from "next/navigation";
+import { Activity, Bot, Building2, Database, LayoutDashboard, LogOut, Moon, Plug, Sun, Users } from "lucide-react";
 import { useTheme } from "next-themes";
 import {
   Sidebar,
@@ -17,7 +17,7 @@ import {
   SidebarMenuItem,
   SidebarRail,
 } from "@/components/ui/sidebar";
-import { useHealth, useOverview } from "@/lib/api";
+import { useAuthStatus, useHealth, useLogout, useOverview } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 const nav = [
@@ -35,6 +35,9 @@ export function AppSidebar() {
   const pathname = usePathname();
   const health = useHealth();
   const overview = useOverview();
+  const auth = useAuthStatus();
+  const logout = useLogout();
+  const router = useRouter();
   const { resolvedTheme, setTheme } = useTheme();
   const isActive = (href: string) => (href === "/" ? pathname === "/" : pathname.startsWith(href));
   const receiving = (overview.data?.overview.total_events ?? 0) > 0;
@@ -121,6 +124,19 @@ export function AppSidebar() {
               <span>Theme</span>
             </SidebarMenuButton>
           </SidebarMenuItem>
+          {/* Hidden in development, where there is no login to sign out of. */}
+          {auth.data?.user && (
+            <SidebarMenuItem>
+              <SidebarMenuButton
+                tooltip={`Sign out (${auth.data.user.email})`}
+                onClick={() => logout.mutate(undefined, { onSuccess: () => router.replace("/login") })}
+                disabled={logout.isPending}
+              >
+                <LogOut />
+                <span className="truncate">{auth.data.user.name || auth.data.user.email}</span>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          )}
         </SidebarMenu>
       </SidebarFooter>
       <SidebarRail />

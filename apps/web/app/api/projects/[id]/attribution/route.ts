@@ -1,6 +1,7 @@
 import { attributionReport, type AttributionDimension, type AttributionModel } from "@fourier/core";
 import { resolveProject } from "@/lib/db";
 import { error, handle, int, json, options } from "@/lib/http";
+import { requireProjectAccess } from "@/lib/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -8,7 +9,7 @@ export const dynamic = "force-dynamic";
 type Ctx = { params: Promise<{ id: string }> };
 
 /** People grouped by a touch dimension under a first- or last-touch model. */
-export const GET = handle(async (req: Request, { params }: Ctx) => {
+export const GET = handle(requireProjectAccess(async (req: Request, { params }: Ctx) => {
   const { id } = await params;
   const project = await resolveProject(id);
   if (!project) return error("Project not found", 404);
@@ -26,5 +27,5 @@ export const GET = handle(async (req: Request, { params }: Ctx) => {
     limit: int(s.get("limit"), 50),
   });
   return json({ model, by, rows });
-});
+}));
 export const OPTIONS = options;

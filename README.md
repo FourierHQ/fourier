@@ -136,13 +136,40 @@ Every arrival is a **touch**: the first message of a session, and any page view 
 
 Sessions come from the SDK: 30 minutes of inactivity starts a new one, configurable with `sessionTimeout`. Server-side events have no session and only create touches when they carry UTMs.
 
+## Accounts and access
+
+Two kinds of credential, because sending data and reading it are different jobs.
+
+**Write keys** (`fk_…`) send data in. They ship in your website's JavaScript, they are public by design, and they never need an account — a browser or a backend job must never have to log in to report an event. Nothing about accounts changes ingest.
+
+**Sessions and read keys** (`fr_…`) read data back. The dashboard API, the SQL endpoint and the MCP server all require one.
+
+Getting there is a ladder, so nothing is in your way until it needs to be:
+
+| | |
+|---|---|
+| `pnpm dev` | No login. Clone, point at ClickHouse, look at data. |
+| First deploy | A create-your-account screen. Until someone claims it, every read endpoint is closed. |
+| After that | Sign in, or send `Authorization: Bearer fr_…`. |
+
+Accounts live in ClickHouse alongside everything else — no second database to run. Sessions are signed tokens rather than rows, so signing in doesn't write to ClickHouse, and `FOURIER_SECRET` rotation invalidates every one of them. Passwords are hashed with scrypt from Node's standard library, so there is no native dependency to build.
+
+The `accounts` table carries `auth_provider` and `provider_user_id` from the first release, so adding Google or another OIDC provider later is additive rather than a migration.
+
+Today every signed-in account can see every project — one install is one team, which is what self-hosting means. That rule lives in exactly one function, `canAccessProject` in `packages/core/src/auth.ts`, so growing into organisations and memberships later is a change there and nowhere else.
+
+See `.env.example` for `FOURIER_SECRET`, `FOURIER_SETUP_TOKEN`, `FOURIER_REQUIRE_AUTH` and the cross-origin settings.
+
 ## Agents: API and MCP
 
-There is no authentication in v1. Everything the dashboard shows comes from `/api/*`; the **API & MCP** page in the dashboard lists every endpoint and has a SQL playground.
+Everything the dashboard shows comes from `/api/*`; the **API & MCP** page lists every endpoint, mints read keys, and has a SQL playground.
 
 ```bash
-claude mcp add --transport http fourier http://localhost:5050/api/mcp
+claude mcp add --transport http fourier http://localhost:5050/api/mcp \
+  --header "Authorization: Bearer fr_YOUR_READ_KEY"
 ```
+
+The header is only needed once the instance has accounts — in development, MCP works without it.
 
 Tools: `list_projects`, `list_sources`, `get_overview`, `list_event_names`, `list_events`, `event_timeseries`, `event_property_keys`, `list_users`, `get_user`, `list_groups`, `get_group`, `list_touches`, `attribution_report`, `describe_schema`, `run_sql`. All read-only. `run_sql` runs arbitrary ClickHouse SELECTs with `readonly=1`, a keyword guard, and the project bound server-side via the `{project_id}` placeholder.
 
@@ -172,7 +199,7 @@ pnpm build        all packages
 
 ## Roadmap
 
-Authentication and API keys, saved reports (funnels, retention, trends), an event and property explorer, multi-project UI, and a single-process Docker image for non-Vercel self-hosting.
+Saved reports (funnels, retention, trends), an event and property explorer, multi-project UI, OIDC sign-in, per-write-key rate limiting, and a single-process Docker image for non-Vercel self-hosting.
 
 ## Contributing
 
