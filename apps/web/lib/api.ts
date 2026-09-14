@@ -94,6 +94,7 @@ export interface SessionUser {
 
 export interface AuthStatus {
   setup_required: boolean;
+  setup_token_required: boolean;
   auth_disabled: boolean;
   user: SessionUser | null;
 }

@@ -4,7 +4,7 @@
 </p>
 
 <p align="center">
-  <a href="https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FFourierHQ%2Ffourier&root-directory=apps%2Fweb&project-name=fourier&repository-name=fourier&env=CLICKHOUSE_URL,CLICKHOUSE_USER,CLICKHOUSE_PASSWORD,CLICKHOUSE_DATABASE&envDescription=ClickHouse%20connection%20(ClickHouse%20Cloud%20works%20out%20of%20the%20box)&envLink=https%3A%2F%2Fgithub.com%2FFourierHQ%2Ffourier%23clickhouse-cloud"><img src="https://vercel.com/button" alt="Deploy with Vercel" /></a>
+  <a href="https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FFourierHQ%2Ffourier&root-directory=apps%2Fweb&project-name=fourier&repository-name=fourier&env=CLICKHOUSE_URL,CLICKHOUSE_USER,CLICKHOUSE_PASSWORD,CLICKHOUSE_DATABASE,FOURIER_SECRET,FOURIER_SETUP_TOKEN&envDescription=ClickHouse%20connection%20%28ClickHouse%20Cloud%20works%20out%20of%20the%20box%29.%20FOURIER_SECRET%20signs%20sessions%20-%20paste%20any%20long%20random%20string.%20FOURIER_SETUP_TOKEN%20is%20optional%20and%20gates%20the%20create-first-account%20screen.&envLink=https%3A%2F%2Fgithub.com%2FFourierHQ%2Ffourier%23clickhouse-cloud"><img src="https://vercel.com/button" alt="Deploy with Vercel" /></a>
 </p>
 
 ---
@@ -55,6 +55,18 @@ Fourier does the rest: database, tables, materialised views, migrations on boot.
 ### Deploy to Vercel
 
 Click the button above, or import the repo manually with **Root Directory** set to `apps/web` and the four `CLICKHOUSE_*` variables from your ClickHouse Cloud service. Your deployment URL is both the dashboard and the ingest host; put it in `NEXT_PUBLIC_FOURIER_HOST` in the apps you instrument.
+
+Two more worth setting on Vercel specifically:
+
+```bash
+openssl rand -base64 32   # FOURIER_SECRET
+```
+
+`FOURIER_SECRET` signs session cookies. Fourier generates one on first boot if you leave it unset, but Vercel runs many instances and two of them starting at once briefly disagree about which generated secret won — which shows up as being signed out at random for the first minute. Setting it removes that window and gives you a way to end every session at once (change it).
+
+`FOURIER_SETUP_TOKEN` is optional and closes the gap between "deployment is live" and "you created your account" — in that window, whoever opens the URL first becomes the admin. Set it and the setup screen asks for it too.
+
+**Opening it for the first time** takes you to a create-your-account screen; the first account is the admin, and after that the same URL is a sign-in page. Ingest needs none of this — write keys work from the moment the deployment is live. If the first load says it can't reach the server, that is usually a ClickHouse Cloud service still waking up: wait a moment and press Try again.
 
 ## Instrument a Next.js app
 

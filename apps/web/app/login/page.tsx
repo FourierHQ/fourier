@@ -43,7 +43,7 @@ export default function LoginPage() {
     );
   }
 
-  return <Centered>{status.data?.setup_required ? <SetupForm /> : <LoginForm />}</Centered>;
+  return <Centered>{status.data?.setup_required ? <SetupForm tokenRequired={Boolean(status.data.setup_token_required)} /> : <LoginForm />}</Centered>;
 }
 
 function Centered({ children }: { children: React.ReactNode }) {
@@ -57,7 +57,7 @@ function Centered({ children }: { children: React.ReactNode }) {
   );
 }
 
-function SetupForm() {
+function SetupForm({ tokenRequired }: { tokenRequired: boolean }) {
   const router = useRouter();
   const setup = useSetup();
   const [name, setName] = useState("");
@@ -90,9 +90,11 @@ function SetupForm() {
           <Field label="Password" htmlFor="password" hint="At least 8 characters.">
             <Input id="password" type="password" required minLength={8} value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="new-password" />
           </Field>
-          <Field label="Setup token" htmlFor="token" hint="Only if FOURIER_SETUP_TOKEN is set on the server.">
-            <Input id="token" value={token} onChange={(e) => setToken(e.target.value)} placeholder="Optional" />
-          </Field>
+          {tokenRequired && (
+            <Field label="Setup token" htmlFor="token" hint="This server was configured to require one.">
+              <Input id="token" required value={token} onChange={(e) => setToken(e.target.value)} />
+            </Field>
+          )}
           {setup.error && <ErrorText>{setup.error.message}</ErrorText>}
           <Button type="submit" disabled={setup.isPending}>
             {setup.isPending ? "Creating…" : "Create account"}

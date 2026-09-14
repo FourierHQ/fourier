@@ -53,32 +53,61 @@ const ACCOUNT_COLUMNS = `id, email, name, password_hash, role, auth_provider, pr
 
 // ---------- signing secret ----------
 
-let secretCache: string | null = null;
+let secretCache: { value: string; at: number } | null = null;
+/**
+ * Only applies to the generated secret. Serverless platforms run many instances,
+ * and two of them booting at once can each generate a secret before seeing the
+ * other's. Oldest-wins resolution below settles which one survives; re-reading
+ * periodically is what lets the loser notice and converge, instead of signing
+ * tokens for its whole lifetime that every other instance rejects.
+ */
+const GENERATED_SECRET_TTL_MS = 60_000;
 
 /**
  * FOURIER_SECRET when set, otherwise a secret generated on first boot and kept
- * in `settings`. Generating it means a fresh install has working sessions with
- * no configuration; setting it explicitly is still better, because rotating the
- * environment variable is how you force every session to end.
+ * in `settings`.
+ *
+ * Generating it means a fresh install has working sessions with no
+ * configuration, which is what makes one-click deploys work. Set it explicitly
+ * in production anyway: it removes the convergence window described above, and
+ * rotating the environment variable is how you end every session at once.
  */
 export async function getSigningSecret(): Promise<string> {
-  if (secretCache) return secretCache;
   const fromEnv = process.env.FOURIER_SECRET?.trim();
-  if (fromEnv) {
-    secretCache = fromEnv;
-    return fromEnv;
-  }
-  const existing = await getSetting("signing_secret");
+  if (fromEnv) return fromEnv;
+
+  if (secretCache && Date.now() - secretCache.at < GENERATED_SECRET_TTL_MS) return secretCache.value;
+
+  const existing = await readGeneratedSecret();
   if (existing) {
-    secretCache = existing;
+    secretCache = { value: existing, at: Date.now() };
     return existing;
   }
-  const generated = randomBytes(32).toString("base64url");
-  await setSetting("signing_secret", generated);
-  // Another instance may have written first; re-read so every instance agrees.
-  const settled = (await getSetting("signing_secret")) ?? generated;
-  secretCache = settled;
+
+  await setSetting("signing_secret", randomBytes(32).toString("base64url"));
+  // Re-read rather than trusting what we just wrote: a concurrent instance may
+  // have written first, and oldest-wins means its value is the one that counts.
+  const settled = (await readGeneratedSecret()) ?? "";
+  secretCache = { value: settled, at: Date.now() };
   return settled;
+}
+
+/**
+ * Oldest row wins, not newest.
+ *
+ * `settings` is a ReplacingMergeTree keyed on `updated_at`, so a plain FINAL read
+ * returns the most recent write — which for concurrent first-boot writers is
+ * whichever instance was slowest, and changes as rows merge. Ordering by the
+ * oldest write instead gives every instance the same answer as soon as it can
+ * see both rows, so they converge on one secret rather than fighting over it.
+ */
+async function readGeneratedSecret(): Promise<string | null> {
+  const res = await getClient().query({
+    query: `SELECT value FROM settings WHERE key = 'signing_secret' AND value != '' ORDER BY updated_at ASC, value ASC LIMIT 1`,
+    format: "JSONEachRow",
+  });
+  const rows = (await res.json()) as { value: string }[];
+  return rows[0]?.value || null;
 }
 
 export function clearSecretCache() {
