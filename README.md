@@ -160,7 +160,7 @@ Getting there is a ladder, so nothing is in your way until it needs to be:
 
 | | |
 |---|---|
-| `pnpm dev` | No login. Clone, point at ClickHouse, look at data. |
+| `pnpm dev` | No login. Clone, point at ClickHouse, look at data. The sidebar says *No sign-in (dev)*. Run `FOURIER_REQUIRE_AUTH=true pnpm dev` to exercise the real flow locally. |
 | First deploy | A create-your-account screen. Until someone claims it, every read endpoint is closed. |
 | After that | Sign in, or send `Authorization: Bearer fr_…`. |
 

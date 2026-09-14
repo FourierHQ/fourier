@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Activity, Bot, Building2, Database, LayoutDashboard, LogOut, Moon, Plug, Sun, Users } from "lucide-react";
+import { Activity, Bot, Building2, Database, LayoutDashboard, LogOut, Moon, Plug, ShieldOff, Sun, Users } from "lucide-react";
 import { useTheme } from "next-themes";
 import {
   Sidebar,
@@ -124,18 +124,35 @@ export function AppSidebar() {
               <span>Theme</span>
             </SidebarMenuButton>
           </SidebarMenuItem>
-          {/* Hidden in development, where there is no login to sign out of. */}
-          {auth.data?.user && (
+          {/*
+            In development the API reports a synthetic account, so checking for a
+            user alone would render a sign-out that clears a cookie which was
+            never set and bounces straight back here. Say what is actually going
+            on instead — this is also the first place anyone wonders where the
+            login screen went.
+          */}
+          {auth.data?.auth_disabled ? (
             <SidebarMenuItem>
-              <SidebarMenuButton
-                tooltip={`Sign out (${auth.data.user.email})`}
-                onClick={() => logout.mutate(undefined, { onSuccess: () => router.replace("/login") })}
-                disabled={logout.isPending}
-              >
-                <LogOut />
-                <span className="truncate">{auth.data.user.name || auth.data.user.email}</span>
+              <SidebarMenuButton tooltip="Authentication is off in development. Run with FOURIER_REQUIRE_AUTH=true to see the real sign-in flow." asChild>
+                <div className="cursor-default">
+                  <ShieldOff />
+                  <span className="truncate text-xs text-muted-foreground">No sign-in (dev)</span>
+                </div>
               </SidebarMenuButton>
             </SidebarMenuItem>
+          ) : (
+            auth.data?.user && (
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  tooltip={`Sign out (${auth.data.user.email})`}
+                  onClick={() => logout.mutate(undefined, { onSuccess: () => router.replace("/login") })}
+                  disabled={logout.isPending}
+                >
+                  <LogOut />
+                  <span className="truncate">{auth.data.user.name || auth.data.user.email}</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            )
           )}
         </SidebarMenu>
       </SidebarFooter>
