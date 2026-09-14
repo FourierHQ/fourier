@@ -1,4 +1,4 @@
-import { configFromEnv, ensureDefaultProject, getProject, listProjects, migrate, ping, type Project } from "@fourier/core";
+import { configFromEnv, ensureDefaultProject, ensureDefaultSource, getProject, listProjects, migrate, ping, type Project } from "@fourier/core";
 
 let readyPromise: Promise<{ project: Project }> | null = null;
 
@@ -11,6 +11,7 @@ export function ready(): Promise<{ project: Project }> {
     readyPromise = (async () => {
       await migrate(configFromEnv());
       const project = await ensureDefaultProject();
+      await ensureDefaultSource(project);
       return { project };
     })().catch((err) => {
       readyPromise = null;

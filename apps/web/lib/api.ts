@@ -1,6 +1,6 @@
 "use client";
 
-import { useQuery, type UseQueryOptions } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient, type UseQueryOptions } from "@tanstack/react-query";
 import type {
   Attribution,
   AttributionDimension,
@@ -13,6 +13,7 @@ import type {
   Overview,
   Project,
   GroupAttribution,
+  Source,
   SqlResult,
   TimeseriesPoint,
   TouchRecord,
@@ -32,6 +33,7 @@ export type {
   GroupRecord,
   Overview,
   Project,
+  Source,
   SqlResult,
   TimeseriesPoint,
   TouchRecord,
@@ -71,6 +73,18 @@ export function useProjects() {
   return useQuery({ queryKey: ["projects"], queryFn: () => api<{ projects: Project[] }>("/api/projects").then((r) => r.projects) });
 }
 
+export function useSources() {
+  return useQuery({ queryKey: ["sources"], queryFn: () => api<{ sources: Source[] }>(`/api/projects/${PROJECT}/sources`).then((r) => r.sources) });
+}
+
+export function useCreateSource() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => api<{ source: Source }>(`/api/projects/${PROJECT}/sources`, { method: "POST", body: JSON.stringify({ name }) }).then((r) => r.source),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["sources"] }),
+  });
+}
+
 export function useOverview(opts?: Opts<{ project: Project; overview: Overview }>) {
   return useQuery({
     queryKey: ["overview"],
@@ -80,10 +94,10 @@ export function useOverview(opts?: Opts<{ project: Project; overview: Overview }
   });
 }
 
-export function useEventNames(days?: number) {
+export function useEventNames(days?: number, source?: string) {
   return useQuery({
-    queryKey: ["event-names", days],
-    queryFn: () => api<{ events: EventName[] }>(`/api/projects/${PROJECT}/events/names${qs({ days })}`).then((r) => r.events),
+    queryKey: ["event-names", days, source],
+    queryFn: () => api<{ events: EventName[] }>(`/api/projects/${PROJECT}/events/names${qs({ days, source })}`).then((r) => r.events),
     refetchInterval: LIVE_INTERVAL * 2,
   });
 }
@@ -91,6 +105,7 @@ export function useEventNames(days?: number) {
 export interface EventsParams {
   event?: string;
   type?: string;
+  source?: string;
   distinct_id?: string;
   group_id?: string;
   q?: string;
@@ -109,7 +124,7 @@ export function useEvents(params: EventsParams, opts?: Opts<{ events: EventRecor
   });
 }
 
-export function useTimeseries(params: { event?: string; group_id?: string; interval?: "hour" | "day" | "week" | "month"; from?: string; to?: string }) {
+export function useTimeseries(params: { event?: string; group_id?: string; source?: string; interval?: "hour" | "day" | "week" | "month"; from?: string; to?: string }) {
   return useQuery({
     queryKey: ["timeseries", params],
     queryFn: () => api<{ interval: string; series: TimeseriesPoint[] }>(`/api/projects/${PROJECT}/timeseries${qs(params)}`).then((r) => r.series),
@@ -118,7 +133,7 @@ export function useTimeseries(params: { event?: string; group_id?: string; inter
   });
 }
 
-export function useUsers(params: { q?: string; identified?: boolean; group_id?: string; order_by?: string; limit?: number; offset?: number }) {
+export function useUsers(params: { q?: string; identified?: boolean; group_id?: string; source?: string; order_by?: string; limit?: number; offset?: number }) {
   return useQuery({
     queryKey: ["users", params],
     queryFn: () => api<{ users: UserRecord[] }>(`/api/projects/${PROJECT}/users${qs(params)}`).then((r) => r.users),

@@ -15,6 +15,7 @@ export const GET = handle(async (req: Request, { params }: Ctx) => {
   const events = await listEvents(project.id, {
     event: s.get("event") ?? undefined,
     type: s.get("type") ?? undefined,
+    sourceId: s.get("source") ?? undefined,
     distinctId: s.get("distinct_id") ?? undefined,
     userId: s.get("user_id") ?? undefined,
     groupId: s.get("group_id") ?? undefined,

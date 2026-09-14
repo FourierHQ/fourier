@@ -16,6 +16,7 @@ export const GET = handle(async (req: Request, { params }: Ctx) => {
   const series = await eventTimeseries(project.id, {
     event: s.get("event") ?? undefined,
     groupId: s.get("group_id") ?? undefined,
+    sourceId: s.get("source") ?? undefined,
     interval,
     from: s.get("from") ?? undefined,
     to: s.get("to") ?? undefined,

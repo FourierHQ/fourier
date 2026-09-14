@@ -90,6 +90,12 @@ export interface FourierOptions {
   defaultContext?: Partial<Context>;
   /** Inactivity gap that starts a new session, in ms. Default 30 minutes. 0 disables sessions. */
   sessionTimeout?: number;
+  /**
+   * Domains that share this user's identity but can't share cookies, e.g. ["app.example.io", "example.io"].
+   * Links to them get `ajs_aid` (and `ajs_uid` when identified) appended so the visitor stays one person
+   * across sites. Matches the domain and its subdomains. On arrival, those parameters are read and removed.
+   */
+  crossDomain?: string[];
   /** Override the fetch implementation. */
   fetch?: typeof fetch;
 }

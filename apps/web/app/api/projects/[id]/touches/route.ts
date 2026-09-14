@@ -16,6 +16,7 @@ export const GET = handle(async (req: Request, { params }: Ctx) => {
   const touches = await listTouches(project.id, {
     personId: s.get("person_id") ?? undefined,
     groupId: s.get("group_id") ?? undefined,
+    sourceId: s.get("source") ?? undefined,
     kind: (s.get("kind") as TouchRecord["kind"] | null) ?? undefined,
     excludeDirect: s.get("exclude_direct") === "true",
     before: s.get("before") ?? undefined,

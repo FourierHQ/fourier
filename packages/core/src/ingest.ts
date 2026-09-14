@@ -35,6 +35,7 @@ export const batchSchema = z.object({
 
 export interface EventRow {
   project_id: string;
+  source_id: string;
   message_id: string;
   type: string;
   event: string;
@@ -73,6 +74,8 @@ export interface EventRow {
 }
 
 export interface IngestMeta {
+  /** Which source (write key) the batch arrived on. */
+  sourceId?: string;
   ip?: string;
   userAgent?: string;
   receivedAt?: Date;
@@ -153,6 +156,7 @@ export function normalize(project: Project, msg: IncomingMessage, meta: IngestMe
 
   return {
     project_id: project.id,
+    source_id: meta.sourceId ?? "default",
     message_id: msg.messageId ?? crypto.randomUUID(),
     type: msg.type,
     event: eventName,

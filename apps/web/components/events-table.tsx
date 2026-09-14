@@ -10,6 +10,7 @@ import { JsonPreview, JsonView } from "@/components/json-view";
 import { RelativeTime } from "@/components/relative-time";
 import { EmptyState } from "@/components/empty-state";
 import { eventLabel, shortId } from "@/lib/format";
+import { SourceBadge } from "@/components/source-badge";
 import type { EventRecord } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -93,6 +94,7 @@ export function EventsTable({
                   <div className="flex items-center gap-2">
                     <TypeBadge type={e.type} className="shrink-0" />
                     <span className="truncate font-medium">{eventLabel(e)}</span>
+                    <SourceBadge sourceId={e.source_id} className="hidden shrink-0 xl:inline-flex" />
                   </div>
                   {e.type === "page" && e.path && <div className="mt-0.5 truncate font-mono text-xs text-muted-foreground">{e.path}</div>}
                 </TableCell>

@@ -10,7 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { PageHeader } from "@/components/page-header";
 import { EventsTable } from "@/components/events-table";
 import { TimeseriesChart } from "@/components/timeseries-chart";
-import { useEventNames, useEvents, useTimeseries } from "@/lib/api";
+import { useEventNames, useEvents, useSources, useTimeseries } from "@/lib/api";
 import { eventLabel, formatNumber } from "@/lib/format";
 
 const ALL = "__all__";
@@ -19,6 +19,8 @@ function EventsView() {
   const params = useSearchParams();
   const router = useRouter();
   const event = params.get("event") ?? "";
+  const source = params.get("source") ?? "";
+  const sources = useSources();
   const [q, setQ] = useState(params.get("q") ?? "");
   const [debounced, setDebounced] = useState(q);
   const [limit, setLimit] = useState(100);
@@ -27,16 +29,18 @@ function EventsView() {
     return () => clearTimeout(t);
   }, [q]);
 
-  const names = useEventNames();
-  const events = useEvents({ event: event || undefined, q: debounced || undefined, limit });
-  const series = useTimeseries({ event: event || undefined, interval: "hour" });
+  const names = useEventNames(undefined, source || undefined);
+  const events = useEvents({ event: event || undefined, source: source || undefined, q: debounced || undefined, limit });
+  const series = useTimeseries({ event: event || undefined, source: source || undefined, interval: "hour" });
 
-  const setEvent = (v: string) => {
+  const setParam = (key: string) => (v: string) => {
     const next = new URLSearchParams(params.toString());
-    if (v && v !== ALL) next.set("event", v);
-    else next.delete("event");
+    if (v && v !== ALL) next.set(key, v);
+    else next.delete(key);
     router.replace(`/events${next.toString() ? `?${next}` : ""}`);
   };
+  const setEvent = setParam("event");
+  const setSource = setParam("source");
 
   return (
     <>
@@ -54,6 +58,21 @@ function EventsView() {
                 </button>
               )}
             </div>
+            {(sources.data?.length ?? 0) > 1 && (
+              <Select value={source || ALL} onValueChange={setSource}>
+                <SelectTrigger size="sm" className="w-40 text-xs">
+                  <SelectValue placeholder="All sources" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={ALL}>All sources</SelectItem>
+                  {sources.data!.map((s) => (
+                    <SelectItem key={s.id} value={s.id}>
+                      {s.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
             <Select value={event || ALL} onValueChange={setEvent}>
               <SelectTrigger size="sm" className="w-52 text-xs">
                 <SelectValue placeholder="All events" />
@@ -79,7 +98,7 @@ function EventsView() {
           </CardContent>
         </Card>
         <Card className="overflow-hidden py-0">
-          <EventsTable events={events.data?.events} loading={events.isLoading} emptyTitle={event || q ? "No matching events" : "No events yet"} emptyDescription={event || q ? "Try a different filter." : "Install the snippet to start receiving events."} />
+          <EventsTable events={events.data?.events} loading={events.isLoading} emptyTitle={event || q || source ? "No matching events" : "No events yet"} emptyDescription={event || q || source ? "Try a different filter." : "Install the snippet to start receiving events."} />
           {(events.data?.events.length ?? 0) >= limit && (
             <div className="border-t p-3 text-center">
               <Button variant="outline" size="sm" onClick={() => setLimit((l) => Math.min(l + 200, 1000))}>

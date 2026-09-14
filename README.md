@@ -106,6 +106,18 @@ The server also speaks Segment's HTTP tracking API (`POST /v1/batch`, `/v1/track
 
 ## Concepts
 
+### Sources: several sites and products, one set of users
+
+A project is one identity space. Inside it, create a **source** for each website, app, or product; each gets its own write key. Events record which source they came from, while users and companies are shared across all of them. So a visitor on your marketing site who later signs up in your app is one person, and a company's page shows which of your products its people use. Filter any view, endpoint, or MCP tool by `source`.
+
+Keeping the visitor one person across sites:
+
+- Subdomains of one domain share the anonymous id through the cookie: `cookieDomain: ".example.com"`.
+- Different domains can't share cookies, so list them in `crossDomain: ["app.example.io"]`. Links to those hosts are decorated with the anonymous id (`ajs_aid`, and `ajs_uid` once identified, the same parameters analytics.js uses) and read on arrival. `fourier.decorateUrl(url)` does the same for URLs you build yourself.
+- Signing in on any site with `identify(userId)` links everything the person did on every site, including before sign-up.
+
+Use separate projects only for genuinely separate user bases, such as different client businesses.
+
 ### People and identity
 
 `identify(userId, traits)` names the current visitor. Everything they did anonymously before that is attributed to them: the Users list, counts, funnels, and the person's timeline all resolve anonymous ids to the person they became. Resolution lives in the database, in the `identity_map`, `events_resolved`, and `person_stats` views, so agents writing SQL get the same answer as the dashboard. `alias(newId, previousId)` links two ids the same way. Conflicts, such as a shared device without `reset()`, resolve to the earliest link.
@@ -132,11 +144,11 @@ There is no authentication in v1. Everything the dashboard shows comes from `/ap
 claude mcp add --transport http fourier http://localhost:5050/api/mcp
 ```
 
-Tools: `list_projects`, `get_overview`, `list_event_names`, `list_events`, `event_timeseries`, `event_property_keys`, `list_users`, `get_user`, `list_groups`, `get_group`, `list_touches`, `attribution_report`, `describe_schema`, `run_sql`. All read-only. `run_sql` runs arbitrary ClickHouse SELECTs with `readonly=1`, a keyword guard, and the project bound server-side via the `{project_id}` placeholder.
+Tools: `list_projects`, `list_sources`, `get_overview`, `list_event_names`, `list_events`, `event_timeseries`, `event_property_keys`, `list_users`, `get_user`, `list_groups`, `get_group`, `list_touches`, `attribution_report`, `describe_schema`, `run_sql`. All read-only. `run_sql` runs arbitrary ClickHouse SELECTs with `readonly=1`, a keyword guard, and the project bound server-side via the `{project_id}` placeholder.
 
 ## Data model
 
-ClickHouse, all times UTC. `events` is the source of truth, one row per message. `distinct_id` is `user_id` when identified, otherwise `anonymous_id`; `person_id` is the resolved person. Query `events_resolved` rather than `events` for anything per person. `user_traits`, `group_traits`, and `identities` hold merged traits and id links. Materialised views keep `user_stats`, `group_stats`, `group_members`, `event_stats_daily`, and `touches` current on insert. Full description: `GET /api/projects/default/schema` or the `describe_schema` MCP tool.
+ClickHouse, all times UTC. `events` is the source of truth, one row per message, tagged with the `source_id` it arrived on. `distinct_id` is `user_id` when identified, otherwise `anonymous_id`; `person_id` is the resolved person. Query `events_resolved` rather than `events` for anything per person. `user_traits`, `group_traits`, and `identities` hold merged traits and id links. Materialised views keep `user_stats`, `group_stats`, `group_members`, `event_stats_daily`, and `touches` current on insert. Full description: `GET /api/projects/default/schema` or the `describe_schema` MCP tool.
 
 ## Repository
 

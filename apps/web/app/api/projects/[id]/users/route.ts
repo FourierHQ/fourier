@@ -16,6 +16,7 @@ export const GET = handle(async (req: Request, { params }: Ctx) => {
     search: s.get("q") ?? undefined,
     identifiedOnly: s.get("identified") === "true",
     groupId: s.get("group_id") ?? undefined,
+    sourceId: s.get("source") ?? undefined,
     limit: int(s.get("limit"), 50),
     offset: int(s.get("offset"), 0),
     orderBy: (s.get("order_by") as "last_seen" | "first_seen" | "event_count" | null) ?? undefined,

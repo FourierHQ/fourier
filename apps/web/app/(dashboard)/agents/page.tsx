@@ -29,8 +29,9 @@ const endpoints: [string, string, string][] = [
   ["GET", "/api/health", "ClickHouse connectivity and default project"],
   ["GET", "/api/projects", "List projects (id, name, write_key)"],
   ["GET", "/api/projects/default/overview", "Totals and last-24h activity"],
+  ["GET · POST", "/api/projects/default/sources", "Sources (sites / apps / products) and their write keys; POST { name } creates one"],
   ["GET", "/api/projects/default/events/names?days=30", "Distinct event names with counts and unique users"],
-  ["GET", "/api/projects/default/events?event=&distinct_id=&group_id=&q=&before=&limit=", "Raw events, newest first, cursor via before="],
+  ["GET", "/api/projects/default/events?event=&source=&distinct_id=&group_id=&q=&before=&limit=", "Raw events, newest first, cursor via before=. Most list endpoints accept source="],
   ["GET", "/api/projects/default/timeseries?event=&group_id=&interval=hour|day|week|month", "Counts and unique users per bucket"],
   ["GET", "/api/projects/default/properties?event=", "Property keys an event carries"],
   ["GET", "/api/projects/default/users?q=&identified=true&group_id=&order_by=&limit=&offset=", "Users with traits and stats"],
@@ -74,7 +75,7 @@ export default function AgentsPage() {
           <CardHeader>
             <CardTitle>MCP server</CardTitle>
             <CardDescription>
-              Streamable HTTP at <code className="font-mono text-xs">{host}/api/mcp</code>. Tools: list_event_names, list_events, event_timeseries, list_users, get_user, list_groups, get_group, list_touches, attribution_report, describe_schema, run_sql and more. Read-only.
+              Streamable HTTP at <code className="font-mono text-xs">{host}/api/mcp</code>. Tools: list_sources, list_event_names, list_events, event_timeseries, list_users, get_user, list_groups, get_group, list_touches, attribution_report, describe_schema, run_sql and more. Read-only.
             </CardDescription>
           </CardHeader>
           <CardContent>

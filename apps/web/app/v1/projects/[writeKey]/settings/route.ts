@@ -1,4 +1,4 @@
-import { getProjectByWriteKey } from "@fourier/core";
+import { resolveWriteKey } from "@fourier/core";
 import { ready } from "@/lib/db";
 import { error, handle, json, options } from "@/lib/http";
 
@@ -13,14 +13,15 @@ export const dynamic = "force-dynamic";
 export const GET = handle(async (req: Request, { params }: { params: Promise<{ writeKey: string }> }) => {
   await ready();
   const { writeKey } = await params;
-  const project = await getProjectByWriteKey(writeKey.replace(/\.json$/, ""));
-  if (!project) return error("Unknown writeKey", 404);
+  const resolved = await resolveWriteKey(writeKey.replace(/\.json$/, ""));
+  if (!resolved) return error("Unknown writeKey", 404);
+  const key = resolved.source.write_key;
   const url = new URL(req.url);
   const apiHost = `${url.host}/v1`;
   return json({
     integrations: {
       "Segment.io": {
-        apiKey: project.write_key,
+        apiKey: key,
         apiHost,
         protocol: url.protocol.replace(":", ""),
         unbundledIntegrations: [],

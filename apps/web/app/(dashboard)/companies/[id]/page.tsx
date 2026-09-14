@@ -16,6 +16,7 @@ import { RelativeTime } from "@/components/relative-time";
 import { CopyButton } from "@/components/copy-button";
 import { TimeseriesChart } from "@/components/timeseries-chart";
 import { AttributionCard } from "@/components/attribution";
+import { useSourceName } from "@/components/source-badge";
 import { useGroup, useTimeseries } from "@/lib/api";
 import { eventLabel, formatNumber } from "@/lib/format";
 
@@ -26,6 +27,7 @@ export default function CompanyPage() {
   const series = useTimeseries({ group_id: groupId, interval: "day" });
   const group = data?.group;
   const name = (group?.traits.name as string) ?? groupId;
+  const sourceName = useSourceName();
 
   return (
     <>
@@ -67,6 +69,21 @@ export default function CompanyPage() {
                     {group.traits.plan ? <Badge variant="secondary">{String(group.traits.plan)}</Badge> : null}
                     {group.traits.industry ? <Badge variant="outline">{String(group.traits.industry)}</Badge> : null}
                   </div>
+                  {group.sources.length > 0 && (
+                    <div>
+                      <div className="mb-1.5 text-xs text-muted-foreground">Products used</div>
+                      <div className="space-y-1">
+                        {group.sources.map((s) => (
+                          <div key={s.source_id} className="flex items-center justify-between gap-2 text-xs">
+                            <span className="truncate font-medium">{sourceName(s.source_id)}</span>
+                            <span className="shrink-0 text-muted-foreground">
+                              {formatNumber(s.user_count)} {s.user_count === 1 ? "user" : "users"} · {formatNumber(s.event_count)} events
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   <dl className="grid grid-cols-2 gap-3 text-sm">
                     <div>
                       <dt className="text-xs text-muted-foreground">Users</dt>

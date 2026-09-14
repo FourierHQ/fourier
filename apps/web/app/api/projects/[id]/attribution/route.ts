@@ -20,6 +20,7 @@ export const GET = handle(async (req: Request, { params }: Ctx) => {
     by,
     identifiedOnly: s.get("identified") === "true",
     groupId: s.get("group_id") ?? undefined,
+    sourceId: s.get("source") ?? undefined,
     from: s.get("from") ?? undefined,
     to: s.get("to") ?? undefined,
     limit: int(s.get("limit"), 50),

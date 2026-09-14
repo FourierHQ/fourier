@@ -184,6 +184,30 @@ function isObj(v: unknown): v is Record<string, unknown> {
   return !!v && typeof v === "object" && !Array.isArray(v);
 }
 
+// ---------- cross-domain identity ----------
+
+export const CROSS_DOMAIN_ANON_PARAM = "ajs_aid";
+export const CROSS_DOMAIN_USER_PARAM = "ajs_uid";
+
+/** Pull analytics.js-style identity params out of a query string. */
+export function readCrossDomainIds(search: string): { anonymousId?: string; userId?: string } {
+  const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
+  const out: { anonymousId?: string; userId?: string } = {};
+  const aid = params.get(CROSS_DOMAIN_ANON_PARAM);
+  const uid = params.get(CROSS_DOMAIN_USER_PARAM);
+  if (aid) out.anonymousId = aid;
+  if (uid) out.userId = uid;
+  return out;
+}
+
+export function hostMatches(host: string, domains: string[]): boolean {
+  const h = host.toLowerCase().replace(/:\d+$/, "");
+  return domains.some((d) => {
+    const dd = d.toLowerCase().replace(/^\./, "");
+    return h === dd || h.endsWith(`.${dd}`);
+  });
+}
+
 // ---------- emitter ----------
 
 type EventName = MessageType | "ready" | "flush" | "error" | "reset";
@@ -255,6 +279,8 @@ export class Fourier extends Emitter {
     this.options = { flushAt: 20, flushInterval: 1000, ...options, host };
     this.store = layeredStore(options.storage, options.cookieDomain);
     this.fetchImpl = options.fetch ?? (typeof fetch !== "undefined" ? fetch.bind(globalThis) : (undefined as never));
+    this.adoptCrossDomainIds();
+    this.bindCrossDomainLinks();
     this.bindUnload();
     this.readyPromise = Promise.resolve(this);
     queueMicrotask(() => this.emit("ready"));
@@ -280,6 +306,53 @@ export class Fourier extends Emitter {
   addSourceMiddleware(mw: Middleware): this {
     this.middlewares.push(mw);
     return this;
+  }
+
+  // ---- cross-domain ----
+
+  /** On arrival from a decorated link, adopt the ids and clean the URL. */
+  private adoptCrossDomainIds() {
+    if (!isBrowser) return;
+    const ids = readCrossDomainIds(location.search);
+    if (!ids.anonymousId && !ids.userId) return;
+    if (ids.anonymousId) this.store.set(ANON_KEY, ids.anonymousId);
+    if (ids.userId) this.store.set(USER_KEY, ids.userId);
+    try {
+      const url = new URL(location.href);
+      url.searchParams.delete(CROSS_DOMAIN_ANON_PARAM);
+      url.searchParams.delete(CROSS_DOMAIN_USER_PARAM);
+      history.replaceState(history.state, "", url.toString());
+    } catch {}
+  }
+
+  /** Append identity params to a URL that points at one of the crossDomain hosts. */
+  decorateUrl(href: string): string {
+    const domains = this.options.crossDomain ?? [];
+    if (domains.length === 0) return href;
+    try {
+      const url = new URL(href, isBrowser ? location.href : undefined);
+      if (isBrowser && url.host === location.host) return href;
+      if (!hostMatches(url.host, domains)) return href;
+      url.searchParams.set(CROSS_DOMAIN_ANON_PARAM, this.anonymousId());
+      const uid = this.userId();
+      if (uid) url.searchParams.set(CROSS_DOMAIN_USER_PARAM, uid);
+      return url.toString();
+    } catch {
+      return href;
+    }
+  }
+
+  /** Decorate outbound links at click time so the id is current. */
+  private bindCrossDomainLinks() {
+    if (!isBrowser || !(this.options.crossDomain?.length)) return;
+    const handler = (e: Event) => {
+      const target = (e.target as Element | null)?.closest?.("a[href]") as HTMLAnchorElement | null;
+      if (!target || !target.href) return;
+      const decorated = this.decorateUrl(target.href);
+      if (decorated !== target.href) target.href = decorated;
+    };
+    document.addEventListener("click", handler, true);
+    document.addEventListener("auxclick", handler, true);
   }
 
   // ---- sessions ----

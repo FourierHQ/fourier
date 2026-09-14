@@ -12,7 +12,7 @@
  * - Materialised views maintain per-user, per-group and per-event rollups.
  */
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export const statements: string[] = [
   `CREATE TABLE IF NOT EXISTS projects (
@@ -24,8 +24,21 @@ export const statements: string[] = [
   ) ENGINE = ReplacingMergeTree(updated_at)
   ORDER BY id`,
 
+  // A source is one website / app / product feeding a project. Each has its own write key;
+  // users and companies are shared across all sources in the project.
+  `CREATE TABLE IF NOT EXISTS sources (
+    id          String,
+    project_id  LowCardinality(String),
+    name        String,
+    write_key   String,
+    created_at  DateTime64(3, 'UTC') DEFAULT now64(3),
+    updated_at  DateTime64(3, 'UTC') DEFAULT now64(3)
+  ) ENGINE = ReplacingMergeTree(updated_at)
+  ORDER BY (project_id, id)`,
+
   `CREATE TABLE IF NOT EXISTS events (
     project_id      LowCardinality(String),
+    source_id       LowCardinality(String),
     message_id      String,
     type            LowCardinality(String),
     event           LowCardinality(String),
@@ -72,6 +85,7 @@ export const statements: string[] = [
   ORDER BY (project_id, event, timestamp, message_id)`,
 
   // v2 columns for installs created before they existed.
+  `ALTER TABLE events ADD COLUMN IF NOT EXISTS source_id LowCardinality(String) AFTER project_id`,
   `ALTER TABLE events ADD COLUMN IF NOT EXISTS person_id String AFTER group_id`,
   `ALTER TABLE events ADD COLUMN IF NOT EXISTS session_id String AFTER person_id`,
   `ALTER TABLE events ADD COLUMN IF NOT EXISTS session_start UInt8 DEFAULT 0 AFTER session_id`,
@@ -233,12 +247,29 @@ export const statements: string[] = [
   LEFT JOIN identity_map AS i ON i.project_id = s.project_id AND i.from_id = s.distinct_id
   GROUP BY project_id, person_id`,
 
+  // Which sources (products / sites) each person has been seen on.
+  `CREATE TABLE IF NOT EXISTS person_sources (
+    project_id   LowCardinality(String),
+    distinct_id  String,
+    source_id    LowCardinality(String),
+    first_seen   SimpleAggregateFunction(min, DateTime64(3, 'UTC')),
+    last_seen    SimpleAggregateFunction(max, DateTime64(3, 'UTC')),
+    event_count  SimpleAggregateFunction(sum, UInt64)
+  ) ENGINE = AggregatingMergeTree
+  ORDER BY (project_id, distinct_id, source_id)`,
+
+  `CREATE MATERIALIZED VIEW IF NOT EXISTS person_sources_mv TO person_sources AS
+  SELECT project_id, distinct_id, source_id, min(timestamp) AS first_seen, max(timestamp) AS last_seen, count() AS event_count
+  FROM events WHERE distinct_id != ''
+  GROUP BY project_id, distinct_id, source_id`,
+
   // ---- attribution touches ----
   //
   // One row per arrival: a session start, or any page view carrying UTMs or an external referrer.
   // kind = campaign (utm present) | referral (external referrer) | direct (neither).
   `CREATE TABLE IF NOT EXISTS touches (
     project_id     LowCardinality(String),
+    source_id      LowCardinality(String),
     message_id     String,
     distinct_id    String,
     anonymous_id   String,
@@ -260,9 +291,13 @@ export const statements: string[] = [
   ) ENGINE = ReplacingMergeTree
   ORDER BY (project_id, distinct_id, timestamp, message_id)`,
 
+  `ALTER TABLE touches ADD COLUMN IF NOT EXISTS source_id LowCardinality(String) AFTER project_id`,
+
+  // Recreated so it carries source_id (safe: MVs only affect future inserts).
+  `DROP VIEW IF EXISTS touches_mv`,
   `CREATE MATERIALIZED VIEW IF NOT EXISTS touches_mv TO touches AS
   SELECT
-    project_id, message_id, distinct_id, anonymous_id, user_id, group_id, session_id, timestamp,
+    project_id, source_id, message_id, distinct_id, anonymous_id, user_id, group_id, session_id, timestamp,
     multiIf(utm_source != '' OR utm_campaign != '', 'campaign', referrer_host != '' AND referrer_host != host, 'referral', 'direct') AS kind,
     utm_source, utm_medium, utm_campaign, utm_content, utm_term,
     referrer, referrer_host, url AS landing_url, path AS landing_path
@@ -289,8 +324,11 @@ export const statements: string[] = [
 export const schemaDoc = `
 Database: fourier (ClickHouse). All timestamps are UTC DateTime64(3); raw SQL returns them as "YYYY-MM-DD HH:MM:SS.mmm" in UTC.
 
+sources — websites / apps / products feeding a project, each with its own write key
+  id, project_id, name, write_key
+
 events — one row per message (track, page, screen, identify, group, alias)
-  project_id, message_id, type, event, name, category
+  project_id, source_id (which site/app sent it), message_id, type, event, name, category
   distinct_id (user_id if identified else anonymous_id), anonymous_id, user_id, group_id
   person_id (resolved at write time when known; prefer events_resolved.person_id), session_id, session_start
   timestamp, sent_at, received_at
@@ -310,8 +348,11 @@ identity_map — view: from_id (anonymous id or previous user id) -> to_id (user
 
 person_stats — view: per person_id: is_identified, first_seen, last_seen, event_count, group_id (latest company).
 
+person_sources (AggregatingMergeTree, GROUP BY project_id, distinct_id, source_id)
+  first_seen (min), last_seen (max), event_count (sum). Join via identity_map to get per-person product usage.
+
 touches — one row per arrival for attribution: session starts, and any page view with UTMs or an external referrer.
-  project_id, distinct_id, anonymous_id, user_id, group_id, session_id, timestamp
+  project_id, source_id, distinct_id, anonymous_id, user_id, group_id, session_id, timestamp
   kind ('campaign' | 'referral' | 'direct'), utm_source, utm_medium, utm_campaign, utm_content, utm_term,
   referrer, referrer_host, landing_url, landing_path
 touches_resolved — touches with person_id resolved. First touch = argMin(..., timestamp) per person_id,

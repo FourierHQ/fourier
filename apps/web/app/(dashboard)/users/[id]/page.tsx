@@ -14,6 +14,7 @@ import { RelativeTime } from "@/components/relative-time";
 import { UserAvatar } from "@/components/users-table";
 import { CopyButton } from "@/components/copy-button";
 import { AttributionCard } from "@/components/attribution";
+import { useSourceName } from "@/components/source-badge";
 import { useUser } from "@/lib/api";
 import { displayName, eventLabel, formatNumber } from "@/lib/format";
 
@@ -23,6 +24,7 @@ export default function UserPage() {
   const { data, isLoading, isError, error } = useUser(distinctId);
   const user = data?.user;
   const name = user ? displayName(user.traits, user.distinct_id) : distinctId;
+  const sourceName = useSourceName();
 
   return (
     <>
@@ -74,6 +76,21 @@ export default function UserPage() {
                       <dd className="font-medium"><RelativeTime value={user.last_seen} /></dd>
                     </div>
                   </dl>
+                  {user.sources.length > 0 && (
+                    <div>
+                      <div className="mb-1.5 text-xs text-muted-foreground">Seen on</div>
+                      <div className="space-y-1">
+                        {user.sources.map((s) => (
+                          <div key={s.source_id} className="flex items-center justify-between gap-2 text-xs">
+                            <span className="truncate font-medium">{sourceName(s.source_id)}</span>
+                            <span className="shrink-0 text-muted-foreground">
+                              {formatNumber(s.event_count)} events · first <RelativeTime value={s.first_seen} />
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   {user.groups.length > 0 && (
                     <div>
                       <div className="mb-1.5 text-xs text-muted-foreground">Companies</div>

@@ -93,6 +93,7 @@ export async function getOverview(projectId: string): Promise<Overview> {
 
 export interface EventRecord {
   message_id: string;
+  source_id: string;
   /** Resolved person: user_id, or the user an anonymous id later identified as, else the anonymous id. */
   person_id: string;
   type: string;
@@ -118,6 +119,7 @@ export interface EventRecord {
 
 export interface EventsFilter {
   event?: string;
+  sourceId?: string;
   type?: string;
   distinctId?: string;
   userId?: string;
@@ -139,6 +141,10 @@ export async function listEvents(projectId: string, f: EventsFilter = {}): Promi
   if (f.type) {
     where.push("type = {type:String}");
     params.type = f.type;
+  }
+  if (f.sourceId) {
+    where.push("source_id = {src:String}");
+    params.src = f.sourceId;
   }
   if (f.distinctId) {
     // everything this person did, under any of their ids
@@ -166,7 +172,7 @@ export async function listEvents(projectId: string, f: EventsFilter = {}): Promi
     params.s = f.search;
   }
   const rows = await q<Row>(
-    `SELECT message_id, person_id, type, event, name, distinct_id, anonymous_id, user_id, group_id,
+    `SELECT message_id, source_id, person_id, type, event, name, distinct_id, anonymous_id, user_id, group_id,
             timestamp, received_at, properties, traits, context, url, path, referrer, title, user_agent, locale, library_name
      FROM events_resolved
      WHERE ${where.join(" AND ")}
@@ -191,9 +197,13 @@ export interface EventName {
   last_seen: string;
 }
 
-export async function listEventNames(projectId: string, opts: { days?: number } = {}): Promise<EventName[]> {
+export async function listEventNames(projectId: string, opts: { days?: number; sourceId?: string } = {}): Promise<EventName[]> {
   const where = ["project_id = {p:String}"];
   const params: Record<string, unknown> = { p: projectId };
+  if (opts.sourceId) {
+    where.push("source_id = {src:String}");
+    params.src = opts.sourceId;
+  }
   if (opts.days) {
     where.push("timestamp >= now64(3) - INTERVAL {days:UInt32} DAY");
     params.days = opts.days;
@@ -215,7 +225,7 @@ export interface TimeseriesPoint {
 
 export async function eventTimeseries(
   projectId: string,
-  opts: { event?: string; interval?: "hour" | "day" | "week" | "month"; from?: string; to?: string; groupId?: string } = {},
+  opts: { event?: string; interval?: "hour" | "day" | "week" | "month"; from?: string; to?: string; groupId?: string; sourceId?: string } = {},
 ): Promise<TimeseriesPoint[]> {
   const interval = opts.interval ?? "day";
   const fn = { hour: "toStartOfHour", day: "toStartOfDay", week: "toStartOfWeek", month: "toStartOfMonth" }[interval];
@@ -228,6 +238,10 @@ export async function eventTimeseries(
   if (opts.groupId) {
     where.push("group_id = {gid:String}");
     params.gid = opts.groupId;
+  }
+  if (opts.sourceId) {
+    where.push("source_id = {src:String}");
+    params.src = opts.sourceId;
   }
   if (opts.from) {
     where.push("timestamp >= parseDateTime64BestEffort({from:String}, 3)");
@@ -273,6 +287,8 @@ export interface UserRecord {
 
 export interface UsersFilter {
   search?: string;
+  /** Only people seen on this source (site / app). */
+  sourceId?: string;
   identifiedOnly?: boolean;
   groupId?: string;
   limit?: number;
@@ -295,6 +311,12 @@ export async function listUsers(projectId: string, f: UsersFilter = {}): Promise
   if (f.groupId) {
     where.push("group_id = {gid:String}");
     params.gid = f.groupId;
+  }
+  if (f.sourceId) {
+    where.push(`r.person_id IN (SELECT if(i.to_id != '', i.to_id, ps.distinct_id) FROM person_sources AS ps
+      LEFT JOIN (SELECT from_id, to_id FROM identity_map WHERE project_id = {p:String}) AS i ON i.from_id = ps.distinct_id
+      WHERE ps.project_id = {p:String} AND ps.source_id = {src:String})`);
+    params.src = f.sourceId;
   }
   const order = { last_seen: "last_seen DESC", first_seen: "first_seen DESC", event_count: "event_count DESC" }[f.orderBy ?? "last_seen"];
   const rows = await q<Row>(
@@ -322,8 +344,17 @@ function mapUser(r: Row): UserRecord {
   };
 }
 
+export interface SourceUsage {
+  source_id: string;
+  first_seen: string;
+  last_seen: string;
+  event_count: number;
+}
+
 export interface UserDetail extends UserRecord {
   anonymous_ids: string[];
+  /** Which sites / apps this person has been seen on. */
+  sources: SourceUsage[];
   groups: { group_id: string; traits: Record<string, unknown> }[];
   top_events: { event: string; count: number }[];
 }
@@ -333,7 +364,7 @@ export async function getUser(projectId: string, distinctId: string): Promise<Us
   const personId = await resolvePersonId(projectId, distinctId);
   const ids = await personIds(projectId, personId);
   const params = { p: projectId, d: personId, ids };
-  const [users, groups, top] = await Promise.all([
+  const [users, groups, top, sources] = await Promise.all([
     q<Row>(
       `SELECT {d:String} AS distinct_id, max(s.is_identified) AS is_identified, min(s.first_seen) AS first_seen, max(s.last_seen) AS last_seen,
               sum(s.event_count) AS event_count, argMaxMerge(s.last_group_id) AS group_id, any(t.traits) AS traits
@@ -356,6 +387,12 @@ export async function getUser(projectId: string, distinctId: string): Promise<Us
        GROUP BY event ORDER BY count DESC LIMIT 10`,
       params,
     ),
+    q<Row>(
+      `SELECT source_id, min(first_seen) AS first_seen, max(last_seen) AS last_seen, sum(event_count) AS event_count
+       FROM person_sources WHERE project_id = {p:String} AND distinct_id IN ({ids:Array(String)})
+       GROUP BY source_id ORDER BY first_seen`,
+      params,
+    ),
   ]);
   if (!users[0] || Number(users[0].event_count) === 0) return null;
   const user = mapUser(users[0]);
@@ -364,6 +401,7 @@ export async function getUser(projectId: string, distinctId: string): Promise<Us
   return {
     ...user,
     anonymous_ids: ids.slice(1),
+    sources: sources.map((r) => ({ source_id: String(r.source_id), first_seen: String(r.first_seen), last_seen: String(r.last_seen), event_count: Number(r.event_count) })),
     groups: groups.map((r) => ({ group_id: String(r.group_id), traits: parseJson(r.traits) })),
     top_events: top.map((r) => ({ event: String(r.event), count: Number(r.count) })),
   };
@@ -420,11 +458,13 @@ function mapGroup(r: Row): GroupRecord {
 
 export interface GroupDetail extends GroupRecord {
   members: UserRecord[];
+  /** Sites / apps the company's members use, with how many of them use each. */
+  sources: (SourceUsage & { user_count: number })[];
   top_events: { event: string; count: number; users: number }[];
 }
 
 export async function getGroup(projectId: string, groupId: string): Promise<GroupDetail | null> {
-  const [groups, members, top] = await Promise.all([
+  const [groups, members, top, sources] = await Promise.all([
     q<Row>(
       `SELECT g.group_id AS group_id, any(g.traits) AS traits,
               min(s.first_seen) AS first_seen, max(s.last_seen) AS last_seen,
@@ -454,11 +494,18 @@ export async function getGroup(projectId: string, groupId: string): Promise<Grou
        GROUP BY event ORDER BY count DESC LIMIT 20`.replace("uniq(distinct_id)", "uniq(person_id)").replace("FROM events", "FROM events_resolved"),
       { p: projectId, g: groupId },
     ),
+    q<Row>(
+      `SELECT source_id, min(timestamp) AS first_seen, max(timestamp) AS last_seen, count() AS event_count, uniq(person_id) AS user_count
+       FROM events_resolved WHERE project_id = {p:String} AND group_id = {g:String}
+       GROUP BY source_id ORDER BY first_seen`,
+      { p: projectId, g: groupId },
+    ),
   ]);
   if (!groups[0]) return null;
   return {
     ...mapGroup(groups[0]),
     members: members.map(mapUser),
+    sources: sources.map((r) => ({ source_id: String(r.source_id), first_seen: String(r.first_seen), last_seen: String(r.last_seen), event_count: Number(r.event_count), user_count: Number(r.user_count) })),
     top_events: top.map((r) => ({ event: String(r.event), count: Number(r.count), users: Number(r.users) })),
   };
 }
@@ -507,6 +554,7 @@ export async function runSql(projectId: string, sql: string, opts: { limit?: num
 
 export interface TouchRecord {
   message_id: string;
+  source_id: string;
   person_id: string;
   distinct_id: string;
   group_id: string;
@@ -524,11 +572,12 @@ export interface TouchRecord {
   landing_path: string;
 }
 
-const TOUCH_COLS = `message_id, person_id, distinct_id, group_id, session_id, timestamp, kind,
+const TOUCH_COLS = `message_id, source_id, person_id, distinct_id, group_id, session_id, timestamp, kind,
   utm_source, utm_medium, utm_campaign, utm_content, utm_term, referrer, referrer_host, landing_url, landing_path`;
 
 export interface TouchesFilter {
   personId?: string;
+  sourceId?: string;
   groupId?: string;
   kind?: TouchRecord["kind"];
   /** Drop 'direct' arrivals, the usual choice for last-touch. */
@@ -555,6 +604,10 @@ function touchWhere(projectId: string, f: TouchesFilter) {
   if (f.kind) {
     where.push("kind = {kind:String}");
     params.kind = f.kind;
+  }
+  if (f.sourceId) {
+    where.push("source_id = {src:String}");
+    params.src = f.sourceId;
   }
   if (f.excludeDirect) where.push("kind != 'direct'");
   if (f.before) {
@@ -609,7 +662,7 @@ export async function groupAttribution(projectId: string, groupId: string, limit
   };
 }
 
-export type AttributionDimension = "utm_source" | "utm_medium" | "utm_campaign" | "referrer_host" | "landing_path" | "kind";
+export type AttributionDimension = "utm_source" | "utm_medium" | "utm_campaign" | "referrer_host" | "landing_path" | "kind" | "source_id";
 export type AttributionModel = "first" | "last";
 
 export interface AttributionRow {
@@ -625,18 +678,19 @@ export interface AttributionRow {
  */
 export async function attributionReport(
   projectId: string,
-  opts: { model?: AttributionModel; by?: AttributionDimension; identifiedOnly?: boolean; groupId?: string; from?: string; to?: string; limit?: number } = {},
+  opts: { model?: AttributionModel; by?: AttributionDimension; identifiedOnly?: boolean; groupId?: string; sourceId?: string; from?: string; to?: string; limit?: number } = {},
 ): Promise<AttributionRow[]> {
-  const dims: AttributionDimension[] = ["utm_source", "utm_medium", "utm_campaign", "referrer_host", "landing_path", "kind"];
+  const dims: AttributionDimension[] = ["utm_source", "utm_medium", "utm_campaign", "referrer_host", "landing_path", "kind", "source_id"];
   const by = dims.includes(opts.by ?? "utm_source") ? (opts.by ?? "utm_source") : "utm_source";
   const model = opts.model === "last" ? "last" : "first";
-  const { where, params } = touchWhere(projectId, { groupId: opts.groupId, from: undefined, after: opts.from, before: opts.to } as TouchesFilter);
+  const { where, params } = touchWhere(projectId, { groupId: opts.groupId, sourceId: opts.sourceId, after: opts.from, before: opts.to });
   params.limit = Math.min(Math.max(opts.limit ?? 50, 1), 500);
   // pick one touch per person, then group people by the dimension
+  const col = by === "source_id" ? "if(source_id = '', 'default', source_id)" : by;
   const pick =
     model === "first"
-      ? `argMin(${by}, timestamp)`
-      : `if(countIf(kind != 'direct') > 0, argMaxIf(${by}, timestamp, kind != 'direct'), argMax(${by}, timestamp))`;
+      ? `argMin(${col}, timestamp)`
+      : `if(countIf(kind != 'direct') > 0, argMaxIf(${col}, timestamp, kind != 'direct'), argMax(${col}, timestamp))`;
   const rows = await q<Row>(
     `SELECT
         if(key = '', if({by:String} = 'kind', 'direct', '(none)'), key) AS key,

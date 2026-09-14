@@ -1,4 +1,4 @@
-import { batchSchema, getProjectByWriteKey, ingest, messageSchema, type IncomingMessage } from "@fourier/core";
+import { batchSchema, ingest, messageSchema, resolveWriteKey, type IncomingMessage } from "@fourier/core";
 import { ready } from "./db";
 import { error, json } from "./http";
 
@@ -47,8 +47,9 @@ export async function handleIngest(req: Request, forcedType?: IncomingMessage["t
   const body = await readBody(req);
   const writeKey = writeKeyFrom(req, body);
   if (!writeKey) return error("Missing writeKey (body.writeKey or Basic auth)", 401);
-  const project = await getProjectByWriteKey(writeKey);
-  if (!project) return error("Unknown writeKey", 401);
+  const resolved = await resolveWriteKey(writeKey);
+  if (!resolved) return error("Unknown writeKey", 401);
+  const { project, source } = resolved;
 
   let messages: IncomingMessage[];
   if (Array.isArray(body.batch)) {
@@ -61,6 +62,6 @@ export async function handleIngest(req: Request, forcedType?: IncomingMessage["t
     messages = [parsed.data];
   }
 
-  const result = await ingest(project, messages, { ip: clientIp(req), userAgent: req.headers.get("user-agent") ?? undefined });
+  const result = await ingest(project, messages, { sourceId: source.id, ip: clientIp(req), userAgent: req.headers.get("user-agent") ?? undefined });
   return json({ success: true, ...result });
 }

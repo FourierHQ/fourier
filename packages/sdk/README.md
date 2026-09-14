@@ -52,6 +52,19 @@ fourier.track({ userId: "user_123", event: "Invoice Paid", properties: { amount:
 await fourier.closeAndFlush();
 ```
 
+## Several sites, one identity
+
+```ts
+fourier.init({
+  writeKey,                       // this site's own source key from the dashboard
+  host,
+  cookieDomain: ".example.com",   // subdomains share the anonymous id via the cookie
+  crossDomain: ["example.io"],    // links to other domains carry it as ?ajs_aid=… (and ?ajs_uid=… when identified)
+});
+fourier.decorateUrl("https://app.example.io/signup"); // for URLs you build yourself
+fourier.newSession();                                  // force a new session (attribution touch)
+```
+
 ## Companies / workspaces
 
 `group(groupId, traits)` registers a company and links the current user to it. Every subsequent event carries `context.groupId`, so the dashboard and the query API can roll users and events up by company.

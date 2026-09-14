@@ -13,6 +13,6 @@ export const GET = handle(async (req: Request, { params }: Ctx) => {
   if (!project) return error("Project not found", 404);
   const s = new URL(req.url).searchParams;
   const days = s.get("days") ? int(s.get("days"), 30) : undefined;
-  return json({ events: await listEventNames(project.id, { days }) });
+  return json({ events: await listEventNames(project.id, { days, sourceId: s.get("source") ?? undefined }) });
 });
 export const OPTIONS = options;

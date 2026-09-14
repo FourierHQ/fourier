@@ -1,7 +1,7 @@
 // Checks the analytics.js argument conventions against the built SDK (run `pnpm build` first).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Fourier } from "../dist/index.js";
+import { Fourier, readCrossDomainIds, hostMatches } from "../dist/index.js";
 
 function client(extra = {}) {
   const sent = [];
@@ -218,4 +218,30 @@ test("sessions can be disabled", async () => {
   const { f } = client({ sessionTimeout: 0 });
   const m = await f.track("a");
   assert.equal(m.context.session, undefined);
+});
+
+test("cross-domain: decorateUrl adds ajs_aid/ajs_uid only for listed domains", async () => {
+  const { f } = client({ crossDomain: ["cantina.xyz", "example.io"] });
+  const anon = f.anonymousId();
+  assert.equal(f.decorateUrl("https://google.com/x"), "https://google.com/x");
+  const a = new URL(f.decorateUrl("https://clarion.cantina.xyz/login?next=/home"));
+  assert.equal(a.searchParams.get("ajs_aid"), anon);
+  assert.equal(a.searchParams.get("ajs_uid"), null);
+  assert.equal(a.searchParams.get("next"), "/home");
+  await f.identify("u42");
+  const b = new URL(f.decorateUrl("https://example.io/"));
+  assert.equal(b.searchParams.get("ajs_uid"), "u42");
+  assert.equal(b.searchParams.get("ajs_aid"), anon);
+  // no crossDomain configured: untouched
+  const { f: plain } = client();
+  assert.equal(plain.decorateUrl("https://cantina.xyz/"), "https://cantina.xyz/");
+});
+
+test("cross-domain: readCrossDomainIds and hostMatches", () => {
+  assert.deepEqual(readCrossDomainIds("?ajs_aid=abc&ajs_uid=u1&x=1"), { anonymousId: "abc", userId: "u1" });
+  assert.deepEqual(readCrossDomainIds("?x=1"), {});
+  assert.ok(hostMatches("ai.cantina.xyz", ["cantina.xyz"]));
+  assert.ok(hostMatches("cantina.xyz:3000", [".cantina.xyz"]));
+  assert.ok(!hostMatches("notcantina.xyz", ["cantina.xyz"]));
+  assert.ok(!hostMatches("cantina.security", ["cantina.xyz"]));
 });

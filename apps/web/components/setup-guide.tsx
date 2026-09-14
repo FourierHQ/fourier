@@ -9,7 +9,9 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CodeBlock } from "@/components/code-block";
 import { CopyButton } from "@/components/copy-button";
-import { useOverview } from "@/lib/api";
+import { useCreateSource, useOverview, useSources, type Source } from "@/lib/api";
+import { Input } from "@/components/ui/input";
+import { Plus } from "lucide-react";
 
 export function useHost() {
   const [host, setHost] = useState(process.env.NEXT_PUBLIC_FOURIER_HOST ?? "");
@@ -19,10 +21,63 @@ export function useHost() {
   return host || "http://localhost:5050";
 }
 
+function SourcesPanel({ selected, onSelect }: { selected: Source | null; onSelect: (s: Source) => void }) {
+  const sources = useSources();
+  const create = useCreateSource();
+  const [name, setName] = useState("");
+  const [adding, setAdding] = useState(false);
+  const submit = async () => {
+    const n = name.trim();
+    if (!n) return;
+    const s = await create.mutateAsync(n);
+    setName("");
+    setAdding(false);
+    onSelect(s);
+  };
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center gap-1.5">
+        {(sources.data ?? []).map((s) => (
+          <Button key={s.id} size="sm" variant={selected?.id === s.id ? "default" : "outline"} onClick={() => onSelect(s)}>
+            {s.name}
+          </Button>
+        ))}
+        {adding ? (
+          <form
+            className="flex items-center gap-1.5"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void submit();
+            }}
+          >
+            <Input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Marketing site" className="h-8 w-48 text-xs" />
+            <Button size="sm" type="submit" disabled={create.isPending || !name.trim()}>
+              Add
+            </Button>
+            <Button size="sm" variant="ghost" type="button" onClick={() => setAdding(false)}>
+              Cancel
+            </Button>
+          </form>
+        ) : (
+          <Button size="sm" variant="ghost" onClick={() => setAdding(true)}>
+            <Plus className="size-3.5" /> Add source
+          </Button>
+        )}
+      </div>
+      <p className="text-xs text-muted-foreground">
+        One source per website, app, or product. Each gets its own write key. Users and companies are shared across all of them, so a visitor on your marketing site and a user in your app are the same person.
+      </p>
+    </div>
+  );
+}
+
 export function SetupGuide({ compact = false }: { compact?: boolean }) {
   const { data } = useOverview();
   const host = useHost();
-  const writeKey = data?.project.write_key ?? "…";
+  const sources = useSources();
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selected = sources.data?.find((s) => s.id === selectedId) ?? sources.data?.[0] ?? null;
+  const writeKey = selected?.write_key ?? data?.project.write_key ?? "…";
   const receiving = (data?.overview.total_events ?? 0) > 0;
 
   const envSnippet = `NEXT_PUBLIC_FOURIER_WRITE_KEY=${writeKey}\nNEXT_PUBLIC_FOURIER_HOST=${host}`;
@@ -110,6 +165,22 @@ AnalyticsBrowser.load(
   { writeKey: "${writeKey}", cdnURL: "${host}" },
   { integrations: { "Segment.io": { apiHost: "${host.replace(/^https?:\/\//, "")}/v1", protocol: "${host.startsWith("https") ? "https" : "http"}" } } },
 );`;
+  const crossDomain = `// Several sites, one identity. Put this in each site's provider / init.
+<FourierProvider
+  writeKey={process.env.NEXT_PUBLIC_FOURIER_WRITE_KEY!}   // this site's own source key
+  host={process.env.NEXT_PUBLIC_FOURIER_HOST!}
+  // Subdomains of one domain share the anonymous id through the cookie:
+  cookieDomain=".example.com"
+  // Different domains can't share cookies, so links to these hosts carry the id
+  // (?ajs_aid=… / ?ajs_uid=…, same parameters analytics.js uses) and it is read on arrival:
+  crossDomain={["example.io", "app.example.io"]}
+>
+
+// Same thing with the plain client:
+fourier.init({ writeKey, host, cookieDomain: ".example.com", crossDomain: ["example.io"] });
+
+// Manually decorate a URL you build yourself (buttons, redirects, emails):
+const url = fourier.decorateUrl("https://app.example.io/signup");`;
   const curl = `curl -X POST ${host}/v1/track \\
   -H "Content-Type: application/json" \\
   -d '{"writeKey":"${writeKey}","userId":"user_123","event":"Test Event","properties":{"source":"curl"}}'`;
@@ -128,8 +199,9 @@ AnalyticsBrowser.load(
         </CardHeader>
         <CardContent className="space-y-3">
           <CodeBlock code="pnpm add fourier" />
+          <SourcesPanel selected={selected} onSelect={(s) => setSelectedId(s.id)} />
           <div className="flex flex-wrap items-center gap-2 text-sm">
-            <span className="text-muted-foreground">Write key</span>
+            <span className="text-muted-foreground">Write key{selected ? ` for ${selected.name}` : ""}</span>
             <code className="rounded bg-muted px-2 py-0.5 font-mono text-xs">{writeKey}</code>
             <CopyButton value={writeKey} />
             <span className="ml-2 text-muted-foreground">Host</span>
@@ -152,6 +224,7 @@ AnalyticsBrowser.load(
               <TabsTrigger value="pages">Pages Router</TabsTrigger>
               <TabsTrigger value="server">Server</TabsTrigger>
               <TabsTrigger value="segment">From Segment</TabsTrigger>
+              <TabsTrigger value="multi">Multiple sites</TabsTrigger>
               <TabsTrigger value="curl">cURL</TabsTrigger>
             </TabsList>
             <TabsContent value="app" className="space-y-3 pt-3">
@@ -166,6 +239,15 @@ AnalyticsBrowser.load(
             </TabsContent>
             <TabsContent value="segment" className="pt-3">
               <CodeBlock title="Drop-in replacement" code={migrate} />
+            </TabsContent>
+            <TabsContent value="multi" className="space-y-3 pt-3">
+              <p className="text-sm text-muted-foreground">
+                Add one source per site above and use its write key in that site. Then keep the visitor one person across sites:
+              </p>
+              <CodeBlock title="Cross-site identity" code={crossDomain} />
+              <p className="text-xs text-muted-foreground">
+                When the user signs in on any site, <code className="font-mono">identify(userId)</code> with the same id links everything they did on every site, including anonymous browsing before sign-up.
+              </p>
             </TabsContent>
             <TabsContent value="curl" className="pt-3">
               <CodeBlock code={curl} />
