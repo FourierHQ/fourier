@@ -20,7 +20,7 @@ Fourier replaces the Segment + Amplitude (or Mixpanel) pair with one thing you r
 
 ## Quick start
 
-Requirements: Node 20+, pnpm, and ClickHouse (a local binary, Docker, or ClickHouse Cloud).
+Requirements: Node 22+ (see `.nvmrc`), pnpm, and ClickHouse (a local binary, Docker, or ClickHouse Cloud).
 
 ```bash
 git clone https://github.com/FourierHQ/fourier.git && cd fourier
