@@ -14,6 +14,7 @@
     "test": "pnpm --filter @fourierhq/sdk test",
     "typecheck": "pnpm -r typecheck",
     "clickhouse": "clickhouse server --config-file=./infra/clickhouse/config.xml",
+    "brand": "node brand/generate.mjs",
     "seed": "pnpm --filter @fourierhq/web seed",
     "mcp": "pnpm --filter @fourierhq/web mcp"
   },

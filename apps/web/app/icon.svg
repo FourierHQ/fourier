@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="Fourier">
+  <rect width="64" height="64" rx="14" fill="#141414"/>
+  <rect x="19.76" y="20.44" width="4.08" height="28.56" rx="0.68" fill="#00FFAE"/>
+  <rect x="26.56" y="15" width="6.12" height="28.56" rx="0.68" fill="#00FFAE"/>
+  <rect x="35.4" y="20.44" width="8.84" height="28.56" rx="0.68" fill="#00FFAE"/>
+</svg>

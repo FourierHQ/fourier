@@ -1,5 +1,9 @@
 <p align="center">
-  <strong>Fourier</strong><br/>
+  <img src="brand/lockup-on-onyx.png#gh-dark-mode-only" alt="Fourier" width="233" />
+  <img src="brand/lockup-on-paper.png#gh-light-mode-only" alt="Fourier" width="233" />
+</p>
+
+<p align="center">
   Open source product analytics on ClickHouse. The analytics.js API you already use, companies as a first-class entity, and an API + MCP server so agents can query everything.
 </p>
 
@@ -197,6 +201,7 @@ packages/sdk          `fourier` npm package: browser, Next.js, and server client
 packages/core         ClickHouse schema, migrations, ingest, queries
 examples/nextjs-demo  Instrumented example app with attribution test controls
 infra/clickhouse      Local ClickHouse config and a docker-compose alternative
+brand                 Mark, palette, and the generator for every icon and favicon
 ```
 
 ```
@@ -207,7 +212,12 @@ pnpm mcp          MCP server over stdio (same tools as /api/mcp)
 pnpm test         SDK analytics.js parity tests
 pnpm typecheck    all packages
 pnpm build        all packages
+pnpm brand        regenerate every icon, favicon, and social card from brand/
 ```
+
+## Brand
+
+The mark, the palette, and every icon come from [`brand/`](brand/README.md). Three colours for now — onyx `#141414`, platinum `#EEF0F2`, mint `#00FFAE` — and a dependency-free generator behind `pnpm brand` that rebuilds every favicon, app icon and social card from them. Change a colour in one place and everything follows.
 
 ## Roadmap
 
