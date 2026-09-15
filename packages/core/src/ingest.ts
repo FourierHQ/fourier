@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { getClient } from "./client";
+import { getDataClient } from "./client";
+import { DEFAULT_ENVIRONMENT, type Environment } from "./environments";
 import type { Project } from "./projects";
 
 const json = z.record(z.string(), z.unknown());
@@ -196,9 +197,9 @@ export function normalize(project: Project, msg: IncomingMessage, meta: IngestMe
   };
 }
 
-async function loadTraits(table: "user_traits" | "group_traits", idCol: "user_id" | "group_id", projectId: string, ids: string[]) {
+async function loadTraits(environment: Environment, table: "user_traits" | "group_traits", idCol: "user_id" | "group_id", projectId: string, ids: string[]) {
   if (ids.length === 0) return new Map<string, Record<string, unknown>>();
-  const res = await getClient().query({
+  const res = await getDataClient(environment).query({
     query: `SELECT ${idCol} AS id, traits FROM ${table} FINAL WHERE project_id = {p:String} AND ${idCol} IN ({ids:Array(String)})`,
     query_params: { p: projectId, ids },
     format: "JSONEachRow",
@@ -216,10 +217,10 @@ async function loadTraits(table: "user_traits" | "group_traits", idCol: "user_id
 }
 
 /** Known id -> user_id links for the given ids (anonymous ids or previous user ids). */
-async function loadIdentityLinks(projectId: string, ids: string[]): Promise<Map<string, string>> {
+async function loadIdentityLinks(environment: Environment, projectId: string, ids: string[]): Promise<Map<string, string>> {
   const out = new Map<string, string>();
   if (ids.length === 0) return out;
-  const res = await getClient().query({
+  const res = await getDataClient(environment).query({
     query: `SELECT from_id, to_id FROM identity_map WHERE project_id = {p:String} AND from_id IN ({ids:Array(String)})`,
     query_params: { p: projectId, ids },
     format: "JSONEachRow",
@@ -234,10 +235,19 @@ export interface IngestResult {
 }
 
 /**
- * Persist a batch. Writes events, merges user and group traits, records identity links.
+ * Persist a batch into one environment's database.
+ *
+ * The environment is decided by the write key the request authenticated with, never by
+ * anything in the payload — a preview deployment holds only the preview key, so it
+ * cannot reach production's tables however its client is configured.
  */
-export async function ingest(project: Project, messages: IncomingMessage[], meta: IngestMeta = {}): Promise<IngestResult> {
-  const client = getClient();
+export async function ingest(
+  project: Project,
+  messages: IncomingMessage[],
+  meta: IngestMeta = {},
+  environment: Environment = DEFAULT_ENVIRONMENT,
+): Promise<IngestResult> {
+  const client = getDataClient(environment);
   const rows: EventRow[] = [];
   const accepted: IncomingMessage[] = [];
   let rejected = 0;
@@ -297,7 +307,7 @@ export async function ingest(project: Project, messages: IncomingMessage[], meta
 
   // --- person_id: resolve anonymous rows against links known before this batch and within it ---
   const unresolved = [...new Set(rows.filter((r) => !r.user_id && r.anonymous_id).map((r) => r.anonymous_id))];
-  const known = await loadIdentityLinks(project.id, unresolved.filter((id) => !links.has(id)));
+  const known = await loadIdentityLinks(environment, project.id, unresolved.filter((id) => !links.has(id)));
   for (const r of rows) {
     if (r.user_id) {
       // one level of user -> user alias recorded in this batch
@@ -310,8 +320,8 @@ export async function ingest(project: Project, messages: IncomingMessage[], meta
   // Ensure a group row exists even when only referenced (no traits yet).
   const seenGroups = new Set(rows.filter((r) => r.group_id).map((r) => r.group_id));
   const [existingUsers, existingGroups] = await Promise.all([
-    loadTraits("user_traits", "user_id", project.id, [...userTraitUpdates.keys()]),
-    loadTraits("group_traits", "group_id", project.id, [...new Set([...groupTraitUpdates.keys(), ...seenGroups])]),
+    loadTraits(environment, "user_traits", "user_id", project.id, [...userTraitUpdates.keys()]),
+    loadTraits(environment, "group_traits", "group_id", project.id, [...new Set([...groupTraitUpdates.keys(), ...seenGroups])]),
   ]);
 
   const userTraitRows = [...userTraitUpdates].map(([user_id, t]) => ({

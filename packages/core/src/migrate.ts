@@ -1,5 +1,6 @@
-import { configFromEnv, getAdminClient, getClient, type ClickHouseConfig } from "./client";
-import { SCHEMA_VERSION, statements, type Statement } from "./schema";
+import { configFor, configFromEnv, getAdminClient, getClient, isControlDatabase, type ClickHouseConfig } from "./client";
+import { ENVIRONMENTS, type Environment } from "./environments";
+import { controlStatements, dataStatements, migrationsStatement, SCHEMA_VERSION, statements, type Statement } from "./schema";
 
 /**
  * ClickHouse Cloud replicates table metadata between replicas; an ALTER issued while the
@@ -43,7 +44,10 @@ function shouldRun(stmt: Statement, current: number): boolean {
   return fresh || behind; // "change"
 }
 
-export async function migrate(config: ClickHouseConfig = configFromEnv()): Promise<{ version: number; created: boolean; ran: number }> {
+export async function migrate(
+  config: ClickHouseConfig = configFromEnv(),
+  stmts: Statement[] = statements,
+): Promise<{ version: number; created: boolean; ran: number }> {
   const admin = getAdminClient(config);
   await runWithRetry(() => admin.command({ query: `CREATE DATABASE IF NOT EXISTS ${escapeIdent(config.database)}` }));
   await admin.close();
@@ -51,7 +55,7 @@ export async function migrate(config: ClickHouseConfig = configFromEnv()): Promi
   const client = getClient(config);
   const current = await storedVersion(client);
   let ran = 0;
-  for (const stmt of statements) {
+  for (const stmt of stmts) {
     if (!shouldRun(stmt, current)) continue;
     const sql = typeof stmt === "string" ? stmt : stmt.sql;
     await runWithRetry(() => client.command({ query: sql, clickhouse_settings: { wait_end_of_query: 1 } }));
@@ -61,6 +65,27 @@ export async function migrate(config: ClickHouseConfig = configFromEnv()): Promi
     await client.insert({ table: "_migrations", values: [{ version: SCHEMA_VERSION }], format: "JSONEachRow", clickhouse_settings: { async_insert: 0 } });
   }
   return { version: SCHEMA_VERSION, created: current === 0, ran };
+}
+
+/**
+ * Migrate every environment. The base database gets the control plane plus production's
+ * own event tables; each other environment gets a database with the event tables only.
+ *
+ * Run in series rather than in parallel: ClickHouse Cloud replicates table metadata
+ * between replicas and dislikes concurrent DDL, which is the same reason `runWithRetry`
+ * exists. Three databases of idempotent DDL is a boot-time cost worth paying once.
+ */
+export async function migrateAll(
+  config: ClickHouseConfig = configFromEnv(),
+): Promise<Record<Environment, { version: number; created: boolean; ran: number }>> {
+  const out = {} as Record<Environment, { version: number; created: boolean; ran: number }>;
+  for (const environment of ENVIRONMENTS) {
+    const stmts = isControlDatabase(environment)
+      ? [...controlStatements, ...dataStatements, migrationsStatement]
+      : [...dataStatements, migrationsStatement];
+    out[environment] = await migrate(configFor(environment, config), stmts);
+  }
+  return out;
 }
 
 export async function ping(config: ClickHouseConfig = configFromEnv()): Promise<{ ok: boolean; error?: string; version?: string }> {

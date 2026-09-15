@@ -3,7 +3,7 @@
  * companies (groups), users, page views and product events.
  *   pnpm seed
  */
-import { configFromEnv, ensureDefaultProject, ingest, migrate, type IncomingMessage } from "@fourierhq/core";
+import { configFromEnv, ensureDefaultProject, ingest, migrateAll, parseEnvironment, type IncomingMessage } from "@fourierhq/core";
 
 const COMPANIES = [
   { id: "acme", name: "Acme Inc", plan: "enterprise", industry: "Manufacturing", seats: 120 },
@@ -49,7 +49,9 @@ function weighted() {
 }
 
 async function main() {
-  await migrate(configFromEnv());
+  await migrateAll(configFromEnv());
+  // Seed wherever you point it: FOURIER_SEED_ENVIRONMENT=preview fills the preview database.
+  const environment = parseEnvironment(process.env.FOURIER_SEED_ENVIRONMENT);
   const project = await ensureDefaultProject();
   const now = Date.now();
   const DAY = 86_400_000;
@@ -128,7 +130,7 @@ async function main() {
 
   let accepted = 0;
   for (let i = 0; i < messages.length; i += 500) {
-    const r = await ingest(project, messages.slice(i, i + 500));
+    const r = await ingest(project, messages.slice(i, i + 500), {}, environment);
     accepted += r.accepted;
   }
   console.log(`Seeded ${accepted} events into project "${project.name}" (${project.id})`);

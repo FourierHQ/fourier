@@ -12,7 +12,7 @@
  * - Materialised views maintain per-user, per-group and per-event rollups.
  */
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 /**
  * A migration statement. Plain strings are idempotent `CREATE ... IF NOT EXISTS` and run on
@@ -23,7 +23,13 @@ export const SCHEMA_VERSION = 4;
  */
 export type Statement = string | { sql: string; when: "upgrade" | "change" };
 
-export const statements: Statement[] = [
+/**
+ * Tables that exist once for the whole install: who can sign in, what projects and
+ * sources exist, and which write key belongs to which source and environment. These
+ * live in the base database only. Environments share them by design — a source is
+ * defined once, not redefined per environment.
+ */
+export const controlStatements: Statement[] = [
   `CREATE TABLE IF NOT EXISTS projects (
     id          String,
     name        String,
@@ -45,6 +51,82 @@ export const statements: Statement[] = [
   ) ENGINE = ReplacingMergeTree(updated_at)
   ORDER BY (project_id, id)`,
 
+
+  // One write key per (source, environment). The source is defined once — "Marketing
+  // site" is the same source id in every environment, so a source filter means the
+  // same thing wherever you are — and each environment issues its own key against it.
+  // The key is what tells ingest which database to write to, so a preview deployment
+  // cannot claim to be production: it never holds production's key.
+  `CREATE TABLE IF NOT EXISTS source_keys (
+    project_id  LowCardinality(String),
+    source_id   LowCardinality(String),
+    environment LowCardinality(String),
+    write_key   String,
+    revoked     UInt8 DEFAULT 0,
+    created_at  DateTime64(3, 'UTC') DEFAULT now64(3),
+    updated_at  DateTime64(3, 'UTC') DEFAULT now64(3)
+  ) ENGINE = ReplacingMergeTree(updated_at)
+  ORDER BY (project_id, source_id, environment)`,
+  // ---- auth / app state ----
+  //
+  // Small, low-write, edit-in-place tables. Same ReplacingMergeTree + FINAL pattern
+  // as `projects` and `sources`, so auth adds no second database: the install stays
+  // a Next.js app and a ClickHouse service. `deleted` is a tombstone because
+  // ClickHouse deletes are async mutations — every read filters it out.
+
+  // Named `accounts` rather than `users`: in this product a "user" is someone
+  // you track, and these are the people who sign in to look at them.
+  `CREATE TABLE IF NOT EXISTS accounts (
+    id               String,
+    email            String,
+    name             String,
+    password_hash    String,
+    role             LowCardinality(String) DEFAULT 'admin',
+    -- Present from the first release so adding Google/OIDC later is additive
+    -- rather than a migration: local accounts simply carry provider = 'local'.
+    auth_provider    LowCardinality(String) DEFAULT 'local',
+    provider_user_id String,
+    -- Bumped to invalidate every outstanding token for this user (logout
+    -- everywhere, password change). Stateless sessions need this to be revocable.
+    token_version    UInt32 DEFAULT 1,
+    last_login_at    DateTime64(3, 'UTC') DEFAULT toDateTime64(0, 3),
+    deleted          UInt8 DEFAULT 0,
+    created_at       DateTime64(3, 'UTC') DEFAULT now64(3),
+    updated_at       DateTime64(3, 'UTC') DEFAULT now64(3)
+  ) ENGINE = ReplacingMergeTree(updated_at)
+  ORDER BY id`,
+
+  // Read credentials for agents, MCP clients and scripts. Only the hash is
+  // stored; the plaintext key is shown once at creation.
+  `CREATE TABLE IF NOT EXISTS api_keys (
+    id           String,
+    account_id   String,
+    name         String,
+    key_hash     String,
+    prefix       String,
+    last_used_at DateTime64(3, 'UTC') DEFAULT toDateTime64(0, 3),
+    deleted      UInt8 DEFAULT 0,
+    created_at   DateTime64(3, 'UTC') DEFAULT now64(3),
+    updated_at   DateTime64(3, 'UTC') DEFAULT now64(3)
+  ) ENGINE = ReplacingMergeTree(updated_at)
+  ORDER BY id`,
+
+  // Instance-wide key/value. Holds the generated signing secret so a fresh
+  // install needs no environment variable to have working sessions.
+  `CREATE TABLE IF NOT EXISTS settings (
+    key        String,
+    value      String,
+    updated_at DateTime64(3, 'UTC') DEFAULT now64(3)
+  ) ENGINE = ReplacingMergeTree(updated_at)
+  ORDER BY key`,
+];
+
+/**
+ * Event data. Created once per environment database, so production, preview and
+ * development each hold a complete, separate copy of the person graph. Nothing here
+ * carries an environment column: the database is the environment.
+ */
+export const dataStatements: Statement[] = [
   `CREATE TABLE IF NOT EXISTS events (
     project_id      LowCardinality(String),
     source_id       LowCardinality(String),
@@ -317,69 +399,28 @@ export const statements: Statement[] = [
   FROM touches AS t
   LEFT JOIN identity_map AS i
     ON i.project_id = t.project_id AND i.from_id = if(t.user_id != '', t.user_id, t.anonymous_id)` },
-  // ---- auth / app state ----
-  //
-  // Small, low-write, edit-in-place tables. Same ReplacingMergeTree + FINAL pattern
-  // as `projects` and `sources`, so auth adds no second database: the install stays
-  // a Next.js app and a ClickHouse service. `deleted` is a tombstone because
-  // ClickHouse deletes are async mutations — every read filters it out.
+];
 
-  // Named `accounts` rather than `users`: in this product a "user" is someone
-  // you track, and these are the people who sign in to look at them.
-  `CREATE TABLE IF NOT EXISTS accounts (
-    id               String,
-    email            String,
-    name             String,
-    password_hash    String,
-    role             LowCardinality(String) DEFAULT 'admin',
-    -- Present from the first release so adding Google/OIDC later is additive
-    -- rather than a migration: local accounts simply carry provider = 'local'.
-    auth_provider    LowCardinality(String) DEFAULT 'local',
-    provider_user_id String,
-    -- Bumped to invalidate every outstanding token for this user (logout
-    -- everywhere, password change). Stateless sessions need this to be revocable.
-    token_version    UInt32 DEFAULT 1,
-    last_login_at    DateTime64(3, 'UTC') DEFAULT toDateTime64(0, 3),
-    deleted          UInt8 DEFAULT 0,
-    created_at       DateTime64(3, 'UTC') DEFAULT now64(3),
-    updated_at       DateTime64(3, 'UTC') DEFAULT now64(3)
-  ) ENGINE = ReplacingMergeTree(updated_at)
-  ORDER BY id`,
-
-  // Read credentials for agents, MCP clients and scripts. Only the hash is
-  // stored; the plaintext key is shown once at creation.
-  `CREATE TABLE IF NOT EXISTS api_keys (
-    id           String,
-    account_id   String,
-    name         String,
-    key_hash     String,
-    prefix       String,
-    last_used_at DateTime64(3, 'UTC') DEFAULT toDateTime64(0, 3),
-    deleted      UInt8 DEFAULT 0,
-    created_at   DateTime64(3, 'UTC') DEFAULT now64(3),
-    updated_at   DateTime64(3, 'UTC') DEFAULT now64(3)
-  ) ENGINE = ReplacingMergeTree(updated_at)
-  ORDER BY id`,
-
-  // Instance-wide key/value. Holds the generated signing secret so a fresh
-  // install needs no environment variable to have working sessions.
-  `CREATE TABLE IF NOT EXISTS settings (
-    key        String,
-    value      String,
-    updated_at DateTime64(3, 'UTC') DEFAULT now64(3)
-  ) ENGINE = ReplacingMergeTree(updated_at)
-  ORDER BY key`,
-
-  `CREATE TABLE IF NOT EXISTS _migrations (
+/** Version bookkeeping. Every database tracks its own schema version. */
+export const migrationsStatement: Statement = `CREATE TABLE IF NOT EXISTS _migrations (
     version    UInt32,
     applied_at DateTime64(3, 'UTC') DEFAULT now64(3)
   ) ENGINE = ReplacingMergeTree
-  ORDER BY version`,
-];
+  ORDER BY version`;
+
+/** Everything the base database holds: control plane plus production's own event data. */
+export const statements: Statement[] = [...controlStatements, ...dataStatements, migrationsStatement];
+
 
 /** Human-readable schema description, served to agents via the API and MCP. */
 export const schemaDoc = `
 Database: fourier (ClickHouse). All timestamps are UTC DateTime64(3); raw SQL returns them as "YYYY-MM-DD HH:MM:SS.mmm" in UTC.
+
+Environments: production, preview and development are SEPARATE DATABASES — fourier, fourier_preview,
+fourier_development. They share no events, users or companies, and nothing joins across them. Every tool
+takes an 'environment' argument; omit it for production. There is no environment column to filter on:
+the database you are connected to is the environment. Sources, projects and write keys are the exception
+and live once in the base database, so a source id means the same thing in every environment.
 
 sources — websites / apps / products feeding a project, each with its own write key
   id, project_id, name, write_key

@@ -1,5 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { getClient } from "./client";
+import { getControlClient } from "./client";
+import { DEFAULT_ENVIRONMENT, ENVIRONMENTS, type Environment } from "./environments";
 
 export interface Project {
   id: string;
@@ -10,7 +11,7 @@ export interface Project {
 }
 
 export async function listProjects(): Promise<Project[]> {
-  const res = await getClient().query({
+  const res = await getControlClient().query({
     query: `SELECT id, name, write_key, created_at, updated_at FROM projects FINAL ORDER BY created_at`,
     format: "JSONEachRow",
   });
@@ -18,7 +19,7 @@ export async function listProjects(): Promise<Project[]> {
 }
 
 export async function getProject(id: string): Promise<Project | null> {
-  const res = await getClient().query({
+  const res = await getControlClient().query({
     query: `SELECT id, name, write_key, created_at, updated_at FROM projects FINAL WHERE id = {id:String} LIMIT 1`,
     query_params: { id },
     format: "JSONEachRow",
@@ -35,7 +36,7 @@ export function clearWriteKeyCache() {
 export async function getProjectByWriteKey(writeKey: string): Promise<Project | null> {
   const hit = writeKeyCache.get(writeKey);
   if (hit && Date.now() - hit.at < 30_000 && hit.project) return hit.project;
-  const res = await getClient().query({
+  const res = await getControlClient().query({
     query: `SELECT id, name, write_key, created_at, updated_at FROM projects FINAL WHERE write_key = {k:String} LIMIT 1`,
     query_params: { k: writeKey },
     format: "JSONEachRow",
@@ -54,7 +55,7 @@ export async function createProject(name: string): Promise<Project> {
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   };
-  await getClient().insert({
+  await getControlClient().insert({
     table: "projects",
     values: [project],
     format: "JSONEachRow",
@@ -87,7 +88,7 @@ function newWriteKey() {
 }
 
 export async function listSources(projectId: string): Promise<Source[]> {
-  const res = await getClient().query({
+  const res = await getControlClient().query({
     query: `SELECT id, project_id, name, write_key, created_at, updated_at FROM sources FINAL WHERE project_id = {p:String} ORDER BY created_at`,
     query_params: { p: projectId },
     format: "JSONEachRow",
@@ -106,7 +107,8 @@ export async function createSource(projectId: string, name: string): Promise<Sou
   };
   const existing = await listSources(projectId);
   if (existing.some((s) => s.id === source.id)) source.id = `${source.id}-${randomBytes(2).toString("hex")}`;
-  await getClient().insert({ table: "sources", values: [source], format: "JSONEachRow", clickhouse_settings: { async_insert: 0 } });
+  await getControlClient().insert({ table: "sources", values: [source], format: "JSONEachRow", clickhouse_settings: { async_insert: 0 } });
+  await ensureSourceKeys(source);
   writeKeyCache.clear();
   return source;
 }
@@ -115,7 +117,7 @@ export async function renameSource(projectId: string, id: string, name: string):
   const existing = (await listSources(projectId)).find((s) => s.id === id);
   if (!existing) return null;
   const updated = { ...existing, name, updated_at: new Date().toISOString() };
-  await getClient().insert({ table: "sources", values: [updated], format: "JSONEachRow", clickhouse_settings: { async_insert: 0 } });
+  await getControlClient().insert({ table: "sources", values: [updated], format: "JSONEachRow", clickhouse_settings: { async_insert: 0 } });
   return updated;
 }
 
@@ -135,7 +137,10 @@ function slug(name: string) {
  */
 export async function ensureDefaultSource(project: Project): Promise<Source> {
   const sources = await listSources(project.id);
-  if (sources.length > 0) return sources[0];
+  if (sources.length > 0) {
+    await ensureSourceKeys(sources[0]);
+    return sources[0];
+  }
   const source: Source = {
     id: "default",
     project_id: project.id,
@@ -144,31 +149,120 @@ export async function ensureDefaultSource(project: Project): Promise<Source> {
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   };
-  await getClient().insert({ table: "sources", values: [source], format: "JSONEachRow", clickhouse_settings: { async_insert: 0 } });
+  await getControlClient().insert({ table: "sources", values: [source], format: "JSONEachRow", clickhouse_settings: { async_insert: 0 } });
+  await ensureSourceKeys(source);
   writeKeyCache.clear();
   return source;
 }
 
-/** Resolve a write key to its project and source. Falls back to the legacy project-level key. */
-export async function resolveWriteKey(writeKey: string): Promise<{ project: Project; source: Source } | null> {
-  const hit = writeKeyCache.get(`src:${writeKey}`) as { project: Project; source: Source; at: number } | undefined;
+// ---------- source keys (one per source per environment) ----------
+
+export interface SourceKey {
+  project_id: string;
+  source_id: string;
+  environment: Environment;
+  write_key: string;
+  revoked: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function listSourceKeys(projectId: string): Promise<SourceKey[]> {
+  const res = await getControlClient().query({
+    query: `SELECT project_id, source_id, environment, write_key, revoked, created_at, updated_at
+            FROM source_keys FINAL WHERE project_id = {p:String} AND revoked = 0
+            ORDER BY source_id, environment`,
+    query_params: { p: projectId },
+    format: "JSONEachRow",
+  });
+  return (await res.json()) as SourceKey[];
+}
+
+/**
+ * Give a source a key in every environment, creating only what is missing.
+ *
+ * Production reuses the source's existing `write_key` rather than minting a new one:
+ * a key already pasted into a running production app must keep working, and after
+ * this the same string is simply also recorded as that source's production key.
+ */
+export async function ensureSourceKeys(source: Source): Promise<SourceKey[]> {
+  const existing = (await listSourceKeys(source.project_id)).filter((k) => k.source_id === source.id);
+  const missing = ENVIRONMENTS.filter((env) => !existing.some((k) => k.environment === env));
+  if (missing.length === 0) return existing;
+  const now = new Date().toISOString();
+  const rows: SourceKey[] = missing.map((environment) => ({
+    project_id: source.project_id,
+    source_id: source.id,
+    environment,
+    write_key: environment === DEFAULT_ENVIRONMENT ? source.write_key : newWriteKey(),
+    revoked: 0,
+    created_at: now,
+    updated_at: now,
+  }));
+  await getControlClient().insert({ table: "source_keys", values: rows, format: "JSONEachRow", clickhouse_settings: { async_insert: 0 } });
+  writeKeyCache.clear();
+  return [...existing, ...rows];
+}
+
+/** Backfill keys for every source in a project. Cheap and idempotent; runs on boot. */
+export async function ensureAllSourceKeys(projectId: string): Promise<void> {
+  for (const source of await listSources(projectId)) await ensureSourceKeys(source);
+}
+
+export interface ResolvedKey {
+  project: Project;
+  source: Source;
+  environment: Environment;
+}
+
+/**
+ * Resolve a write key to its project, source and environment.
+ *
+ * The environment comes from the key itself, never from the client. A preview
+ * deployment holds only the preview key, so it cannot write into production even if
+ * its code claims otherwise — which is the whole reason the environment is not a
+ * field on the event payload.
+ *
+ * Falls back through the two pre-environment shapes: a source-level key (treated as
+ * production) and a legacy project-level key.
+ */
+export async function resolveWriteKey(writeKey: string): Promise<ResolvedKey | null> {
+  const hit = writeKeyCache.get(`src:${writeKey}`) as (ResolvedKey & { at: number }) | undefined;
   if (hit && Date.now() - hit.at < 30_000) return hit;
-  const res = await getClient().query({
-    query: `SELECT s.id AS id, s.project_id AS project_id, s.name AS name, s.write_key AS write_key, s.created_at AS created_at, s.updated_at AS updated_at
-            FROM sources AS s FINAL WHERE s.write_key = {k:String} LIMIT 1`,
+
+  const keyRes = await getControlClient().query({
+    query: `SELECT project_id, source_id, environment FROM source_keys FINAL
+            WHERE write_key = {k:String} AND revoked = 0 LIMIT 1`,
     query_params: { k: writeKey },
     format: "JSONEachRow",
   });
-  const rows = (await res.json()) as Source[];
-  let source = rows[0];
+  const keyRow = ((await keyRes.json()) as { project_id: string; source_id: string; environment: string }[])[0];
+
   let project: Project | null = null;
-  if (source) project = await getProject(source.project_id);
-  else {
-    project = await getProjectByWriteKey(writeKey);
-    if (project) source = await ensureDefaultSource(project);
+  let source: Source | undefined;
+  let environment: Environment = DEFAULT_ENVIRONMENT;
+
+  if (keyRow) {
+    environment = ENVIRONMENTS.includes(keyRow.environment as Environment) ? (keyRow.environment as Environment) : DEFAULT_ENVIRONMENT;
+    project = await getProject(keyRow.project_id);
+    source = (await listSources(keyRow.project_id)).find((s) => s.id === keyRow.source_id);
+  } else {
+    const res = await getControlClient().query({
+      query: `SELECT s.id AS id, s.project_id AS project_id, s.name AS name, s.write_key AS write_key, s.created_at AS created_at, s.updated_at AS updated_at
+              FROM sources AS s FINAL WHERE s.write_key = {k:String} LIMIT 1`,
+      query_params: { k: writeKey },
+      format: "JSONEachRow",
+    });
+    source = ((await res.json()) as Source[])[0];
+    if (source) project = await getProject(source.project_id);
+    else {
+      project = await getProjectByWriteKey(writeKey);
+      if (project) source = await ensureDefaultSource(project);
+    }
   }
+
   if (!project || !source) return null;
-  const out = { project, source, at: Date.now() };
+  const out = { project, source, environment, at: Date.now() };
   writeKeyCache.set(`src:${writeKey}`, out as never);
   return out;
 }

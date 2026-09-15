@@ -1,17 +1,33 @@
-import { configFromEnv, ensureDefaultProject, ensureDefaultSource, getProject, listProjects, migrate, ping, type Project } from "@fourierhq/core";
+import {
+  configFromEnv,
+  ensureAllSourceKeys,
+  ensureDefaultProject,
+  ensureDefaultSource,
+  getProject,
+  listProjects,
+  migrateAll,
+  parseEnvironment,
+  ping,
+  scope as makeScope,
+  type Environment,
+  type Project,
+  type Scope,
+} from "@fourierhq/core";
 
 let readyPromise: Promise<{ project: Project }> | null = null;
 
 /**
- * Runs migrations and guarantees a default project exists. Memoised per process;
- * a failure clears the memo so the next request retries.
+ * Runs migrations for every environment and guarantees a default project exists.
+ * Memoised per process; a failure clears the memo so the next request retries.
  */
 export function ready(): Promise<{ project: Project }> {
   if (!readyPromise) {
     readyPromise = (async () => {
-      await migrate(configFromEnv());
+      await migrateAll(configFromEnv());
       const project = await ensureDefaultProject();
       await ensureDefaultSource(project);
+      // Sources that predate environments get their preview and development keys here.
+      await ensureAllSourceKeys(project.id);
       return { project };
     })().catch((err) => {
       readyPromise = null;
@@ -19,6 +35,21 @@ export function ready(): Promise<{ project: Project }> {
     });
   }
   return readyPromise;
+}
+
+/**
+ * The environment a request is asking to read. Unknown or absent means production —
+ * the same default the dashboard opens on, and never a silent read of something else.
+ */
+export function environmentFromRequest(req: Request): Environment {
+  return parseEnvironment(new URL(req.url).searchParams.get("environment"));
+}
+
+/** Project + environment for a read. Every query in core requires one of these. */
+export async function resolveScope(idOrAlias: string, req: Request): Promise<Scope | null> {
+  const project = await resolveProject(idOrAlias);
+  if (!project) return null;
+  return makeScope(project.id, environmentFromRequest(req));
 }
 
 /** Forget the migrated state so the next request re-runs migrations (e.g. after the database was dropped). */
@@ -51,3 +82,6 @@ export async function health() {
     projects: projects.length,
   };
 }
+
+/** Re-exported so routes build a scope without importing from core directly. */
+export { makeScope as scope };

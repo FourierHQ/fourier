@@ -6,6 +6,7 @@ import type {
   AttributionDimension,
   AttributionModel,
   AttributionRow,
+  Environment,
   EventName,
   EventRecord,
   GroupDetail,
@@ -26,6 +27,7 @@ export type {
   AttributionDimension,
   AttributionModel,
   AttributionRow,
+  Environment,
   EventName,
   EventRecord,
   GroupAttribution,
@@ -40,6 +42,8 @@ export type {
   UserDetail,
   UserRecord,
 };
+
+import { useEnvironmentValue } from "./environment";
 
 export const PROJECT = "default";
 export const LIVE_INTERVAL = 5_000;
@@ -185,31 +189,41 @@ export function useProjects() {
   return useQuery({ queryKey: ["projects"], queryFn: () => api<{ projects: Project[] }>("/api/projects").then((r) => r.projects) });
 }
 
+/** A source plus its write key in each environment. */
+export interface SourceWithKeys extends Source {
+  keys: Partial<Record<Environment, string>>;
+}
+
 export function useSources() {
-  return useQuery({ queryKey: ["sources"], queryFn: () => api<{ sources: Source[] }>(`/api/projects/${PROJECT}/sources`).then((r) => r.sources) });
+  return useQuery({
+    queryKey: ["sources"],
+    queryFn: () => api<{ sources: SourceWithKeys[] }>(`/api/projects/${PROJECT}/sources`).then((r) => r.sources),
+  });
 }
 
 export function useCreateSource() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (name: string) => api<{ source: Source }>(`/api/projects/${PROJECT}/sources`, { method: "POST", body: JSON.stringify({ name }) }).then((r) => r.source),
+    mutationFn: (name: string) => api<{ source: SourceWithKeys }>(`/api/projects/${PROJECT}/sources`, { method: "POST", body: JSON.stringify({ name }) }).then((r) => r.source),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["sources"] }),
   });
 }
 
 export function useOverview(opts?: Opts<{ project: Project; overview: Overview }>) {
+  const environment = useEnvironmentValue();
   return useQuery({
-    queryKey: ["overview"],
-    queryFn: () => api<{ project: Project; overview: Overview }>(`/api/projects/${PROJECT}/overview`),
+    queryKey: ["overview", environment],
+    queryFn: () => api<{ project: Project; overview: Overview }>(`/api/projects/${PROJECT}/overview${qs({ environment })}`),
     refetchInterval: LIVE_INTERVAL,
     ...opts,
   });
 }
 
 export function useEventNames(days?: number, source?: string) {
+  const environment = useEnvironmentValue();
   return useQuery({
-    queryKey: ["event-names", days, source],
-    queryFn: () => api<{ events: EventName[] }>(`/api/projects/${PROJECT}/events/names${qs({ days, source })}`).then((r) => r.events),
+    queryKey: ["event-names", environment, days, source],
+    queryFn: () => api<{ events: EventName[] }>(`/api/projects/${PROJECT}/events/names${qs({ days, source, environment })}`).then((r) => r.events),
     refetchInterval: LIVE_INTERVAL * 2,
   });
 }
@@ -227,9 +241,10 @@ export interface EventsParams {
 }
 
 export function useEvents(params: EventsParams, opts?: Opts<{ events: EventRecord[]; next_before: string | null }>) {
+  const environment = useEnvironmentValue();
   return useQuery({
-    queryKey: ["events", params],
-    queryFn: () => api<{ events: EventRecord[]; next_before: string | null }>(`/api/projects/${PROJECT}/events${qs(params)}`),
+    queryKey: ["events", environment, params],
+    queryFn: () => api<{ events: EventRecord[]; next_before: string | null }>(`/api/projects/${PROJECT}/events${qs({ ...params, environment })}`),
     refetchInterval: LIVE_INTERVAL,
     placeholderData: (prev) => prev,
     ...opts,
@@ -237,59 +252,65 @@ export function useEvents(params: EventsParams, opts?: Opts<{ events: EventRecor
 }
 
 export function useTimeseries(params: { event?: string; group_id?: string; source?: string; interval?: "hour" | "day" | "week" | "month"; from?: string; to?: string }) {
+  const environment = useEnvironmentValue();
   return useQuery({
-    queryKey: ["timeseries", params],
-    queryFn: () => api<{ interval: string; series: TimeseriesPoint[] }>(`/api/projects/${PROJECT}/timeseries${qs(params)}`).then((r) => r.series),
+    queryKey: ["timeseries", environment, params],
+    queryFn: () => api<{ interval: string; series: TimeseriesPoint[] }>(`/api/projects/${PROJECT}/timeseries${qs({ ...params, environment })}`).then((r) => r.series),
     refetchInterval: LIVE_INTERVAL * 6,
     placeholderData: (prev) => prev,
   });
 }
 
 export function useUsers(params: { q?: string; identified?: boolean; group_id?: string; source?: string; order_by?: string; limit?: number; offset?: number }) {
+  const environment = useEnvironmentValue();
   return useQuery({
-    queryKey: ["users", params],
-    queryFn: () => api<{ users: UserRecord[] }>(`/api/projects/${PROJECT}/users${qs(params)}`).then((r) => r.users),
+    queryKey: ["users", environment, params],
+    queryFn: () => api<{ users: UserRecord[] }>(`/api/projects/${PROJECT}/users${qs({ ...params, environment })}`).then((r) => r.users),
     refetchInterval: LIVE_INTERVAL * 2,
     placeholderData: (prev) => prev,
   });
 }
 
 export function useUser(distinctId: string) {
+  const environment = useEnvironmentValue();
   return useQuery({
-    queryKey: ["user", distinctId],
-    queryFn: () => api<{ user: UserDetail; events: EventRecord[]; attribution: Attribution }>(`/api/projects/${PROJECT}/users/${encodeURIComponent(distinctId)}?limit=200`),
+    queryKey: ["user", environment, distinctId],
+    queryFn: () => api<{ user: UserDetail; events: EventRecord[]; attribution: Attribution }>(`/api/projects/${PROJECT}/users/${encodeURIComponent(distinctId)}?limit=200&environment=${environment}`),
     refetchInterval: LIVE_INTERVAL,
     enabled: !!distinctId,
   });
 }
 
 export function useGroups(params: { q?: string; order_by?: string; limit?: number; offset?: number }) {
+  const environment = useEnvironmentValue();
   return useQuery({
-    queryKey: ["groups", params],
-    queryFn: () => api<{ groups: GroupRecord[] }>(`/api/projects/${PROJECT}/groups${qs(params)}`).then((r) => r.groups),
+    queryKey: ["groups", environment, params],
+    queryFn: () => api<{ groups: GroupRecord[] }>(`/api/projects/${PROJECT}/groups${qs({ ...params, environment })}`).then((r) => r.groups),
     refetchInterval: LIVE_INTERVAL * 2,
     placeholderData: (prev) => prev,
   });
 }
 
 export function useGroup(groupId: string) {
+  const environment = useEnvironmentValue();
   return useQuery({
-    queryKey: ["group", groupId],
-    queryFn: () => api<{ group: GroupDetail; events: EventRecord[]; attribution: GroupAttribution }>(`/api/projects/${PROJECT}/groups/${encodeURIComponent(groupId)}?limit=200`),
+    queryKey: ["group", environment, groupId],
+    queryFn: () => api<{ group: GroupDetail; events: EventRecord[]; attribution: GroupAttribution }>(`/api/projects/${PROJECT}/groups/${encodeURIComponent(groupId)}?limit=200&environment=${environment}`),
     refetchInterval: LIVE_INTERVAL,
     enabled: !!groupId,
   });
 }
 
 export function useAttributionReport(params: { model?: AttributionModel; by?: AttributionDimension; identified?: boolean; group_id?: string; limit?: number }) {
+  const environment = useEnvironmentValue();
   return useQuery({
-    queryKey: ["attribution", params],
-    queryFn: () => api<{ model: AttributionModel; by: AttributionDimension; rows: AttributionRow[] }>(`/api/projects/${PROJECT}/attribution${qs(params)}`),
+    queryKey: ["attribution", environment, params],
+    queryFn: () => api<{ model: AttributionModel; by: AttributionDimension; rows: AttributionRow[] }>(`/api/projects/${PROJECT}/attribution${qs({ ...params, environment })}`),
     refetchInterval: LIVE_INTERVAL * 6,
     placeholderData: (prev) => prev,
   });
 }
 
-export function runSql(sql: string, limit?: number) {
-  return api<SqlResult & { project_id: string }>(`/api/projects/${PROJECT}/query`, { method: "POST", body: JSON.stringify({ sql, limit }) });
+export function runSql(sql: string, limit?: number, environment?: string) {
+  return api<SqlResult & { project_id: string }>(`/api/projects/${PROJECT}/query${qs({ environment })}`, { method: "POST", body: JSON.stringify({ sql, limit }) });
 }

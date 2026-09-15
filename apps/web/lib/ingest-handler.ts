@@ -49,7 +49,7 @@ export async function handleIngest(req: Request, forcedType?: IncomingMessage["t
   if (!writeKey) return error("Missing writeKey (body.writeKey or Basic auth)", 401);
   const resolved = await resolveWriteKey(writeKey);
   if (!resolved) return error("Unknown writeKey", 401);
-  const { project, source } = resolved;
+  const { project, source, environment } = resolved;
 
   let messages: IncomingMessage[];
   if (Array.isArray(body.batch)) {
@@ -62,6 +62,7 @@ export async function handleIngest(req: Request, forcedType?: IncomingMessage["t
     messages = [parsed.data];
   }
 
-  const result = await ingest(project, messages, { sourceId: source.id, ip: clientIp(req), userAgent: req.headers.get("user-agent") ?? undefined });
+  // The environment comes from the write key, so a deployment can only write to its own.
+  const result = await ingest(project, messages, { sourceId: source.id, ip: clientIp(req), userAgent: req.headers.get("user-agent") ?? undefined }, environment);
   return json({ success: true, ...result });
 }

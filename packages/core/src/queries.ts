@@ -1,4 +1,5 @@
-import { getClient } from "./client";
+import { getDataClient } from "./client";
+import type { Scope } from "./environments";
 import { assertReadOnlySql } from "./sql-guard";
 
 type Row = Record<string, unknown>;
@@ -10,8 +11,8 @@ export function chDateToIso(v: unknown): unknown {
   return typeof v === "string" && CH_DATETIME.test(v) ? v.replace(" ", "T") + "Z" : v;
 }
 
-async function q<T = Row>(query: string, params: Record<string, unknown> = {}): Promise<T[]> {
-  const res = await getClient().query({ query, query_params: params, format: "JSONEachRow" });
+async function q<T = Row>(scope: Scope, query: string, params: Record<string, unknown> = {}): Promise<T[]> {
+  const res = await getDataClient(scope.environment).query({ query, query_params: params, format: "JSONEachRow" });
   const rows = (await res.json()) as Row[];
   for (const r of rows) for (const k in r) r[k] = chDateToIso(r[k]);
   return rows as T[];
@@ -32,15 +33,15 @@ function parseJson(s: unknown): Record<string, unknown> {
 // touches_resolved). Queries here only read those views.
 
 /** Resolve an id the caller has (user id or anonymous id) to the person id. */
-async function resolvePersonId(projectId: string, id: string): Promise<string> {
-  const rows = await q<Row>(`SELECT to_id FROM identity_map WHERE project_id = {p:String} AND from_id = {id:String}`, { p: projectId, id });
+async function resolvePersonId(scope: Scope, id: string): Promise<string> {
+  const rows = await q<Row>(scope, `SELECT to_id FROM identity_map WHERE project_id = {p:String} AND from_id = {id:String}`, { p: scope.projectId, id });
   const uid = rows[0]?.to_id;
   return typeof uid === "string" && uid !== "" ? uid : id;
 }
 
 /** All raw distinct_ids that belong to a person: their user id plus linked anonymous ids. */
-async function personIds(projectId: string, personId: string): Promise<string[]> {
-  const rows = await q<Row>(`SELECT from_id FROM identity_map WHERE project_id = {p:String} AND to_id = {u:String}`, { p: projectId, u: personId });
+async function personIds(scope: Scope, personId: string): Promise<string[]> {
+  const rows = await q<Row>(scope, `SELECT from_id FROM identity_map WHERE project_id = {p:String} AND to_id = {u:String}`, { p: scope.projectId, u: personId });
   return [personId, ...rows.map((r) => String(r.from_id)).filter((a) => a !== personId)];
 }
 
@@ -57,24 +58,22 @@ export interface Overview {
   last_event_at: string | null;
 }
 
-export async function getOverview(projectId: string): Promise<Overview> {
+export async function getOverview(scope: Scope): Promise<Overview> {
   const [[totals], [recent], [groups]] = await Promise.all([
-    q<Row>(
-      `SELECT
+    q<Row>(scope, `SELECT
         sum(event_count) AS total_events,
         count() AS total_users,
         countIf(is_identified = 1) AS identified_users,
         min(first_seen) AS first_event_at,
         max(last_seen) AS last_event_at
       FROM person_stats WHERE project_id = {p:String}`,
-      { p: projectId },
+      { p: scope.projectId },
     ),
-    q<Row>(
-      `SELECT count() AS events_24h, uniq(person_id) AS users_24h
+    q<Row>(scope, `SELECT count() AS events_24h, uniq(person_id) AS users_24h
        FROM events_resolved WHERE project_id = {p:String} AND timestamp > now64(3) - INTERVAL 1 DAY`,
-      { p: projectId },
+      { p: scope.projectId },
     ),
-    q<Row>(`SELECT uniq(group_id) AS total_groups FROM group_stats WHERE project_id = {p:String}`, { p: projectId }),
+    q<Row>(scope, `SELECT uniq(group_id) AS total_groups FROM group_stats WHERE project_id = {p:String}`, { p: scope.projectId }),
   ]);
   const totalEvents = Number(totals?.total_events ?? 0);
   return {
@@ -131,9 +130,9 @@ export interface EventsFilter {
   limit?: number;
 }
 
-export async function listEvents(projectId: string, f: EventsFilter = {}): Promise<EventRecord[]> {
+export async function listEvents(scope: Scope, f: EventsFilter = {}): Promise<EventRecord[]> {
   const where = ["project_id = {p:String}"];
-  const params: Record<string, unknown> = { p: projectId, limit: Math.min(Math.max(f.limit ?? 50, 1), 1000) };
+  const params: Record<string, unknown> = { p: scope.projectId, limit: Math.min(Math.max(f.limit ?? 50, 1), 1000) };
   if (f.event) {
     where.push("event = {event:String}");
     params.event = f.event;
@@ -171,8 +170,7 @@ export async function listEvents(projectId: string, f: EventsFilter = {}): Promi
     where.push("(positionCaseInsensitive(event, {s:String}) > 0 OR positionCaseInsensitive(properties, {s:String}) > 0 OR positionCaseInsensitive(distinct_id, {s:String}) > 0)");
     params.s = f.search;
   }
-  const rows = await q<Row>(
-    `SELECT message_id, source_id, person_id, type, event, name, distinct_id, anonymous_id, user_id, group_id,
+  const rows = await q<Row>(scope, `SELECT message_id, source_id, person_id, type, event, name, distinct_id, anonymous_id, user_id, group_id,
             timestamp, received_at, properties, traits, context, url, path, referrer, title, user_agent, locale, library_name
      FROM events_resolved
      WHERE ${where.join(" AND ")}
@@ -197,9 +195,9 @@ export interface EventName {
   last_seen: string;
 }
 
-export async function listEventNames(projectId: string, opts: { days?: number; sourceId?: string } = {}): Promise<EventName[]> {
+export async function listEventNames(scope: Scope, opts: { days?: number; sourceId?: string } = {}): Promise<EventName[]> {
   const where = ["project_id = {p:String}"];
-  const params: Record<string, unknown> = { p: projectId };
+  const params: Record<string, unknown> = { p: scope.projectId };
   if (opts.sourceId) {
     where.push("source_id = {src:String}");
     params.src = opts.sourceId;
@@ -208,8 +206,7 @@ export async function listEventNames(projectId: string, opts: { days?: number; s
     where.push("timestamp >= now64(3) - INTERVAL {days:UInt32} DAY");
     params.days = opts.days;
   }
-  const rows = await q<Row>(
-    `SELECT event, any(type) AS type, count() AS count, uniq(person_id) AS users, min(timestamp) AS first_seen, max(timestamp) AS last_seen
+  const rows = await q<Row>(scope, `SELECT event, any(type) AS type, count() AS count, uniq(person_id) AS users, min(timestamp) AS first_seen, max(timestamp) AS last_seen
      FROM events_resolved WHERE ${where.join(" AND ")}
      GROUP BY event ORDER BY count DESC`,
     params,
@@ -224,13 +221,13 @@ export interface TimeseriesPoint {
 }
 
 export async function eventTimeseries(
-  projectId: string,
+  scope: Scope,
   opts: { event?: string; interval?: "hour" | "day" | "week" | "month"; from?: string; to?: string; groupId?: string; sourceId?: string } = {},
 ): Promise<TimeseriesPoint[]> {
   const interval = opts.interval ?? "day";
   const fn = { hour: "toStartOfHour", day: "toStartOfDay", week: "toStartOfWeek", month: "toStartOfMonth" }[interval];
   const where = ["project_id = {p:String}", "type NOT IN ('identify','group','alias')"];
-  const params: Record<string, unknown> = { p: projectId };
+  const params: Record<string, unknown> = { p: scope.projectId };
   if (opts.event) {
     where.push("event = {event:String}");
     params.event = opts.event;
@@ -253,8 +250,7 @@ export async function eventTimeseries(
     where.push("timestamp < parseDateTime64BestEffort({to:String}, 3)");
     params.to = opts.to;
   }
-  const rows = await q<Row>(
-    `SELECT ${fn}(timestamp) AS bucket, count() AS count, uniq(person_id) AS users
+  const rows = await q<Row>(scope, `SELECT ${fn}(timestamp) AS bucket, count() AS count, uniq(person_id) AS users
      FROM events_resolved WHERE ${where.join(" AND ")}
      GROUP BY bucket ORDER BY bucket`,
     params,
@@ -262,13 +258,12 @@ export async function eventTimeseries(
   return rows.map((r) => ({ bucket: String(r.bucket), count: Number(r.count), users: Number(r.users) }));
 }
 
-export async function propertyKeys(projectId: string, event: string): Promise<{ key: string; count: number }[]> {
-  const rows = await q<Row>(
-    `SELECT key, count() AS count
+export async function propertyKeys(scope: Scope, event: string): Promise<{ key: string; count: number }[]> {
+  const rows = await q<Row>(scope, `SELECT key, count() AS count
      FROM events ARRAY JOIN JSONExtractKeys(properties) AS key
      WHERE project_id = {p:String} AND event = {e:String} AND timestamp > now64(3) - INTERVAL 30 DAY
      GROUP BY key ORDER BY count DESC LIMIT 100`,
-    { p: projectId, e: event },
+    { p: scope.projectId, e: event },
   );
   return rows.map((r) => ({ key: String(r.key), count: Number(r.count) }));
 }
@@ -296,9 +291,9 @@ export interface UsersFilter {
   orderBy?: "last_seen" | "first_seen" | "event_count";
 }
 
-export async function listUsers(projectId: string, f: UsersFilter = {}): Promise<UserRecord[]> {
+export async function listUsers(scope: Scope, f: UsersFilter = {}): Promise<UserRecord[]> {
   const params: Record<string, unknown> = {
-    p: projectId,
+    p: scope.projectId,
     limit: Math.min(Math.max(f.limit ?? 50, 1), 1000),
     offset: Math.max(f.offset ?? 0, 0),
   };
@@ -319,8 +314,7 @@ export async function listUsers(projectId: string, f: UsersFilter = {}): Promise
     params.src = f.sourceId;
   }
   const order = { last_seen: "last_seen DESC", first_seen: "first_seen DESC", event_count: "event_count DESC" }[f.orderBy ?? "last_seen"];
-  const rows = await q<Row>(
-    `SELECT r.person_id AS distinct_id, r.is_identified AS is_identified, r.first_seen AS first_seen, r.last_seen AS last_seen,
+  const rows = await q<Row>(scope, `SELECT r.person_id AS distinct_id, r.is_identified AS is_identified, r.first_seen AS first_seen, r.last_seen AS last_seen,
             r.event_count AS event_count, r.group_id AS group_id, t.traits AS traits
      FROM (SELECT * FROM person_stats WHERE project_id = {p:String}) AS r
      LEFT JOIN (SELECT user_id, traits FROM user_traits FINAL WHERE project_id = {p:String}) AS t ON t.user_id = r.person_id
@@ -360,35 +354,31 @@ export interface UserDetail extends UserRecord {
 }
 
 /** Accepts a user id or an anonymous id; returns the resolved person with everything they did. */
-export async function getUser(projectId: string, distinctId: string): Promise<UserDetail | null> {
-  const personId = await resolvePersonId(projectId, distinctId);
-  const ids = await personIds(projectId, personId);
-  const params = { p: projectId, d: personId, ids };
+export async function getUser(scope: Scope, distinctId: string): Promise<UserDetail | null> {
+  const personId = await resolvePersonId(scope, distinctId);
+  const ids = await personIds(scope, personId);
+  const params = { p: scope.projectId, d: personId, ids };
   const [users, groups, top, sources] = await Promise.all([
-    q<Row>(
-      `SELECT {d:String} AS distinct_id, max(s.is_identified) AS is_identified, min(s.first_seen) AS first_seen, max(s.last_seen) AS last_seen,
+    q<Row>(scope, `SELECT {d:String} AS distinct_id, max(s.is_identified) AS is_identified, min(s.first_seen) AS first_seen, max(s.last_seen) AS last_seen,
               sum(s.event_count) AS event_count, argMaxMerge(s.last_group_id) AS group_id, any(t.traits) AS traits
        FROM user_stats AS s
        LEFT JOIN (SELECT user_id, traits FROM user_traits FINAL WHERE project_id = {p:String} AND user_id = {d:String}) AS t ON t.user_id = {d:String}
        WHERE s.project_id = {p:String} AND s.distinct_id IN ({ids:Array(String)})`,
       params,
     ),
-    q<Row>(
-      `SELECT m.group_id AS group_id, any(g.traits) AS traits
+    q<Row>(scope, `SELECT m.group_id AS group_id, any(g.traits) AS traits
        FROM group_members AS m
        LEFT JOIN (SELECT group_id, traits FROM group_traits FINAL WHERE project_id = {p:String}) AS g ON g.group_id = m.group_id
        WHERE m.project_id = {p:String} AND m.distinct_id IN ({ids:Array(String)})
        GROUP BY m.group_id ORDER BY max(m.last_seen) DESC`,
       params,
     ),
-    q<Row>(
-      `SELECT event, count() AS count FROM events
+    q<Row>(scope, `SELECT event, count() AS count FROM events
        WHERE project_id = {p:String} AND distinct_id IN ({ids:Array(String)}) AND type IN ('track','page','screen')
        GROUP BY event ORDER BY count DESC LIMIT 10`,
       params,
     ),
-    q<Row>(
-      `SELECT source_id, min(first_seen) AS first_seen, max(last_seen) AS last_seen, sum(event_count) AS event_count
+    q<Row>(scope, `SELECT source_id, min(first_seen) AS first_seen, max(last_seen) AS last_seen, sum(event_count) AS event_count
        FROM person_sources WHERE project_id = {p:String} AND distinct_id IN ({ids:Array(String)})
        GROUP BY source_id ORDER BY first_seen`,
       params,
@@ -418,9 +408,9 @@ export interface GroupRecord {
   user_count: number;
 }
 
-export async function listGroups(projectId: string, f: { search?: string; limit?: number; offset?: number; orderBy?: "last_seen" | "event_count" | "user_count" } = {}): Promise<GroupRecord[]> {
+export async function listGroups(scope: Scope, f: { search?: string; limit?: number; offset?: number; orderBy?: "last_seen" | "event_count" | "user_count" } = {}): Promise<GroupRecord[]> {
   const params: Record<string, unknown> = {
-    p: projectId,
+    p: scope.projectId,
     limit: Math.min(Math.max(f.limit ?? 50, 1), 1000),
     offset: Math.max(f.offset ?? 0, 0),
   };
@@ -430,8 +420,7 @@ export async function listGroups(projectId: string, f: { search?: string; limit?
     params.s = f.search;
   }
   const order = { last_seen: "last_seen DESC", event_count: "event_count DESC", user_count: "user_count DESC" }[f.orderBy ?? "last_seen"];
-  const rows = await q<Row>(
-    `SELECT g.group_id AS group_id, any(g.traits) AS traits,
+  const rows = await q<Row>(scope, `SELECT g.group_id AS group_id, any(g.traits) AS traits,
             min(s.first_seen) AS first_seen, max(s.last_seen) AS last_seen,
             sum(s.event_count) AS event_count, uniqMerge(s.users) AS user_count
      FROM (SELECT group_id, traits FROM group_traits FINAL WHERE project_id = {p:String}) AS g
@@ -463,19 +452,17 @@ export interface GroupDetail extends GroupRecord {
   top_events: { event: string; count: number; users: number }[];
 }
 
-export async function getGroup(projectId: string, groupId: string): Promise<GroupDetail | null> {
+export async function getGroup(scope: Scope, groupId: string): Promise<GroupDetail | null> {
   const [groups, members, top, sources] = await Promise.all([
-    q<Row>(
-      `SELECT g.group_id AS group_id, any(g.traits) AS traits,
+    q<Row>(scope, `SELECT g.group_id AS group_id, any(g.traits) AS traits,
               min(s.first_seen) AS first_seen, max(s.last_seen) AS last_seen,
               sum(s.event_count) AS event_count, uniqMerge(s.users) AS user_count
        FROM (SELECT group_id, traits FROM group_traits FINAL WHERE project_id = {p:String} AND group_id = {g:String}) AS g
        LEFT JOIN group_stats AS s ON s.group_id = g.group_id AND s.project_id = {p:String}
        GROUP BY g.group_id`,
-      { p: projectId, g: groupId },
+      { p: scope.projectId, g: groupId },
     ),
-    q<Row>(
-      `SELECT
+    q<Row>(scope, `SELECT
           if(i.to_id != '', i.to_id, m.distinct_id) AS distinct_id,
           max(if(i.to_id != '', 1, u.is_identified)) AS is_identified,
           min(m.first_seen) AS first_seen, max(m.last_seen) AS last_seen,
@@ -486,19 +473,17 @@ export async function getGroup(projectId: string, groupId: string): Promise<Grou
        LEFT JOIN (SELECT user_id, traits FROM user_traits FINAL WHERE project_id = {p:String}) AS t ON t.user_id = if(i.to_id != '', i.to_id, m.distinct_id)
        WHERE m.project_id = {p:String} AND m.group_id = {g:String}
        GROUP BY distinct_id ORDER BY last_seen DESC LIMIT 500`,
-      { p: projectId, g: groupId },
+      { p: scope.projectId, g: groupId },
     ),
-    q<Row>(
-      `SELECT event, count() AS count, uniq(distinct_id) AS users FROM events
+    q<Row>(scope, `SELECT event, count() AS count, uniq(distinct_id) AS users FROM events
        WHERE project_id = {p:String} AND group_id = {g:String} AND type IN ('track','page','screen')
        GROUP BY event ORDER BY count DESC LIMIT 20`.replace("uniq(distinct_id)", "uniq(person_id)").replace("FROM events", "FROM events_resolved"),
-      { p: projectId, g: groupId },
+      { p: scope.projectId, g: groupId },
     ),
-    q<Row>(
-      `SELECT source_id, min(timestamp) AS first_seen, max(timestamp) AS last_seen, count() AS event_count, uniq(person_id) AS user_count
+    q<Row>(scope, `SELECT source_id, min(timestamp) AS first_seen, max(timestamp) AS last_seen, count() AS event_count, uniq(person_id) AS user_count
        FROM events_resolved WHERE project_id = {p:String} AND group_id = {g:String}
        GROUP BY source_id ORDER BY first_seen`,
-      { p: projectId, g: groupId },
+      { p: scope.projectId, g: groupId },
     ),
   ]);
   if (!groups[0]) return null;
@@ -523,12 +508,12 @@ export interface SqlResult {
  * Run read-only SQL. `{project_id}` in the query is replaced with the bound project.
  * Enforced by ClickHouse readonly=1 plus a keyword guard.
  */
-export async function runSql(projectId: string, sql: string, opts: { limit?: number } = {}): Promise<SqlResult> {
+export async function runSql(scope: Scope, sql: string, opts: { limit?: number } = {}): Promise<SqlResult> {
   const safe = assertReadOnlySql(sql).replace(/\{project_id\}/g, "{project_id:String}");
   const started = Date.now();
-  const res = await getClient().query({
+  const res = await getDataClient(scope.environment).query({
     query: safe,
-    query_params: { project_id: projectId },
+    query_params: { project_id: scope.projectId },
     format: "JSONCompactEachRowWithNamesAndTypes",
     clickhouse_settings: {
       readonly: "1",
@@ -587,9 +572,9 @@ export interface TouchesFilter {
   limit?: number;
 }
 
-function touchWhere(projectId: string, f: TouchesFilter) {
+function touchWhere(scope: Scope, f: TouchesFilter) {
   const where = ["project_id = {p:String}"];
-  const params: Record<string, unknown> = { p: projectId, limit: Math.min(Math.max(f.limit ?? 100, 1), 1000) };
+  const params: Record<string, unknown> = { p: scope.projectId, limit: Math.min(Math.max(f.limit ?? 100, 1), 1000) };
   if (f.personId) {
     where.push("person_id = {pid:String}");
     params.pid = f.personId;
@@ -622,9 +607,9 @@ function touchWhere(projectId: string, f: TouchesFilter) {
 }
 
 /** Every recorded arrival, newest first. */
-export async function listTouches(projectId: string, f: TouchesFilter = {}): Promise<TouchRecord[]> {
-  const { where, params } = touchWhere(projectId, f);
-  return q<TouchRecord>(`SELECT ${TOUCH_COLS} FROM touches_resolved WHERE ${where} ORDER BY timestamp DESC LIMIT {limit:UInt32}`, params);
+export async function listTouches(scope: Scope, f: TouchesFilter = {}): Promise<TouchRecord[]> {
+  const { where, params } = touchWhere(scope, f);
+  return q<TouchRecord>(scope, `SELECT ${TOUCH_COLS} FROM touches_resolved WHERE ${where} ORDER BY timestamp DESC LIMIT {limit:UInt32}`, params);
 }
 
 export interface Attribution {
@@ -643,8 +628,8 @@ function pickAttribution(touches: TouchRecord[]): Attribution {
   return { first_touch: first, last_touch: lastNonDirect ?? touches[0] ?? null, touch_count: touches.length, touches };
 }
 
-export async function personAttribution(projectId: string, personId: string, limit = 100): Promise<Attribution> {
-  return pickAttribution(await listTouches(projectId, { personId, limit }));
+export async function personAttribution(scope: Scope, personId: string, limit = 100): Promise<Attribution> {
+  return pickAttribution(await listTouches(scope, { personId, limit }));
 }
 
 export interface GroupAttribution extends Attribution {
@@ -652,8 +637,8 @@ export interface GroupAttribution extends Attribution {
   by_member: { person_id: string; first_touch: TouchRecord }[];
 }
 
-export async function groupAttribution(projectId: string, groupId: string, limit = 200): Promise<GroupAttribution> {
-  const touches = await listTouches(projectId, { groupId, limit });
+export async function groupAttribution(scope: Scope, groupId: string, limit = 200): Promise<GroupAttribution> {
+  const touches = await listTouches(scope, { groupId, limit });
   const firstByMember = new Map<string, TouchRecord>();
   for (const t of [...touches].reverse()) if (!firstByMember.has(t.person_id)) firstByMember.set(t.person_id, t);
   return {
@@ -677,13 +662,13 @@ export interface AttributionRow {
  * first-touch or last-touch model. `last` ignores direct arrivals when the person has any other touch.
  */
 export async function attributionReport(
-  projectId: string,
+  scope: Scope,
   opts: { model?: AttributionModel; by?: AttributionDimension; identifiedOnly?: boolean; groupId?: string; sourceId?: string; from?: string; to?: string; limit?: number } = {},
 ): Promise<AttributionRow[]> {
   const dims: AttributionDimension[] = ["utm_source", "utm_medium", "utm_campaign", "referrer_host", "landing_path", "kind", "source_id"];
   const by = dims.includes(opts.by ?? "utm_source") ? (opts.by ?? "utm_source") : "utm_source";
   const model = opts.model === "last" ? "last" : "first";
-  const { where, params } = touchWhere(projectId, { groupId: opts.groupId, sourceId: opts.sourceId, after: opts.from, before: opts.to });
+  const { where, params } = touchWhere(scope, { groupId: opts.groupId, sourceId: opts.sourceId, after: opts.from, before: opts.to });
   params.limit = Math.min(Math.max(opts.limit ?? 50, 1), 500);
   // pick one touch per person, then group people by the dimension
   const col = by === "source_id" ? "if(source_id = '', 'default', source_id)" : by;
@@ -691,8 +676,7 @@ export async function attributionReport(
     model === "first"
       ? `argMin(${col}, timestamp)`
       : `if(countIf(kind != 'direct') > 0, argMaxIf(${col}, timestamp, kind != 'direct'), argMax(${col}, timestamp))`;
-  const rows = await q<Row>(
-    `SELECT
+  const rows = await q<Row>(scope, `SELECT
         if(key = '', if({by:String} = 'kind', 'direct', '(none)'), key) AS key,
         count() AS people,
         countIf(is_identified = 1) AS identified_people,

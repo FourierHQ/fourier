@@ -13,7 +13,7 @@
  * ClickHouse. `token_version` on the account makes them revocable anyway.
  */
 import { createHmac, randomBytes, randomUUID, scrypt as scryptCb, timingSafeEqual } from "node:crypto";
-import { getClient } from "./client";
+import { getControlClient } from "./client";
 
 function scrypt(password: string, salt: Buffer, keylen: number, N: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {
@@ -102,7 +102,7 @@ export async function getSigningSecret(): Promise<string> {
  * see both rows, so they converge on one secret rather than fighting over it.
  */
 async function readGeneratedSecret(): Promise<string | null> {
-  const res = await getClient().query({
+  const res = await getControlClient().query({
     query: `SELECT value FROM settings WHERE key = 'signing_secret' AND value != '' ORDER BY updated_at ASC, value ASC LIMIT 1`,
     format: "JSONEachRow",
   });
@@ -115,7 +115,7 @@ export function clearSecretCache() {
 }
 
 export async function getSetting(key: string): Promise<string | null> {
-  const res = await getClient().query({
+  const res = await getControlClient().query({
     query: `SELECT value FROM settings FINAL WHERE key = {k:String} LIMIT 1`,
     query_params: { k: key },
     format: "JSONEachRow",
@@ -125,7 +125,7 @@ export async function getSetting(key: string): Promise<string | null> {
 }
 
 export async function setSetting(key: string, value: string): Promise<void> {
-  await getClient().insert({
+  await getControlClient().insert({
     table: "settings",
     values: [{ key, value, updated_at: new Date().toISOString() }],
     format: "JSONEachRow",
@@ -214,7 +214,7 @@ export const SESSION_MAX_AGE = SESSION_TTL_SECONDS;
 // ---------- accounts ----------
 
 export async function countAccounts(): Promise<number> {
-  const res = await getClient().query({
+  const res = await getControlClient().query({
     query: `SELECT count() AS n FROM accounts FINAL WHERE deleted = 0`,
     format: "JSONEachRow",
   });
@@ -228,7 +228,7 @@ export async function needsSetup(): Promise<boolean> {
 }
 
 export async function getAccountById(id: string): Promise<Account | null> {
-  const res = await getClient().query({
+  const res = await getControlClient().query({
     query: `SELECT ${ACCOUNT_COLUMNS} FROM accounts FINAL WHERE id = {id:String} AND deleted = 0 LIMIT 1`,
     query_params: { id },
     format: "JSONEachRow",
@@ -238,7 +238,7 @@ export async function getAccountById(id: string): Promise<Account | null> {
 }
 
 async function getAccountRowByEmail(email: string): Promise<AccountRow | null> {
-  const res = await getClient().query({
+  const res = await getControlClient().query({
     // ClickHouse has no unique constraint, so a signup race can leave two rows.
     // Oldest wins, deterministically, rather than whichever merge part is read.
     query: `SELECT ${ACCOUNT_COLUMNS} FROM accounts FINAL WHERE lower(email) = {e:String} AND deleted = 0 ORDER BY created_at LIMIT 1`,
@@ -255,7 +255,7 @@ export async function getAccountByEmail(email: string): Promise<Account | null> 
 }
 
 export async function listAccounts(): Promise<Account[]> {
-  const res = await getClient().query({
+  const res = await getControlClient().query({
     query: `SELECT ${ACCOUNT_COLUMNS} FROM accounts FINAL WHERE deleted = 0 ORDER BY created_at`,
     format: "JSONEachRow",
   });
@@ -295,7 +295,7 @@ export async function createAccount(input: CreateAccountInput): Promise<Account>
     created_at: now,
     updated_at: now,
   };
-  await getClient().insert({ table: "accounts", values: [row], format: "JSONEachRow", clickhouse_settings: { async_insert: 0 } });
+  await getControlClient().insert({ table: "accounts", values: [row], format: "JSONEachRow", clickhouse_settings: { async_insert: 0 } });
   return toAccount(row);
 }
 
@@ -310,7 +310,7 @@ export async function authenticate(email: string, password: string): Promise<Acc
 }
 
 async function writeAccountRow(row: AccountRow & { password_hash: string }): Promise<void> {
-  await getClient().insert({
+  await getControlClient().insert({
     table: "accounts",
     values: [{ ...row, updated_at: new Date().toISOString() }],
     format: "JSONEachRow",
@@ -320,7 +320,7 @@ async function writeAccountRow(row: AccountRow & { password_hash: string }): Pro
 
 export async function setPassword(accountId: string, password: string): Promise<void> {
   if (password.length < 8) throw new Error("Password must be at least 8 characters");
-  const res = await getClient().query({
+  const res = await getControlClient().query({
     query: `SELECT ${ACCOUNT_COLUMNS} FROM accounts FINAL WHERE id = {id:String} AND deleted = 0 LIMIT 1`,
     query_params: { id: accountId },
     format: "JSONEachRow",
@@ -364,13 +364,13 @@ export async function createApiKey(accountId: string, name: string): Promise<{ k
     created_at: now,
     updated_at: now,
   };
-  await getClient().insert({ table: "api_keys", values: [row], format: "JSONEachRow", clickhouse_settings: { async_insert: 0 } });
+  await getControlClient().insert({ table: "api_keys", values: [row], format: "JSONEachRow", clickhouse_settings: { async_insert: 0 } });
   const { key_hash: _h, deleted: _d, updated_at: _u, ...key } = row;
   return { key, plaintext };
 }
 
 export async function listApiKeys(accountId: string): Promise<ApiKey[]> {
-  const res = await getClient().query({
+  const res = await getControlClient().query({
     query: `SELECT id, account_id, name, prefix, last_used_at, created_at FROM api_keys FINAL WHERE account_id = {u:String} AND deleted = 0 ORDER BY created_at DESC`,
     query_params: { u: accountId },
     format: "JSONEachRow",
@@ -379,14 +379,14 @@ export async function listApiKeys(accountId: string): Promise<ApiKey[]> {
 }
 
 export async function revokeApiKey(accountId: string, id: string): Promise<boolean> {
-  const res = await getClient().query({
+  const res = await getControlClient().query({
     query: `SELECT id, account_id, name, key_hash, prefix, last_used_at, created_at FROM api_keys FINAL WHERE id = {id:String} AND account_id = {u:String} AND deleted = 0 LIMIT 1`,
     query_params: { id, u: accountId },
     format: "JSONEachRow",
   });
   const row = ((await res.json()) as Record<string, unknown>[])[0];
   if (!row) return false;
-  await getClient().insert({
+  await getControlClient().insert({
     table: "api_keys",
     values: [{ ...row, deleted: 1, updated_at: new Date().toISOString() }],
     format: "JSONEachRow",
@@ -398,7 +398,7 @@ export async function revokeApiKey(accountId: string, id: string): Promise<boole
 export async function accountFromApiKey(plaintext: string): Promise<Account | null> {
   if (!plaintext.startsWith(API_KEY_PREFIX)) return null;
   const secret = await getSigningSecret();
-  const res = await getClient().query({
+  const res = await getControlClient().query({
     query: `SELECT account_id FROM api_keys FINAL WHERE key_hash = {h:String} AND deleted = 0 LIMIT 1`,
     query_params: { h: hashApiKey(plaintext, secret) },
     format: "JSONEachRow",
