@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="233" height="82" viewBox="0 0 233 82" fill="none" role="img" aria-label="Fourier">
+  <rect width="233" height="82" fill="#141414"/>
+  <rect x="20.16" y="26.965" width="4.954" height="34.675" rx="0.826" fill="#00FFAE"/>
+  <rect x="28.416" y="20.36" width="7.43" height="34.675" rx="0.826" fill="#00FFAE"/>
+  <rect x="39.149" y="26.965" width="10.733" height="34.675" rx="0.826" fill="#00FFAE"/>
+  <text x="61.642" y="58.28" font-family="Geist, 'Geist Sans', Inter, system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif" font-size="48" font-weight="500" letter-spacing="-0.02em" fill="#EEF0F2">Fourier</text>
+</svg>

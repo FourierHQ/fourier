@@ -17,6 +17,7 @@ import {
   SidebarMenuItem,
   SidebarRail,
 } from "@/components/ui/sidebar";
+import { FourierIcon } from "@/components/logo";
 import { useAuthStatus, useHealth, useLogout, useOverview } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -49,9 +50,7 @@ export function AppSidebar() {
           <SidebarMenuItem>
             <SidebarMenuButton size="lg" asChild>
               <Link href="/">
-                <div className="flex aspect-square size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground font-mono font-bold">
-                  ƒ
-                </div>
+                <FourierIcon />
                 <div className="grid flex-1 text-left text-sm leading-tight">
                   <span className="truncate font-semibold">Fourier</span>
                   <span className="truncate text-xs text-muted-foreground">{overview.data?.project.name ?? "Analytics"}</span>

@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, useState, type FormEvent } from "react";
+import { FourierLockup } from "@/components/logo";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -49,9 +50,7 @@ export default function LoginPage() {
 function Centered({ children }: { children: React.ReactNode }) {
   return (
     <main className="flex min-h-dvh flex-col items-center justify-center gap-6 px-4 py-12">
-      <div className="flex items-center gap-2">
-        <span className="text-lg font-semibold tracking-tight">Fourier</span>
-      </div>
+      <FourierLockup className="text-lg" />
       {children}
     </main>
   );
