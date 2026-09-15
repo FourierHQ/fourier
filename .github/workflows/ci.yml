@@ -8,19 +8,6 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
-    # Environment isolation is a safety property, not a feature: if a query ever loses
-    # its scope, preview data silently appears in production numbers and nothing else
-    # would catch it. The integration suite needs a real ClickHouse to prove it.
-    services:
-      clickhouse:
-        image: clickhouse/clickhouse-server:24-alpine
-        ports:
-          - 8123:8123
-        options: >-
-          --health-cmd "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -34,6 +21,33 @@ jobs:
       - run: pnpm --filter @fourierhq/sdk build
       - run: pnpm typecheck
       - run: pnpm test
+      # Environment isolation is a safety property, not a feature: if a query ever
+      # loses its scope, preview data silently appears in production numbers and
+      # nothing else would catch it. Proving that needs a real ClickHouse.
+      #
+      # Started here rather than as a `services:` container because a container that
+      # fails its healthcheck reports only "unhealthy" and throws the server log away.
+      # Polling /ping ourselves means a failure prints why.
+      - name: Start ClickHouse
+        run: |
+          docker run -d --name clickhouse -p 8123:8123 \
+            --ulimit nofile=262144:262144 \
+            clickhouse/clickhouse-server:26.8
+          for i in $(seq 1 90); do
+            if curl -sf http://localhost:8123/ping >/dev/null 2>&1; then
+              echo "ClickHouse ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::ClickHouse never answered /ping"
+          docker logs clickhouse
+          exit 1
+
       - run: pnpm --filter @fourierhq/core test:integration
         env:
           CLICKHOUSE_URL: http://localhost:8123
+
+      - name: ClickHouse log on failure
+        if: failure()
+        run: docker logs clickhouse 2>&1 | tail -50
