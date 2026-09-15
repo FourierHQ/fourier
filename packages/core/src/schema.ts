@@ -14,7 +14,16 @@
 
 export const SCHEMA_VERSION = 4;
 
-export const statements: string[] = [
+/**
+ * A migration statement. Plain strings are idempotent `CREATE ... IF NOT EXISTS` and run on
+ * every boot. `when: "upgrade"` statements (ALTER, DROP) only run when an existing install is
+ * behind SCHEMA_VERSION: a fresh install already has the final shape, and re-running an ALTER on
+ * every boot is what ClickHouse Cloud's replicated metadata dislikes most. `when: "change"`
+ * statements (CREATE OR REPLACE VIEW) run on fresh installs and upgrades, never on a no-op boot.
+ */
+export type Statement = string | { sql: string; when: "upgrade" | "change" };
+
+export const statements: Statement[] = [
   `CREATE TABLE IF NOT EXISTS projects (
     id          String,
     name        String,
@@ -85,12 +94,11 @@ export const statements: string[] = [
   ORDER BY (project_id, event, timestamp, message_id)`,
 
   // v2 columns for installs created before they existed.
-  `ALTER TABLE events ADD COLUMN IF NOT EXISTS source_id LowCardinality(String) AFTER project_id`,
-  `ALTER TABLE events ADD COLUMN IF NOT EXISTS person_id String AFTER group_id`,
-  `ALTER TABLE events ADD COLUMN IF NOT EXISTS session_id String AFTER person_id`,
-  `ALTER TABLE events ADD COLUMN IF NOT EXISTS session_start UInt8 DEFAULT 0 AFTER session_id`,
-  `ALTER TABLE events ADD INDEX IF NOT EXISTS idx_person_id person_id TYPE bloom_filter(0.01) GRANULARITY 4`,
-
+  { when: "upgrade", sql: `ALTER TABLE events ADD COLUMN IF NOT EXISTS source_id LowCardinality(String) AFTER project_id` },
+  { when: "upgrade", sql: `ALTER TABLE events ADD COLUMN IF NOT EXISTS person_id String AFTER group_id` },
+  { when: "upgrade", sql: `ALTER TABLE events ADD COLUMN IF NOT EXISTS session_id String AFTER person_id` },
+  { when: "upgrade", sql: `ALTER TABLE events ADD COLUMN IF NOT EXISTS session_start UInt8 DEFAULT 0 AFTER session_id` },
+  { when: "upgrade", sql: `ALTER TABLE events ADD INDEX IF NOT EXISTS idx_person_id person_id TYPE bloom_filter(0.01) GRANULARITY 4` },
   // Latest merged traits per user. Ingest reads, merges, writes.
   `CREATE TABLE IF NOT EXISTS user_traits (
     project_id  LowCardinality(String),
@@ -212,15 +220,14 @@ export const statements: string[] = [
   // identity_map: one row per id that belongs to a user. Conflicts (one anonymous id linked to
   // several users, e.g. a shared device without reset()) resolve to the earliest link so the
   // first person to identify keeps the pre-signup history.
-  `CREATE OR REPLACE VIEW identity_map AS
+  { when: "change", sql: `CREATE OR REPLACE VIEW identity_map AS
   SELECT project_id, anonymous_id AS from_id, argMin(user_id, created_at) AS to_id
   FROM identities
-  GROUP BY project_id, from_id`,
-
+  GROUP BY project_id, from_id` },
   // events with person_id: the user, or the user an anonymous id later became, else the anonymous id.
   // Ingest stamps person_id when the link is already known; the join covers events that arrived first
   // and one level of user -> user alias.
-  `CREATE OR REPLACE VIEW events_resolved AS
+  { when: "change", sql: `CREATE OR REPLACE VIEW events_resolved AS
   SELECT
     e.* EXCEPT person_id,
     multiIf(
@@ -231,10 +238,9 @@ export const statements: string[] = [
     ) AS person_id
   FROM events AS e
   LEFT JOIN identity_map AS i
-    ON i.project_id = e.project_id AND i.from_id = if(e.user_id != '', e.user_id, e.anonymous_id)`,
-
+    ON i.project_id = e.project_id AND i.from_id = if(e.user_id != '', e.user_id, e.anonymous_id)` },
   // user_stats rolled up per person.
-  `CREATE OR REPLACE VIEW person_stats AS
+  { when: "change", sql: `CREATE OR REPLACE VIEW person_stats AS
   SELECT
     s.project_id AS project_id,
     if(i.to_id != '', i.to_id, s.distinct_id) AS person_id,
@@ -245,8 +251,7 @@ export const statements: string[] = [
     argMaxMerge(s.last_group_id) AS group_id
   FROM user_stats AS s
   LEFT JOIN identity_map AS i ON i.project_id = s.project_id AND i.from_id = s.distinct_id
-  GROUP BY project_id, person_id`,
-
+  GROUP BY project_id, person_id` },
   // Which sources (products / sites) each person has been seen on.
   `CREATE TABLE IF NOT EXISTS person_sources (
     project_id   LowCardinality(String),
@@ -291,10 +296,10 @@ export const statements: string[] = [
   ) ENGINE = ReplacingMergeTree
   ORDER BY (project_id, distinct_id, timestamp, message_id)`,
 
-  `ALTER TABLE touches ADD COLUMN IF NOT EXISTS source_id LowCardinality(String) AFTER project_id`,
-
-  // Recreated so it carries source_id (safe: MVs only affect future inserts).
-  `DROP VIEW IF EXISTS touches_mv`,
+  { when: "upgrade", sql: `ALTER TABLE touches ADD COLUMN IF NOT EXISTS source_id LowCardinality(String) AFTER project_id` },
+  // v3: recreated so it carries source_id. Upgrade-only: dropping an MV on every boot would lose
+  // the events that arrive between the DROP and the CREATE.
+  { when: "upgrade", sql: `DROP VIEW IF EXISTS touches_mv` },
   `CREATE MATERIALIZED VIEW IF NOT EXISTS touches_mv TO touches AS
   SELECT
     project_id, source_id, message_id, distinct_id, anonymous_id, user_id, group_id, session_id, timestamp,
@@ -305,14 +310,13 @@ export const statements: string[] = [
   WHERE type IN ('page', 'screen', 'track')
     AND (session_start = 1 OR utm_source != '' OR utm_campaign != '' OR (referrer_host != '' AND referrer_host != host))`,
 
-  `CREATE OR REPLACE VIEW touches_resolved AS
+  { when: "change", sql: `CREATE OR REPLACE VIEW touches_resolved AS
   SELECT
     t.* ,
     if(i.to_id != '', i.to_id, if(t.user_id != '', t.user_id, t.anonymous_id)) AS person_id
   FROM touches AS t
   LEFT JOIN identity_map AS i
-    ON i.project_id = t.project_id AND i.from_id = if(t.user_id != '', t.user_id, t.anonymous_id)`,
-
+    ON i.project_id = t.project_id AND i.from_id = if(t.user_id != '', t.user_id, t.anonymous_id)` },
   // ---- auth / app state ----
   //
   // Small, low-write, edit-in-place tables. Same ReplacingMergeTree + FINAL pattern
