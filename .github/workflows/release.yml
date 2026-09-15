@@ -66,6 +66,22 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
 
+      # npm refuses to republish a version, which would fail the run for a
+      # version that is already out there — a re-run of this workflow, or the
+      # tag for the bootstrap release that was published by hand. Neither is an
+      # error, so check first and no-op instead of going red.
+      - name: Skip if this version is already published
+        id: published
+        run: |
+          pkg=$(node -p "require('./packages/sdk/package.json').version")
+          if npm view "@fourierhq/sdk@$pkg" version >/dev/null 2>&1; then
+            echo "@fourierhq/sdk@$pkg is already on npm — nothing to publish"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish
+        if: steps.published.outputs.skip == 'false'
         run: npm publish --provenance
         working-directory: packages/sdk
