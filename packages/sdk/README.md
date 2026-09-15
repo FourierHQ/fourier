@@ -1,6 +1,12 @@
-# fourier
+# @fourierhq/sdk
 
 Open source product analytics SDK. Drop-in compatible with Segment's analytics.js API: `identify`, `track`, `page`, `group`, `alias`, `reset`, `user()`, `ready()`, `on()`, `trackLink`, `trackForm`, source middleware and the same `ajs_*` cookies, so an existing Segment install keeps its anonymous ids.
+
+It talks to a [Fourier](https://github.com/FourierHQ/fourier) server you run yourself — self-hosted or on Vercel, with ClickHouse underneath. The SDK is MIT; the server is AGPL-3.0.
+
+```bash
+pnpm add @fourierhq/sdk
+```
 
 ## Next.js (App Router)
 
