@@ -30,7 +30,11 @@ jobs:
       # Polling /ping ourselves means a failure prints why.
       - name: Start ClickHouse
         run: |
+          # The 26.x image refuses an empty password for `default`, unlike a local
+          # Homebrew install — so CI has to set one and hand the same to the tests.
           docker run -d --name clickhouse -p 8123:8123 \
+            -e CLICKHOUSE_USER=default \
+            -e CLICKHOUSE_PASSWORD=fourier_ci \
             --ulimit nofile=262144:262144 \
             clickhouse/clickhouse-server:26.8
           for i in $(seq 1 90); do
@@ -47,6 +51,8 @@ jobs:
       - run: pnpm --filter @fourierhq/core test:integration
         env:
           CLICKHOUSE_URL: http://localhost:8123
+          CLICKHOUSE_USER: default
+          CLICKHOUSE_PASSWORD: fourier_ci
 
       - name: ClickHouse log on failure
         if: failure()
