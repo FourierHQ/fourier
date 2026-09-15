@@ -1,4 +1,4 @@
-import { listSources, renameSource } from "@fourier/core";
+import { listSources, renameSource } from "@fourierhq/core";
 import { resolveProject } from "@/lib/db";
 import { error, handle, json, options } from "@/lib/http";
 import { requireProjectAccess } from "@/lib/auth";

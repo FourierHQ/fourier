@@ -18,7 +18,7 @@ import {
   propertyKeys,
   runSql,
   schemaDoc,
-} from "@fourier/core";
+} from "@fourierhq/core";
 import { ready, resolveProject } from "./db";
 
 const projectArg = z

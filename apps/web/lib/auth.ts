@@ -22,7 +22,7 @@ import {
   accountFromSessionToken,
   canAccessProject,
   type Account,
-} from "@fourier/core";
+} from "@fourierhq/core";
 import { ready } from "./db";
 import { error } from "./http";
 

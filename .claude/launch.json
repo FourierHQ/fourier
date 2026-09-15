@@ -4,13 +4,13 @@
     {
       "name": "fourier-web",
       "runtimeExecutable": "pnpm",
-      "runtimeArgs": ["--filter", "@fourier/web", "dev"],
+      "runtimeArgs": ["--filter", "@fourierhq/web", "dev"],
       "port": 5050
     },
     {
       "name": "fourier-demo",
       "runtimeExecutable": "pnpm",
-      "runtimeArgs": ["--filter", "@fourier/example-nextjs", "dev"],
+      "runtimeArgs": ["--filter", "@fourierhq/example-nextjs", "dev"],
       "port": 5051
     }
   ]

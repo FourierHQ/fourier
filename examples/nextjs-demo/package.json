@@ -1,5 +1,5 @@
 {
-  "name": "@fourier/example-nextjs",
+  "name": "@fourierhq/example-nextjs",
   "version": "0.1.0",
   "license": "MIT",
   "private": true,
@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "fourier": "workspace:*",
+    "@fourierhq/sdk": "workspace:*",
     "next": "16.3.5",
     "react": "19.3.0",
     "react-dom": "19.3.0"

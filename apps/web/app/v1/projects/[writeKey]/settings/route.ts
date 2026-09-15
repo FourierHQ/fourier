@@ -1,4 +1,4 @@
-import { resolveWriteKey } from "@fourier/core";
+import { resolveWriteKey } from "@fourierhq/core";
 import { ready } from "@/lib/db";
 import { error, handle, json, options } from "@/lib/http";
 

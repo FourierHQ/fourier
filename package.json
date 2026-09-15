@@ -8,14 +8,14 @@
   "packageManager": "pnpm@10.0.0",
   "scripts": {
     "dev": "node scripts/dev.mjs",
-    "dev:web": "pnpm --filter @fourier/web dev",
-    "dev:demo": "pnpm --filter @fourier/example-nextjs dev",
+    "dev:web": "pnpm --filter @fourierhq/web dev",
+    "dev:demo": "pnpm --filter @fourierhq/example-nextjs dev",
     "build": "pnpm -r build",
-    "test": "pnpm --filter fourier test",
+    "test": "pnpm --filter @fourierhq/sdk test",
     "typecheck": "pnpm -r typecheck",
     "clickhouse": "clickhouse server --config-file=./infra/clickhouse/config.xml",
-    "seed": "pnpm --filter @fourier/web seed",
-    "mcp": "pnpm --filter @fourier/web mcp"
+    "seed": "pnpm --filter @fourierhq/web seed",
+    "mcp": "pnpm --filter @fourierhq/web mcp"
   },
   "devDependencies": {
     "typescript": "^5.9.2"

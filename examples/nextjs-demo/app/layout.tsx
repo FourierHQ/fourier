@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { FourierProvider } from "fourier/next";
+import { FourierProvider } from "@fourierhq/sdk/next";
 import "./globals.css";
 
 export const metadata: Metadata = { title: "Fourier demo app" };

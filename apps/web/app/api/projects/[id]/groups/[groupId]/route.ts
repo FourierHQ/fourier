@@ -1,4 +1,4 @@
-import { getGroup, groupAttribution, listEvents } from "@fourier/core";
+import { getGroup, groupAttribution, listEvents } from "@fourierhq/core";
 import { resolveProject } from "@/lib/db";
 import { error, handle, int, json, options } from "@/lib/http";
 import { requireProjectAccess } from "@/lib/auth";

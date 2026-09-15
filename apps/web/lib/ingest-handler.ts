@@ -1,4 +1,4 @@
-import { batchSchema, ingest, messageSchema, resolveWriteKey, type IncomingMessage } from "@fourier/core";
+import { batchSchema, ingest, messageSchema, resolveWriteKey, type IncomingMessage } from "@fourierhq/core";
 import { ready } from "./db";
 import { error, json } from "./http";
 

@@ -8,7 +8,7 @@ try {
 }
 
 const nextConfig: NextConfig = {
-  transpilePackages: ["@fourier/core"],
+  transpilePackages: ["@fourierhq/core"],
 };
 
 export default nextConfig;

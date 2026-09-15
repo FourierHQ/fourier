@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { useFourier } from "fourier/next";
+import { useFourier } from "@fourierhq/sdk/next";
 
 const CAMPAIGNS = [
   { label: "Twitter · launch", query: "utm_source=twitter&utm_medium=social&utm_campaign=launch" },

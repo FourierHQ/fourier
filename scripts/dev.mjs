@@ -37,7 +37,7 @@ if (!(await ping())) {
   console.log(`[fourier] ClickHouse reachable at ${url}`);
 }
 
-const web = spawn("pnpm", ["--filter", "@fourier/web", "dev"], { stdio: "inherit" });
+const web = spawn("pnpm", ["--filter", "@fourierhq/web", "dev"], { stdio: "inherit" });
 const shutdown = () => {
   web.kill("SIGINT");
   clickhouse?.kill("SIGINT");

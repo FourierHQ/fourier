@@ -82,7 +82,7 @@ export function SetupGuide({ compact = false }: { compact?: boolean }) {
 
   const envSnippet = `NEXT_PUBLIC_FOURIER_WRITE_KEY=${writeKey}\nNEXT_PUBLIC_FOURIER_HOST=${host}`;
   const appRouter = `// app/layout.tsx
-import { FourierProvider } from "fourier/next";
+import { FourierProvider } from "@fourierhq/sdk/next";
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -99,7 +99,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   );
 }`;
   const usage = `"use client";
-import { useFourier } from "fourier/next";
+import { useFourier } from "@fourierhq/sdk/next";
 
 export function UpgradeButton() {
   const fourier = useFourier();
@@ -119,7 +119,7 @@ export function UpgradeButton() {
 import type { AppProps } from "next/app";
 import { useEffect } from "react";
 import { useRouter } from "next/router";
-import fourier from "fourier";
+import fourier from "@fourierhq/sdk";
 
 fourier.init({
   writeKey: process.env.NEXT_PUBLIC_FOURIER_WRITE_KEY!,
@@ -135,7 +135,7 @@ export default function App({ Component, pageProps }: AppProps) {
   return <Component {...pageProps} />;
 }`;
   const server = `// app/api/checkout/route.ts (or any server code)
-import { FourierServer } from "fourier/server";
+import { FourierServer } from "@fourierhq/sdk/server";
 
 const fourier = new FourierServer({
   writeKey: process.env.FOURIER_WRITE_KEY!,
@@ -150,7 +150,7 @@ export async function POST(req: Request) {
 }`;
   const migrate = `// Already on Segment? Swap the import, keep every call.
 - import { AnalyticsBrowser } from "@segment/analytics-next";
-+ import { AnalyticsBrowser } from "fourier";
++ import { AnalyticsBrowser } from "@fourierhq/sdk";
 
 - const analytics = AnalyticsBrowser.load({ writeKey: "SEGMENT_KEY" });
 + const analytics = AnalyticsBrowser.load("${writeKey}", { host: "${host}" });
@@ -200,7 +200,7 @@ const url = fourier.decorateUrl("https://app.example.io/signup");`;
           </div>
         </CardHeader>
         <CardContent className="space-y-3">
-          <CodeBlock code="pnpm add fourier" />
+          <CodeBlock code="pnpm add @fourierhq/sdk" />
           <SourcesPanel selected={selected} onSelect={(s) => setSelectedId(s.id)} />
           <div className="flex flex-wrap items-center gap-2 text-sm">
             <span className="text-muted-foreground">Write key{selected ? ` for ${selected.name}` : ""}</span>

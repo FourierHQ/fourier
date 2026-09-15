@@ -19,7 +19,7 @@ import type {
   TouchRecord,
   UserDetail,
   UserRecord,
-} from "@fourier/core";
+} from "@fourierhq/core";
 
 export type {
   Attribution,

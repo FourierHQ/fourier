@@ -1,7 +1,10 @@
 {
-  "name": "fourier",
+  "name": "@fourierhq/sdk",
   "version": "0.1.0",
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "description": "Open source product analytics SDK. identify/track/page, analytics.js-shaped, with first-class Next.js support.",
   "type": "module",
   "sideEffects": false,

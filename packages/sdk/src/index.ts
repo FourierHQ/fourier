@@ -838,7 +838,7 @@ export class Fourier extends Emitter {
   }
 }
 
-/** Alias so `import { AnalyticsBrowser } from "fourier"` reads like analytics-next. */
+/** Alias so `import { AnalyticsBrowser } from "@fourierhq/sdk"` reads like analytics-next. */
 export const AnalyticsBrowser = Fourier;
 export type Analytics = Fourier;
 

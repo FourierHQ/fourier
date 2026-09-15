@@ -1,4 +1,4 @@
-import { createApiKey, listApiKeys } from "@fourier/core";
+import { createApiKey, listApiKeys } from "@fourierhq/core";
 import { currentUser, requireAuth } from "@/lib/auth";
 import { error, handle, json, options } from "@/lib/http";
 

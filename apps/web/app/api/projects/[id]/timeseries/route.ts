@@ -1,4 +1,4 @@
-import { eventTimeseries } from "@fourier/core";
+import { eventTimeseries } from "@fourierhq/core";
 import { resolveProject } from "@/lib/db";
 import { error, handle, int, json, options } from "@/lib/http";
 import { requireProjectAccess } from "@/lib/auth";

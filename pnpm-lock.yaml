@@ -14,9 +14,12 @@ importers:
 
   apps/web:
     dependencies:
-      '@fourier/core':
+      '@fourierhq/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@fourierhq/sdk':
+        specifier: workspace:*
+        version: link:../../packages/sdk
       '@modelcontextprotocol/server':
         specifier: ^2
         version: 2.0.0
@@ -35,9 +38,6 @@ importers:
       cn:
         specifier: ^0.2.6
         version: 0.2.6
-      fourier:
-        specifier: workspace:*
-        version: link:../../packages/sdk
       lucide-react:
         specifier: ^1.45.0
         version: 1.45.0(react@19.3.0)
@@ -102,7 +102,7 @@ importers:
 
   examples/nextjs-demo:
     dependencies:
-      fourier:
+      '@fourierhq/sdk':
         specifier: workspace:*
         version: link:../../packages/sdk
       next:
