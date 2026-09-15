@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/sidebar";
 import { FourierIcon } from "@/components/logo";
 import { useAuthStatus, useHealth, useLogout, useOverview } from "@/lib/api";
+import { EnvironmentSwitcher } from "@/components/environment-switcher";
 import { cn } from "@/lib/utils";
 
 const nav = [
@@ -57,6 +58,9 @@ export function AppSidebar() {
                 </div>
               </Link>
             </SidebarMenuButton>
+          </SidebarMenuItem>
+          <SidebarMenuItem>
+            <EnvironmentSwitcher />
           </SidebarMenuItem>
         </SidebarMenu>
       </SidebarHeader>

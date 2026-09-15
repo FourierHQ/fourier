@@ -18,6 +18,10 @@ import {
   propertyKeys,
   runSql,
   schemaDoc,
+  ENVIRONMENTS,
+  parseEnvironment,
+  scope as makeScope,
+  type Scope,
 } from "@fourierhq/core";
 import { ready, resolveProject } from "./db";
 
@@ -26,6 +30,12 @@ const projectArg = z
   .optional()
   .describe("Project id. Omit to use the default project.");
 const sourceArg = z.string().optional().describe("Source id (one website / app / product in the project). See list_sources.");
+const environmentArg = z
+  .enum(ENVIRONMENTS)
+  .optional()
+  .describe(
+    "Which environment to read: production, preview or development. Each is a separate database and they share no users, companies or events. Omit for production.",
+  );
 
 async function project(id?: string) {
   const { project } = await ready();
@@ -33,6 +43,11 @@ async function project(id?: string) {
   const p = await resolveProject(id);
   if (!p) throw new Error(`Project not found: ${id}`);
   return p;
+}
+
+/** Project + environment for a read. Defaults to production, like the dashboard. */
+async function scopeFor(projectId: string | undefined, environment: string | undefined): Promise<Scope> {
+  return makeScope((await project(projectId)).id, parseEnvironment(environment));
 }
 
 function text(data: unknown) {
@@ -69,10 +84,10 @@ export function registerFourierTools(server: McpServer) {
     {
       title: "Project overview",
       description: "Totals: events, users, identified users, companies, and last-24h activity.",
-      inputSchema: z.object({ project_id: projectArg }),
+      inputSchema: z.object({ project_id: projectArg, environment: environmentArg }),
       annotations: readOnly,
     },
-    async ({ project_id }) => text(await getOverview((await project(project_id)).id)),
+    async ({ project_id, environment }) => text(await getOverview(await scopeFor(project_id, environment))),
   );
 
   server.registerTool(
@@ -80,10 +95,10 @@ export function registerFourierTools(server: McpServer) {
     {
       title: "List event names",
       description: "Distinct event names with counts and unique users. Use before querying events so you know the exact names.",
-      inputSchema: z.object({ project_id: projectArg, source_id: sourceArg, days: z.number().int().positive().optional().describe("Only the last N days") }),
+      inputSchema: z.object({ project_id: projectArg, environment: environmentArg, source_id: sourceArg, days: z.number().int().positive().optional().describe("Only the last N days") }),
       annotations: readOnly,
     },
-    async ({ project_id, source_id, days }) => text(await listEventNames((await project(project_id)).id, { days, sourceId: source_id })),
+    async ({ project_id, environment, source_id, days }) => text(await listEventNames(await scopeFor(project_id, environment), { days, sourceId: source_id })),
   );
 
   server.registerTool(
@@ -92,7 +107,7 @@ export function registerFourierTools(server: McpServer) {
       title: "List events",
       description: "Recent raw events, newest first, with full properties. Filter by event name, user, company, time window or free-text search.",
       inputSchema: z.object({
-        project_id: projectArg,
+        project_id: projectArg, environment: environmentArg,
         event: z.string().optional().describe("Exact event name, e.g. 'Signed Up'. Page views are '$page'."),
         type: z.enum(["track", "page", "screen", "identify", "group", "alias"]).optional(),
         source_id: sourceArg,
@@ -105,8 +120,8 @@ export function registerFourierTools(server: McpServer) {
       }),
       annotations: readOnly,
     },
-    async ({ project_id, distinct_id, group_id, source_id, q, ...rest }) =>
-      text(await listEvents((await project(project_id)).id, { ...rest, distinctId: distinct_id, groupId: group_id, sourceId: source_id, search: q })),
+    async ({ project_id, environment, distinct_id, group_id, source_id, q, ...rest }) =>
+      text(await listEvents(await scopeFor(project_id, environment), { ...rest, distinctId: distinct_id, groupId: group_id, sourceId: source_id, search: q })),
   );
 
   server.registerTool(
@@ -115,7 +130,7 @@ export function registerFourierTools(server: McpServer) {
       title: "Event time series",
       description: "Counts and unique users per hour/day/week/month, optionally for one event or one company.",
       inputSchema: z.object({
-        project_id: projectArg,
+        project_id: projectArg, environment: environmentArg,
         event: z.string().optional(),
         group_id: z.string().optional(),
         source_id: sourceArg,
@@ -125,7 +140,7 @@ export function registerFourierTools(server: McpServer) {
       }),
       annotations: readOnly,
     },
-    async ({ project_id, group_id, source_id, ...rest }) => text(await eventTimeseries((await project(project_id)).id, { ...rest, groupId: group_id, sourceId: source_id })),
+    async ({ project_id, environment, group_id, source_id, ...rest }) => text(await eventTimeseries(await scopeFor(project_id, environment), { ...rest, groupId: group_id, sourceId: source_id })),
   );
 
   server.registerTool(
@@ -133,10 +148,10 @@ export function registerFourierTools(server: McpServer) {
     {
       title: "Event property keys",
       description: "Which property keys an event carries (last 30 days), so you can write JSONExtract queries.",
-      inputSchema: z.object({ project_id: projectArg, event: z.string() }),
+      inputSchema: z.object({ project_id: projectArg, environment: environmentArg, event: z.string() }),
       annotations: readOnly,
     },
-    async ({ project_id, event }) => text(await propertyKeys((await project(project_id)).id, event)),
+    async ({ project_id, environment, event }) => text(await propertyKeys(await scopeFor(project_id, environment), event)),
   );
 
   server.registerTool(
@@ -145,7 +160,7 @@ export function registerFourierTools(server: McpServer) {
       title: "List users",
       description: "Users with traits, first/last seen and event counts. Search matches ids and trait values.",
       inputSchema: z.object({
-        project_id: projectArg,
+        project_id: projectArg, environment: environmentArg,
         q: z.string().optional(),
         identified_only: z.boolean().optional(),
         group_id: z.string().optional().describe("Only users whose latest company is this id"),
@@ -156,8 +171,8 @@ export function registerFourierTools(server: McpServer) {
       }),
       annotations: readOnly,
     },
-    async ({ project_id, q, identified_only, group_id, source_id, order_by, ...rest }) =>
-      text(await listUsers((await project(project_id)).id, { ...rest, search: q, identifiedOnly: identified_only, groupId: group_id, sourceId: source_id, orderBy: order_by })),
+    async ({ project_id, environment, q, identified_only, group_id, source_id, order_by, ...rest }) =>
+      text(await listUsers(await scopeFor(project_id, environment), { ...rest, search: q, identifiedOnly: identified_only, groupId: group_id, sourceId: source_id, orderBy: order_by })),
   );
 
   server.registerTool(
@@ -165,16 +180,16 @@ export function registerFourierTools(server: McpServer) {
     {
       title: "Get user",
       description: "One person's profile: traits, linked anonymous ids, companies, top events, and a recent event timeline. Accepts a user id or an anonymous id; anonymous activity is attributed to the user it later identified as.",
-      inputSchema: z.object({ project_id: projectArg, distinct_id: z.string(), event_limit: z.number().int().min(0).max(500).optional() }),
+      inputSchema: z.object({ project_id: projectArg, environment: environmentArg, distinct_id: z.string(), event_limit: z.number().int().min(0).max(500).optional() }),
       annotations: readOnly,
     },
-    async ({ project_id, distinct_id, event_limit }) => {
-      const p = await project(project_id);
-      const user = await getUser(p.id, distinct_id);
+    async ({ project_id, environment, distinct_id, event_limit }) => {
+      const p = await scopeFor(project_id, environment);
+      const user = await getUser(p, distinct_id);
       if (!user) throw new Error(`User not found: ${distinct_id}`);
       const [events, attribution] = await Promise.all([
-        listEvents(p.id, { distinctId: user.distinct_id, limit: event_limit ?? 50 }),
-        personAttribution(p.id, user.distinct_id),
+        listEvents(p, { distinctId: user.distinct_id, limit: event_limit ?? 50 }),
+        personAttribution(p, user.distinct_id),
       ]);
       return text({ user, attribution, events });
     },
@@ -186,7 +201,7 @@ export function registerFourierTools(server: McpServer) {
       title: "List companies",
       description: "Companies / workspaces (analytics.js groups) with traits, user counts and activity.",
       inputSchema: z.object({
-        project_id: projectArg,
+        project_id: projectArg, environment: environmentArg,
         q: z.string().optional(),
         order_by: z.enum(["last_seen", "event_count", "user_count"]).optional(),
         limit: z.number().int().min(1).max(500).optional(),
@@ -194,7 +209,7 @@ export function registerFourierTools(server: McpServer) {
       }),
       annotations: readOnly,
     },
-    async ({ project_id, q, order_by, ...rest }) => text(await listGroups((await project(project_id)).id, { ...rest, search: q, orderBy: order_by })),
+    async ({ project_id, environment, q, order_by, ...rest }) => text(await listGroups(await scopeFor(project_id, environment), { ...rest, search: q, orderBy: order_by })),
   );
 
   server.registerTool(
@@ -202,15 +217,15 @@ export function registerFourierTools(server: McpServer) {
     {
       title: "Get company",
       description: "One company: traits, members, top events, attribution (first/last touch, how each member arrived) and recent events across all its users.",
-      inputSchema: z.object({ project_id: projectArg, group_id: z.string(), event_limit: z.number().int().min(0).max(500).optional() }),
+      inputSchema: z.object({ project_id: projectArg, environment: environmentArg, group_id: z.string(), event_limit: z.number().int().min(0).max(500).optional() }),
       annotations: readOnly,
     },
-    async ({ project_id, group_id, event_limit }) => {
-      const p = await project(project_id);
+    async ({ project_id, environment, group_id, event_limit }) => {
+      const p = await scopeFor(project_id, environment);
       const [group, events, attribution] = await Promise.all([
-        getGroup(p.id, group_id),
-        listEvents(p.id, { groupId: group_id, limit: event_limit ?? 50 }),
-        groupAttribution(p.id, group_id),
+        getGroup(p, group_id),
+        listEvents(p, { groupId: group_id, limit: event_limit ?? 50 }),
+        groupAttribution(p, group_id),
       ]);
       if (!group) throw new Error(`Group not found: ${group_id}`);
       return text({ group, attribution, events });
@@ -224,7 +239,7 @@ export function registerFourierTools(server: McpServer) {
       description:
         "Every recorded arrival, newest first: session starts and any page view with UTM parameters or an external referrer. kind is 'campaign', 'referral' or 'direct'. Filter by person or company. Every touch is kept, so first-touch, last-touch and multi-touch models are all derivable.",
       inputSchema: z.object({
-        project_id: projectArg,
+        project_id: projectArg, environment: environmentArg,
         person_id: z.string().optional().describe("User id or anonymous id"),
         group_id: z.string().optional().describe("Company id: touches of every member, including pre-signup arrivals"),
         source_id: sourceArg,
@@ -236,8 +251,8 @@ export function registerFourierTools(server: McpServer) {
       }),
       annotations: readOnly,
     },
-    async ({ project_id, person_id, group_id, source_id, exclude_direct, ...rest }) =>
-      text(await listTouches((await project(project_id)).id, { ...rest, personId: person_id, groupId: group_id, sourceId: source_id, excludeDirect: exclude_direct })),
+    async ({ project_id, environment, person_id, group_id, source_id, exclude_direct, ...rest }) =>
+      text(await listTouches(await scopeFor(project_id, environment), { ...rest, personId: person_id, groupId: group_id, sourceId: source_id, excludeDirect: exclude_direct })),
   );
 
   server.registerTool(
@@ -247,7 +262,7 @@ export function registerFourierTools(server: McpServer) {
       description:
         "People and companies grouped by a touch dimension (utm_source, utm_medium, utm_campaign, referrer_host, landing_path, kind) under a first-touch or last-touch model. Last-touch ignores direct arrivals when the person has any campaign or referral touch. Use identified_only to count sign-ups rather than visitors.",
       inputSchema: z.object({
-        project_id: projectArg,
+        project_id: projectArg, environment: environmentArg,
         model: z.enum(["first", "last"]).optional(),
         by: z.enum(["utm_source", "utm_medium", "utm_campaign", "referrer_host", "landing_path", "kind", "source_id"]).optional(),
         identified_only: z.boolean().optional(),
@@ -259,8 +274,8 @@ export function registerFourierTools(server: McpServer) {
       }),
       annotations: readOnly,
     },
-    async ({ project_id, identified_only, group_id, source_id, ...rest }) =>
-      text(await attributionReport((await project(project_id)).id, { ...rest, identifiedOnly: identified_only, groupId: group_id, sourceId: source_id })),
+    async ({ project_id, environment, identified_only, group_id, source_id, ...rest }) =>
+      text(await attributionReport(await scopeFor(project_id, environment), { ...rest, identifiedOnly: identified_only, groupId: group_id, sourceId: source_id })),
   );
 
   server.registerTool(
@@ -281,13 +296,13 @@ export function registerFourierTools(server: McpServer) {
       description:
         "Run a read-only ClickHouse SELECT against the analytics database. Always filter with project_id = {project_id} (the placeholder is bound server-side). Use windowFunnel for funnels, JSONExtractString(properties, 'key') for properties. Max 10k rows.",
       inputSchema: z.object({
-        project_id: projectArg,
+        project_id: projectArg, environment: environmentArg,
         sql: z.string().describe("A single SELECT statement. Use {project_id} as the project filter placeholder."),
         limit: z.number().int().min(1).max(10000).optional(),
       }),
       annotations: readOnly,
     },
-    async ({ project_id, sql, limit }) => text(await runSql((await project(project_id)).id, sql, { limit })),
+    async ({ project_id, environment, sql, limit }) => text(await runSql(await scopeFor(project_id, environment), sql, { limit })),
   );
 }
 

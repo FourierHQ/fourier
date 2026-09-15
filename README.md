@@ -134,6 +134,26 @@ Keeping the visitor one person across sites:
 
 Use separate projects only for genuinely separate user bases, such as different client businesses.
 
+### Environments: production, preview and development
+
+Sources deliberately **share** a person graph, so they are the wrong tool for keeping test data out of real numbers — `identify("user_123")` from a preview deploy would merge into the same person as the real `user_123`. Environments exist for that, and they share nothing.
+
+Each environment is a **separate ClickHouse database** — `fourier`, `fourier_preview`, `fourier_development` — created and migrated automatically on boot. Production keeps the base name, so an install that predates this is already the production environment with nothing to migrate. There is no environment column to filter on: a production query cannot see preview rows because they are not in the database it is connected to.
+
+What is shared is the definitions: projects, sources and write keys live once in the base database. "Marketing site" is one source with the same id everywhere, so a source filter means the same thing in every environment — you just get a different write key per environment.
+
+**Which environment an event lands in is decided by the write key**, never by the client. A preview deployment holds only the preview key, so it cannot write to production however its code is configured.
+
+Wiring it up on Vercel takes no code, because Vercel already scopes environment variables per environment:
+
+1. In the dashboard's setup guide, switch the environment picker and copy that environment's write key.
+2. In Vercel → Settings → Environment Variables, set `NEXT_PUBLIC_FOURIER_WRITE_KEY` three times — same name, one value per environment checkbox.
+3. Put the development key in your local `.env.local`.
+
+Your app never reads `VERCEL_ENV`. Vercel hands each deployment the right key, and the key decides the rest.
+
+The dashboard's environment switcher is in the sidebar and opens on Production; non-production is tinted amber so preview numbers are never mistaken for real ones. Every API endpoint and MCP tool takes an `environment` argument and defaults to production. To reset an environment, drop its database — it is rebuilt on the next boot.
+
 ### People and identity
 
 `identify(userId, traits)` names the current visitor. Everything they did anonymously before that is attributed to them: the Users list, counts, funnels, and the person's timeline all resolve anonymous ids to the person they became. Resolution lives in the database, in the `identity_map`, `events_resolved`, and `person_stats` views, so agents writing SQL get the same answer as the dashboard. `alias(newId, previousId)` links two ids the same way. Conflicts, such as a shared device without `reset()`, resolve to the earliest link.

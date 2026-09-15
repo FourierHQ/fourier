@@ -1,4 +1,5 @@
 export * from "./client";
+export * from "./environments";
 export * from "./schema";
 export * from "./migrate";
 export * from "./projects";

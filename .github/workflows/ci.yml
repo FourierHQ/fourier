@@ -8,6 +8,19 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # Environment isolation is a safety property, not a feature: if a query ever loses
+    # its scope, preview data silently appears in production numbers and nothing else
+    # would catch it. The integration suite needs a real ClickHouse to prove it.
+    services:
+      clickhouse:
+        image: clickhouse/clickhouse-server:24-alpine
+        ports:
+          - 8123:8123
+        options: >-
+          --health-cmd "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -21,3 +34,6 @@ jobs:
       - run: pnpm --filter @fourierhq/sdk build
       - run: pnpm typecheck
       - run: pnpm test
+      - run: pnpm --filter @fourierhq/core test:integration
+        env:
+          CLICKHOUSE_URL: http://localhost:8123

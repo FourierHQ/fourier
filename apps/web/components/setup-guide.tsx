@@ -9,7 +9,9 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CodeBlock } from "@/components/code-block";
 import { CopyButton } from "@/components/copy-button";
-import { useCreateSource, useOverview, useSources, type Source } from "@/lib/api";
+import { useCreateSource, useOverview, useSources, type SourceWithKeys } from "@/lib/api";
+import { ENVIRONMENTS, useEnvironment } from "@/lib/environment";
+import { ENVIRONMENT_LABELS } from "@fourierhq/core/environments";
 import { Input } from "@/components/ui/input";
 import { Plus } from "lucide-react";
 
@@ -21,7 +23,7 @@ export function useHost() {
   return host || "http://localhost:5050";
 }
 
-function SourcesPanel({ selected, onSelect }: { selected: Source | null; onSelect: (s: Source) => void }) {
+function SourcesPanel({ selected, onSelect }: { selected: SourceWithKeys | null; onSelect: (s: SourceWithKeys) => void }) {
   const sources = useSources();
   const create = useCreateSource();
   const [name, setName] = useState("");
@@ -71,13 +73,53 @@ function SourcesPanel({ selected, onSelect }: { selected: Source | null; onSelec
   );
 }
 
+/**
+ * Environments are separate databases, so the only thing that decides where an event
+ * lands is which key the deployment holds. Vercel already scopes environment variables
+ * per environment, so the app never has to branch on VERCEL_ENV itself.
+ */
+function EnvironmentNote() {
+  const { environment, setEnvironment } = useEnvironment();
+  return (
+    <div className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
+      <p>
+        <span className="font-medium text-foreground">One key per environment.</span> Production, preview and development are
+        separate databases and share no users, companies or events — so a preview deployment cannot touch production data, and
+        testing on a branch cannot skew your real numbers.
+      </p>
+      <p className="mt-2">
+        In Vercel, set <code className="font-mono">NEXT_PUBLIC_FOURIER_WRITE_KEY</code> three times under Settings → Environment
+        Variables — same name, one value per environment checkbox. Your code never reads <code className="font-mono">VERCEL_ENV</code>;
+        Vercel hands each deployment the right key and the key decides the rest.
+      </p>
+      <p className="mt-2 flex flex-wrap items-center gap-1">
+        <span>Showing keys for</span>
+        {ENVIRONMENTS.map((env) => (
+          <Button
+            key={env}
+            size="sm"
+            variant={env === environment ? "default" : "outline"}
+            className="h-6 px-2 text-xs"
+            onClick={() => setEnvironment(env)}
+          >
+            {ENVIRONMENT_LABELS[env]}
+          </Button>
+        ))}
+      </p>
+    </div>
+  );
+}
+
 export function SetupGuide({ compact = false }: { compact?: boolean }) {
   const { data } = useOverview();
   const host = useHost();
   const sources = useSources();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const selected = sources.data?.find((s) => s.id === selectedId) ?? sources.data?.[0] ?? null;
-  const writeKey = selected?.write_key ?? data?.project.write_key ?? "…";
+  const { environment } = useEnvironment();
+  // The key shown is the one for the environment you are currently looking at, so
+  // copying from this page can never wire a preview deploy into production.
+  const writeKey = selected?.keys?.[environment] ?? selected?.write_key ?? data?.project.write_key ?? "…";
   const receiving = (data?.overview.total_events ?? 0) > 0;
 
   const envSnippet = `NEXT_PUBLIC_FOURIER_WRITE_KEY=${writeKey}\nNEXT_PUBLIC_FOURIER_HOST=${host}`;
@@ -203,7 +245,12 @@ const url = fourier.decorateUrl("https://app.example.io/signup");`;
           <CodeBlock code="pnpm add @fourierhq/sdk" />
           <SourcesPanel selected={selected} onSelect={(s) => setSelectedId(s.id)} />
           <div className="flex flex-wrap items-center gap-2 text-sm">
-            <span className="text-muted-foreground">Write key{selected ? ` for ${selected.name}` : ""}</span>
+            <span className="text-muted-foreground">
+              Write key{selected ? ` for ${selected.name}` : ""} in{" "}
+              <span className={environment === "production" ? "" : "font-medium text-amber-600 dark:text-amber-500"}>
+                {ENVIRONMENT_LABELS[environment]}
+              </span>
+            </span>
             <code className="rounded bg-muted px-2 py-0.5 font-mono text-xs">{writeKey}</code>
             <CopyButton value={writeKey} />
             <span className="ml-2 text-muted-foreground">Host</span>
@@ -211,6 +258,7 @@ const url = fourier.decorateUrl("https://app.example.io/signup");`;
             <CopyButton value={host} />
           </div>
           <CodeBlock title=".env.local" code={envSnippet} />
+          <EnvironmentNote />
         </CardContent>
       </Card>
 
