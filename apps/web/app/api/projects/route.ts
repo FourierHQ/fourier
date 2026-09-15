@@ -1,4 +1,4 @@
-import { createProject, listProjects } from "@fourier/core";
+import { createProject, listProjects } from "@fourierhq/core";
 import { ready } from "@/lib/db";
 import { error, handle, json, options } from "@/lib/http";
 import { requireAuth } from "@/lib/auth";

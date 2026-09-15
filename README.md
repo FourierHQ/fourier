@@ -71,12 +71,12 @@ openssl rand -base64 32   # FOURIER_SECRET
 ## Instrument a Next.js app
 
 ```bash
-pnpm add fourier
+pnpm add @fourierhq/sdk
 ```
 
 ```tsx
 // app/layout.tsx
-import { FourierProvider } from "fourier/next";
+import { FourierProvider } from "@fourierhq/sdk/next";
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -93,7 +93,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 
 ```tsx
 "use client";
-import { useFourier } from "fourier/next";
+import { useFourier } from "@fourierhq/sdk/next";
 
 const fourier = useFourier();
 fourier.identify("user_123", { email: "jane@acme.com", plan: "pro" });
@@ -109,7 +109,7 @@ The SDK implements the analytics.js surface: `identify`, `track`, `page`, `scree
 
 ```diff
 - import { AnalyticsBrowser } from "@segment/analytics-next";
-+ import { AnalyticsBrowser } from "fourier";
++ import { AnalyticsBrowser } from "@fourierhq/sdk";
 - const analytics = AnalyticsBrowser.load({ writeKey });
 + const analytics = AnalyticsBrowser.load(writeKey, { host: "https://analytics.example.com" });
 ```

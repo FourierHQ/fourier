@@ -100,7 +100,7 @@ export default function AgentsPage() {
               </TabsContent>
               <TabsContent value="stdio" className="space-y-2 pt-3">
                 <p className="text-sm text-muted-foreground">For clients without HTTP support, run the same tools over stdio from the repo:</p>
-                <CodeBlock code={`pnpm --filter @fourier/web mcp`} />
+                <CodeBlock code={`pnpm --filter @fourierhq/web mcp`} />
               </TabsContent>
             </Tabs>
           </CardContent>

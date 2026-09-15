@@ -1,4 +1,4 @@
-import { revokeApiKey } from "@fourier/core";
+import { revokeApiKey } from "@fourierhq/core";
 import { currentUser, requireAuth } from "@/lib/auth";
 import { error, handle, json, options } from "@/lib/http";
 

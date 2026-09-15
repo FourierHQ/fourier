@@ -3,7 +3,7 @@
  * companies (groups), users, page views and product events.
  *   pnpm seed
  */
-import { configFromEnv, ensureDefaultProject, ingest, migrate, type IncomingMessage } from "@fourier/core";
+import { configFromEnv, ensureDefaultProject, ingest, migrate, type IncomingMessage } from "@fourierhq/core";
 
 const COMPANIES = [
   { id: "acme", name: "Acme Inc", plan: "enterprise", industry: "Manufacturing", seats: 120 },

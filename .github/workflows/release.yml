@@ -1,0 +1,71 @@
+name: Release
+
+# Publishes @fourierhq/sdk to npm when a version tag is pushed:
+#
+#   npm version patch --workspace packages/sdk   # or edit both versions by hand
+#   git tag sdk-v0.1.1 && git push --tags
+#
+# There is no npm token here. This uses npm trusted publishing (OIDC), so the
+# registry verifies the workflow itself rather than a long-lived secret. That
+# has to be switched on once, and it can only be switched on for a package
+# that already exists, so the FIRST publish is manual from a laptop:
+#
+#   pnpm install --frozen-lockfile
+#   pnpm --filter @fourierhq/sdk build
+#   cd packages/sdk && npm publish        # publishConfig already sets access: public
+#
+# then on npmjs.com: @fourierhq/sdk -> Settings -> Trusted Publisher ->
+# GitHub Actions, repository FourierHQ/fourier, workflow release.yml.
+# Every release after that is this workflow.
+
+on:
+  push:
+    tags: ["sdk-v*"]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # required for trusted publishing and provenance
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      # Node 22 ships npm 10, which predates trusted publishing.
+      - run: npm install -g npm@latest
+
+      - run: pnpm install --frozen-lockfile
+
+      # Three versions have to agree, and nothing else notices when they don't:
+      # package.json is what npm publishes, SDK_VERSION is what every event
+      # reports as context.library.version, and the tag is what a human reads.
+      # Drift here is invisible until you are querying ClickHouse for a version
+      # that was never released.
+      - name: Check version agreement
+        run: |
+          pkg=$(node -p "require('./packages/sdk/package.json').version")
+          sdk=$(grep -oE 'SDK_VERSION = "[^"]+"' packages/sdk/src/index.ts | cut -d'"' -f2)
+          echo "package.json=$pkg  SDK_VERSION=$sdk  tag=${GITHUB_REF_NAME:-none}"
+          if [ "$pkg" != "$sdk" ]; then
+            echo "::error::packages/sdk/package.json ($pkg) and SDK_VERSION ($sdk) disagree"
+            exit 1
+          fi
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME#sdk-v}" != "$pkg" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match package.json ($pkg)"
+            exit 1
+          fi
+
+      - run: pnpm --filter @fourierhq/sdk build
+      - run: pnpm typecheck
+      - run: pnpm test
+
+      - name: Publish
+        run: npm publish --provenance
+        working-directory: packages/sdk

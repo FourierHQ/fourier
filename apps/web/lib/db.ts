@@ -1,4 +1,4 @@
-import { configFromEnv, ensureDefaultProject, ensureDefaultSource, getProject, listProjects, migrate, ping, type Project } from "@fourier/core";
+import { configFromEnv, ensureDefaultProject, ensureDefaultSource, getProject, listProjects, migrate, ping, type Project } from "@fourierhq/core";
 
 let readyPromise: Promise<{ project: Project }> | null = null;
 

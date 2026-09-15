@@ -1,4 +1,4 @@
-import { authenticate, signSessionToken } from "@fourier/core";
+import { authenticate, signSessionToken } from "@fourierhq/core";
 import { authDisabled, sessionCookie } from "@/lib/auth";
 import { ready } from "@/lib/db";
 import { error, handle, json, options } from "@/lib/http";

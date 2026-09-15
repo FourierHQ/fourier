@@ -6,7 +6,7 @@ Open source product analytics SDK. Drop-in compatible with Segment's analytics.j
 
 ```tsx
 // app/layout.tsx
-import { FourierProvider } from "fourier/next";
+import { FourierProvider } from "@fourierhq/sdk/next";
 
 export default function RootLayout({ children }) {
   return (
@@ -23,7 +23,7 @@ export default function RootLayout({ children }) {
 
 ```tsx
 "use client";
-import { useFourier } from "fourier/next";
+import { useFourier } from "@fourierhq/sdk/next";
 
 export function UpgradeButton() {
   const fourier = useFourier();
@@ -36,7 +36,7 @@ Page views are tracked automatically on route changes.
 ## Anywhere in the browser
 
 ```ts
-import fourier from "fourier";
+import fourier from "@fourierhq/sdk";
 fourier.init({ writeKey: "...", host: "https://analytics.example.com" });
 fourier.identify("user_123", { email: "jane@acme.com", plan: "pro" });
 fourier.group("acme", { name: "Acme Inc", plan: "enterprise" });
@@ -46,7 +46,7 @@ fourier.track("Report Exported", { format: "csv" });
 ## Server (API routes, server actions, cron)
 
 ```ts
-import { FourierServer } from "fourier/server";
+import { FourierServer } from "@fourierhq/sdk/server";
 const fourier = new FourierServer({ writeKey: process.env.FOURIER_WRITE_KEY!, host: process.env.FOURIER_HOST! });
 fourier.track({ userId: "user_123", event: "Invoice Paid", properties: { amount: 4900 } });
 await fourier.closeAndFlush();
