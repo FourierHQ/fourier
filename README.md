@@ -171,7 +171,7 @@ It is derived on the server from the connecting address rather than asked of the
 - **On Vercel, Cloudflare or CloudFront, it already works.** They resolve the address at the edge and pass it in request headers; Fourier reads them. Nothing to install, nothing to configure, no lookup cost.
 - **Behind your own proxy**, set `X-Geo-Country`, `X-Geo-Region`, `X-Geo-City`, `X-Geo-Latitude` and `X-Geo-Longitude` from your nginx/Caddy GeoIP module.
 - **With nothing in front of it**, point `FOURIER_GEOIP_DB` at a MaxMind-format `.mmdb` file. [DB-IP Lite](https://db-ip.com/db/lite.php) is the one to reach for: same format as GeoLite2, downloadable without an account or licence key, refreshed monthly. Leave the variable unset and events simply have no location.
-- **Server-side SDKs** report on behalf of someone else, so the edge sees your datacenter rather than your user. Send `context.ip` with the end user's address, or `context.geo` with the answer directly, and the edge's view is ignored.
+- **Server-side SDKs** report on behalf of someone else, so the edge sees your datacenter rather than your user. Send `context.ip` with the end user's address and the edge's view is discarded — but resolving that address needs `FOURIER_GEOIP_DB`, which a Vercel deployment has no reason to have, so on Vercel those events get no location at all. Send `context.geo` instead and they get the right one.
 
 ### Attribution
 
