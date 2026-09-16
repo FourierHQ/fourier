@@ -1,11 +1,18 @@
 /**
  * Where a message came from, resolved on arrival.
  *
- * Location is derived here, at ingest, and never taken at face value from a browser: a
- * write key ships in the page source, so anything the client asserts about itself is an
- * assertion anyone can make. `context.geo` is honoured only because `context.ip` already
- * is, and carries exactly that much trust — a server-side SDK reporting on behalf of its
- * own users, or a backfill through /v1/import.
+ * Location is derived at ingest rather than asked of the page, so ordinary traffic gets
+ * an answer nobody had to be trusted for. It is NOT an authenticated signal, and must
+ * not be used for access control, billing or compliance:
+ *
+ * - Behind Vercel, Cloudflare or CloudFront the header is written by the edge from the
+ *   real connection, and a client cannot set it.
+ * - With nothing trusted in front, these headers arrive from the client like any other,
+ *   and are believed. So is `context.geo`, deliberately, because `context.ip` already is.
+ *
+ * Neither is a new hole: a write key ships in the page source, so whoever can forge a
+ * country can equally forge the event name, the properties and the user id. Location
+ * carries exactly the trust every other field on the message carries, and no more.
  *
  * Three sources, in order:
  *   1. The edge. Vercel, Cloudflare and CloudFront each resolve the connecting IP for
@@ -63,7 +70,23 @@ function country(v: string | null | undefined): string {
   return /^[A-Z]{2}$/.test(c) && !UNKNOWN_COUNTRIES.has(c) ? c : "";
 }
 
-/** Vercel percent-encodes non-ASCII city names; a stray "%" would otherwise throw. */
+/**
+ * ISO 3166-2 subdivision codes are one to three alphanumerics. Everything reaching this
+ * function is client-supplied — a request header on an install with no trusted proxy in
+ * front of it, or `context.geo` on the message — so anything else is dropped rather than
+ * stored: `region` is LowCardinality, and a column whose distinct values an attacker
+ * picks is one they can make expensive.
+ */
+function region(v: string | null | undefined): string {
+  const r = (v ?? "").trim().toUpperCase();
+  return /^[A-Z0-9]{1,3}$/.test(r) ? r : "";
+}
+
+/**
+ * Vercel percent-encodes non-ASCII city names; a stray "%" would otherwise throw, and a
+ * throw here is a 500 for the whole batch — up to 1000 events — not one bad field.
+ * Control characters are stripped because this value is rendered in the dashboard.
+ */
 function text(v: string | null | undefined, max: number): string {
   const raw = (v ?? "").trim();
   if (!raw) return "";
@@ -75,7 +98,7 @@ function text(v: string | null | undefined, max: number): string {
       out = raw;
     }
   }
-  return out.slice(0, max);
+  return out.replace(/[\u0000-\u001f\u007f-\u009f]/g, "").slice(0, max);
 }
 
 function coord(v: string | number | null | undefined, limit: number): number {
@@ -91,7 +114,7 @@ export function geoFromHeaders(headers: Headers): Geo | null {
     if (!c) continue;
     return {
       country: c,
-      region: text(headers.get(h.region), 8).toUpperCase(),
+      region: region(headers.get(h.region)),
       city: text(headers.get(h.city), 120),
       latitude: coord(headers.get(h.latitude), 90),
       longitude: coord(headers.get(h.longitude), 180),
@@ -112,7 +135,7 @@ export function geoFromContext(ctx: Record<string, unknown>): Geo | null {
   if (!c) return null;
   return {
     country: c,
-    region: text(str(raw.region ?? raw.regionCode ?? raw.region_code), 8).toUpperCase(),
+    region: region(str(raw.region ?? raw.regionCode ?? raw.region_code)),
     city: text(str(raw.city), 120),
     latitude: coord(str(raw.latitude ?? raw.lat), 90),
     longitude: coord(str(raw.longitude ?? raw.lon ?? raw.lng), 180),
@@ -172,16 +195,9 @@ export function geoFromIp(ip: string): Geo | null {
   if (!c) return null;
   return {
     country: c,
-    region: text(rec.subdivisions?.[0]?.iso_code, 8).toUpperCase(),
+    region: region(rec.subdivisions?.[0]?.iso_code),
     city: text(rec.city?.names?.en, 120),
     latitude: coord(rec.location?.latitude, 90),
     longitude: coord(rec.location?.longitude, 180),
   };
-}
-
-/** Test seam: drops the loaded database so a test can point at a different one. */
-export function resetGeoDb(): void {
-  reader = null;
-  loading = null;
-  warned = false;
 }

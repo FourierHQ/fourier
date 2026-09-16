@@ -166,7 +166,7 @@ The dashboard's environment switcher is in the sidebar and opens on Production; 
 
 Every event carries the country, region, city and coordinates it arrived from. It is a property of the arrival, not of the person — someone who travels has events in several countries, and each keeps its own — so the Users list and profile show where that person was **last** seen, ignoring events that carry no location.
 
-It is resolved on the server, from the connecting address, and never read from the browser: a write key is public by design, so anything the page claims about itself is a claim anyone can make.
+It is derived on the server from the connecting address rather than asked of the page, so ordinary traffic gets an answer nobody had to be trusted for. It is **not an authenticated signal** — don't use it for access control, billing or compliance. Behind Vercel, Cloudflare or CloudFront the header is written by the edge and a client cannot set it; with nothing trusted in front, these headers arrive from the client like any other and are believed, as is `context.geo`. That is no new hole: a write key is public by design, so whoever can forge a country can equally forge the event name and the user id.
 
 - **On Vercel, Cloudflare or CloudFront, it already works.** They resolve the address at the edge and pass it in request headers; Fourier reads them. Nothing to install, nothing to configure, no lookup cost.
 - **Behind your own proxy**, set `X-Geo-Country`, `X-Geo-Region`, `X-Geo-City`, `X-Geo-Latitude` and `X-Geo-Longitude` from your nginx/Caddy GeoIP module.

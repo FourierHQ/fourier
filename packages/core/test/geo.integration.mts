@@ -15,7 +15,10 @@ import {
   configFromEnv,
   databaseFor,
   ensureDefaultProject,
+  ensureGeoDb,
+  geoFromContext,
   geoFromHeaders,
+  geoFromIp,
   getAdminClient,
   getDataClient,
   ingest,
@@ -66,6 +69,35 @@ test("other CDNs are understood, and 'we don't know' is not a country", () => {
   assert.equal(geoFromHeaders(headers({})), null);
 });
 
+test("a city that cannot be decoded is kept, not thrown over", () => {
+  // A throw here reaches handleIngest, which turns it into a 500 for the whole batch:
+  // one malformed header would cost up to 1000 events, not one field.
+  for (const bad of ["%", "%E0%A4%A", "100%25 %ZZ"]) {
+    const geo = geoFromHeaders(headers({ "x-vercel-ip-country": "GB", "x-vercel-ip-city": bad }));
+    assert.equal(geo?.city, bad, `${bad} should survive as itself`);
+  }
+});
+
+test("an oversized city is truncated and control characters are dropped", () => {
+  const long = geoFromHeaders(headers({ "x-geo-country": "GB", "x-geo-city": "A".repeat(5000) }));
+  assert.equal(long?.city.length, 120, "city must be capped before it reaches the column");
+  // Positive control: a normal city is not truncated at all.
+  assert.equal(geoFromHeaders(headers({ "x-geo-country": "GB", "x-geo-city": "London" }))?.city, "London");
+
+  const ctrl = geoFromContext({ geo: { country: "GB", city: `Lon${String.fromCharCode(0)}d${String.fromCharCode(0x7f)}on` } });
+  assert.equal(ctrl?.city, "London", "control characters must not reach a column the dashboard renders");
+});
+
+test("region takes ISO 3166-2 subdivision codes and nothing else", () => {
+  const r = (v: string) => geoFromHeaders(headers({ "x-geo-country": "GB", "x-geo-region": v }))?.region;
+  assert.equal(r("eng"), "ENG", "a real subdivision code is kept, upper-cased");
+  assert.equal(r("13"), "13", "numeric subdivisions are real too");
+  // region is LowCardinality, and every one of these is client-supplied.
+  assert.equal(r("'; DROP--"), "", "junk must not reach the column");
+  assert.equal(r("AAAAAAAAAA"), "", "an over-long value is not a subdivision code");
+  assert.equal(r("A-B"), "", "punctuation is not a subdivision code");
+});
+
 test("a nonsense latitude is dropped rather than stored", () => {
   const geo = geoFromHeaders(headers({ "x-vercel-ip-country": "GB", "x-vercel-ip-latitude": "not-a-number", "x-vercel-ip-longitude": "999" }));
   assert.equal(geo?.latitude, 0);
@@ -97,14 +129,21 @@ test("every event keeps the location it arrived from, and the person keeps the l
 test("an event with no location does not erase where someone was last seen", async () => {
   const project = await ensureDefaultProject();
   const s = scope(project.id, "production");
-  const userId = "traveller";
+  const userId = "commuter"; // its own person: this must not depend on a previous test's ingests
 
-  // A server-side call with nothing in front of it: no CDN headers, no database, no geo.
+  await ingest(
+    project,
+    [{ type: "track", userId, event: "Commuted", timestamp: at(30) }],
+    { geo: geoFromHeaders(headers({ "x-vercel-ip-country": "GB", "x-vercel-ip-city": "London" })) },
+    "production",
+  );
+  // Then a server-side call with nothing in front of it: no CDN headers, no database, no
+  // geo — and, crucially, more recent than the located one.
   await ingest(project, [{ type: "track", userId, event: "Invoice Paid", timestamp: at(1) }], {}, "production");
 
   const [user] = await listUsers(s, { search: userId, limit: 5 });
-  assert.equal(user?.country, "JP", "a location-less event should not blank out the last known country");
-  assert.equal(user?.city, "Tokyo");
+  assert.equal(user?.country, "GB", "a location-less event should not blank out the last known country");
+  assert.equal(user?.city, "London");
 });
 
 test("a relayed message is not stamped with the relay's own location", async () => {
@@ -134,26 +173,49 @@ test("a relayed message is not stamped with the relay's own location", async () 
   assert.equal(((await res.json()) as { ip: string }[])[0]?.ip, "203.0.113.7", "the named address is what gets stored");
 });
 
-test("an explicit context.geo wins, which is how imports and server SDKs report location", async () => {
+test("an explicit context.geo outranks the edge, which is how imports and server SDKs report location", async () => {
   const project = await ensureDefaultProject();
   const s = scope(project.id, "production");
-  await ingest(
-    project,
-    [
-      {
-        type: "track",
-        userId: "explicit",
-        event: "Imported",
-        timestamp: at(5),
-        context: { ip: "203.0.113.9", geo: { country: "fr", region: "idf", city: "Paris", latitude: 48.8566, longitude: 2.3522 } },
-      },
-    ],
-    { geo: geoFromHeaders(headers({ "x-vercel-ip-country": "DE" })) },
-    "production",
-  );
+  const berlin = geoFromHeaders(headers({ "x-vercel-ip-country": "DE", "x-vercel-ip-city": "Berlin" }));
+  const paris = { country: "fr", region: "idf", city: "Paris", latitude: 48.8566, longitude: 2.3522 };
 
+  // No context.ip, so the edge's answer is genuinely in the running: this is what makes
+  // the assertion about precedence rather than about an empty field.
+  await ingest(project, [{ type: "track", userId: "explicit", event: "Imported", timestamp: at(5), context: { geo: paris } }], { geo: berlin }, "production");
   const [event] = await listEvents(s, { userId: "explicit", limit: 1 });
-  assert.equal(event.country, "FR");
+  assert.equal(event.country, "FR", "context.geo must beat the edge header, not merely fill a gap");
   assert.equal(event.city, "Paris");
+  assert.equal(event.region, "IDF");
   assert.equal(Math.round(event.latitude * 100) / 100, 48.86);
+
+  // Positive control: the same call without context.geo takes the edge's answer.
+  await ingest(project, [{ type: "track", userId: "edge_only", event: "Imported", timestamp: at(5) }], { geo: berlin }, "production");
+  const [fallback] = await listEvents(s, { userId: "edge_only", limit: 1 });
+  assert.equal(fallback.country, "DE", "without context.geo the edge header is what lands");
+  assert.equal(fallback.city, "Berlin");
+});
+
+/**
+ * The local-database path cannot run in CI: an .mmdb is a 4-70MB third-party file that
+ * does not belong in the repo. Point FOURIER_GEOIP_DB at one (DB-IP Lite needs no
+ * account) and this covers it. Otherwise it says so out loud — a silent skip reads
+ * exactly like a pass, which is the only way this file could lie about its coverage.
+ */
+const GEOIP_DB = process.env.FOURIER_GEOIP_DB;
+const skipDb = GEOIP_DB ? false : "FOURIER_GEOIP_DB is not set, so the local .mmdb path is NOT covered by this run";
+
+test("a local database resolves an address when nothing in front of us did", { skip: skipDb }, async () => {
+  await ensureGeoDb();
+  assert.equal(geoFromIp("212.58.244.20")?.country, "GB");
+  assert.equal(geoFromIp("8.8.8.8")?.country, "US");
+  // A malformed address and a private range must return nothing rather than throw:
+  // both reach this straight from a request, on every event.
+  assert.equal(geoFromIp("192.168.1.1"), null);
+  assert.equal(geoFromIp("not-an-ip"), null);
+  assert.equal(geoFromIp(""), null);
+
+  const project = await ensureDefaultProject();
+  await ingest(project, [{ type: "track", userId: "no_cdn", event: "Pinged", timestamp: at(5) }], { ip: "212.58.244.20" }, "production");
+  const [event] = await listEvents(scope(project.id, "production"), { userId: "no_cdn", limit: 1 });
+  assert.equal(event.country, "GB", "a bare socket address should resolve through the local database");
 });
