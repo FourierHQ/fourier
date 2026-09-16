@@ -26,6 +26,20 @@ const EVENTS: [string, number, () => Record<string, unknown>][] = [
   ["Upgrade Clicked", 1, () => ({ from_plan: "free", to_plan: pick(["pro", "enterprise"]) })],
   ["Checkout Completed", 0.4, () => ({ plan: pick(["pro", "enterprise"]), amount: pick([4900, 9900, 49900]), currency: "USD" })],
 ];
+// Somewhere to be, with a matching locale and timezone so a seeded person is coherent.
+// Seeds set context.geo explicitly: there is no CDN in front of a `pnpm seed`, and geo
+// is normally resolved from the connection, which a local script does not have.
+const LOCATIONS = [
+  { country: "US", region: "NY", city: "New York", latitude: 40.7128, longitude: -74.006, locale: "en-US", timezone: "America/New_York" },
+  { country: "US", region: "CA", city: "San Francisco", latitude: 37.7749, longitude: -122.4194, locale: "en-US", timezone: "America/Los_Angeles" },
+  { country: "GB", region: "ENG", city: "London", latitude: 51.5072, longitude: -0.1276, locale: "en-GB", timezone: "Europe/London" },
+  { country: "DE", region: "BE", city: "Berlin", latitude: 52.52, longitude: 13.405, locale: "de-DE", timezone: "Europe/Berlin" },
+  { country: "FR", region: "IDF", city: "Paris", latitude: 48.8566, longitude: 2.3522, locale: "fr-FR", timezone: "Europe/Paris" },
+  { country: "JP", region: "13", city: "Tokyo", latitude: 35.6762, longitude: 139.6503, locale: "ja-JP", timezone: "Asia/Tokyo" },
+  { country: "BR", region: "SP", city: "Sao Paulo", latitude: -23.5505, longitude: -46.6333, locale: "pt-BR", timezone: "America/Sao_Paulo" },
+  { country: "IN", region: "KA", city: "Bengaluru", latitude: 12.9716, longitude: 77.5946, locale: "en-IN", timezone: "Asia/Kolkata" },
+];
+
 const UAS = [
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36",
@@ -69,6 +83,7 @@ async function main() {
       const email = `${first.toLowerCase()}.${last.toLowerCase().replace(/[^a-z]/g, "")}@${c.id}.com`;
       const signup = now - rand(3, 30) * DAY;
       const ua = pick(UAS);
+      const home = pick(LOCATIONS);
       const sessions = new Map<number, string>();
       const session = (t: number) => {
         // one session per calendar hour bucket in the seed; first message in it is the arrival
@@ -77,16 +92,22 @@ async function main() {
         if (isNew) sessions.set(key, crypto.randomUUID());
         return { id: sessions.get(key)!, isNew };
       };
-      const ctx = (t: number) => ({
-        session: session(t),
-        library: { name: "fourier", version: "0.1.0" },
-        userAgent: ua,
-        locale: pick(["en-US", "en-GB", "de-DE", "fr-FR"]),
-        timezone: pick(["America/New_York", "Europe/London", "Europe/Berlin", "Asia/Tokyo"]),
-        page: { url: `https://app.example.com${pick(PAGES)}`, path: pick(PAGES), title: "Example App", referrer: t === signup ? pick(["https://google.com/", "https://news.ycombinator.com/", "", "https://twitter.com/"]) : "" },
-        campaign: t === signup && Math.random() > 0.4 ? { source: pick(["google", "twitter", "newsletter", "producthunt"]), medium: pick(["cpc", "social", "email"]), name: pick(["launch", "spring-promo", "docs"]) } : undefined,
-        groupId: c.id,
-      });
+      const ctx = (t: number) => {
+        // A few events from somewhere else, because people travel and use VPNs. This is
+        // the case location-as-a-trait gets wrong, so the seed had better contain it.
+        const where = Math.random() < 0.06 ? pick(LOCATIONS) : home;
+        return {
+          session: session(t),
+          library: { name: "fourier", version: "0.1.0" },
+          userAgent: ua,
+          locale: where.locale,
+          timezone: where.timezone,
+          geo: { country: where.country, region: where.region, city: where.city, latitude: where.latitude, longitude: where.longitude },
+          page: { url: `https://app.example.com${pick(PAGES)}`, path: pick(PAGES), title: "Example App", referrer: t === signup ? pick(["https://google.com/", "https://news.ycombinator.com/", "", "https://twitter.com/"]) : "" },
+          campaign: t === signup && Math.random() > 0.4 ? { source: pick(["google", "twitter", "newsletter", "producthunt"]), medium: pick(["cpc", "social", "email"]), name: pick(["launch", "spring-promo", "docs"]) } : undefined,
+          groupId: c.id,
+        };
+      };
 
       // anonymous landing, then signup -> identify + group
       messages.push({ type: "page", anonymousId, timestamp: new Date(signup - 60_000).toISOString(), properties: { path: "/", url: "https://app.example.com/", title: "Example App" }, context: { ...ctx(signup), groupId: undefined } });
@@ -121,8 +142,10 @@ async function main() {
   for (let i = 0; i < 25; i++) {
     const anonymousId = crypto.randomUUID();
     const t = now - rand(0, 30) * DAY - rand(0, DAY);
-    messages.push({ type: "page", anonymousId, timestamp: new Date(t).toISOString(), properties: { path: "/", url: "https://app.example.com/", title: "Example App" }, context: { library: { name: "fourier", version: "0.1.0" }, userAgent: pick(UAS), page: { referrer: pick(["https://google.com/", "", "https://producthunt.com/"]) } } });
-    if (Math.random() > 0.5) messages.push({ type: "page", anonymousId, timestamp: new Date(t + 20_000).toISOString(), properties: { path: "/pricing", url: "https://app.example.com/pricing", title: "Pricing" }, context: { library: { name: "fourier", version: "0.1.0" }, userAgent: pick(UAS) } });
+    const w = pick(LOCATIONS);
+    const geo = { country: w.country, region: w.region, city: w.city, latitude: w.latitude, longitude: w.longitude };
+    messages.push({ type: "page", anonymousId, timestamp: new Date(t).toISOString(), properties: { path: "/", url: "https://app.example.com/", title: "Example App" }, context: { library: { name: "fourier", version: "0.1.0" }, userAgent: pick(UAS), locale: w.locale, timezone: w.timezone, geo, page: { referrer: pick(["https://google.com/", "", "https://producthunt.com/"]) } } });
+    if (Math.random() > 0.5) messages.push({ type: "page", anonymousId, timestamp: new Date(t + 20_000).toISOString(), properties: { path: "/pricing", url: "https://app.example.com/pricing", title: "Pricing" }, context: { library: { name: "fourier", version: "0.1.0" }, userAgent: pick(UAS), locale: w.locale, timezone: w.timezone, geo } });
   }
 
   messages.sort((a, b) => String(a.timestamp).localeCompare(String(b.timestamp)));

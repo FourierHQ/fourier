@@ -14,11 +14,12 @@
   },
   "dependencies": {
     "@clickhouse/client": "^1.23.1",
+    "maxmind": "^5.0.7",
     "zod": "^4.6.2"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
-    "typescript": "^5.9.2",
-    "tsx": "^4.20.6"
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.2"
   }
 }

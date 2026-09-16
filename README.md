@@ -162,6 +162,17 @@ The dashboard's environment switcher is in the sidebar and opens on Production; 
 
 `group(groupId, traits)` registers a company and links the current user to it. Every later event carries `group_id`. The **Companies** view shows members, top events, activity, and attribution per company, and every API endpoint and MCP tool accepts a `group_id` filter.
 
+### Location
+
+Every event carries the country, region, city and coordinates it arrived from. It is a property of the arrival, not of the person — someone who travels has events in several countries, and each keeps its own — so the Users list and profile show where that person was **last** seen, ignoring events that carry no location.
+
+It is derived on the server from the connecting address rather than asked of the page, so ordinary traffic gets an answer nobody had to be trusted for. It is **not an authenticated signal** — don't use it for access control, billing or compliance. Behind Vercel, Cloudflare or CloudFront the header is written by the edge and a client cannot set it; with nothing trusted in front, these headers arrive from the client like any other and are believed, as is `context.geo`. That is no new hole: a write key is public by design, so whoever can forge a country can equally forge the event name and the user id.
+
+- **On Vercel, Cloudflare or CloudFront, it already works.** They resolve the address at the edge and pass it in request headers; Fourier reads them. Nothing to install, nothing to configure, no lookup cost.
+- **Behind your own proxy**, set `X-Geo-Country`, `X-Geo-Region`, `X-Geo-City`, `X-Geo-Latitude` and `X-Geo-Longitude` from your nginx/Caddy GeoIP module.
+- **With nothing in front of it**, point `FOURIER_GEOIP_DB` at a MaxMind-format `.mmdb` file. [DB-IP Lite](https://db-ip.com/db/lite.php) is the one to reach for: same format as GeoLite2, downloadable without an account or licence key, refreshed monthly. Leave the variable unset and events simply have no location.
+- **Server-side SDKs** report on behalf of someone else, so the edge sees your datacenter rather than your user. Send `context.ip` with the end user's address and the edge's view is discarded — but resolving that address needs `FOURIER_GEOIP_DB`, which a Vercel deployment has no reason to have, so on Vercel those events get no location at all. Send `context.geo` instead and they get the right one.
+
 ### Attribution
 
 Every arrival is a **touch**: the first message of a session, and any page view carrying UTM parameters or an external referrer. Touches are classified `campaign`, `referral`, or `direct`, keep the landing page and all `utm_*` fields, and belong to the person, including arrivals from before they signed up. Nothing is overwritten, so first-touch, last-touch, and multi-touch models are aggregations over the same rows.
@@ -211,7 +222,7 @@ Tools: `list_projects`, `list_sources`, `get_overview`, `list_event_names`, `lis
 
 ## Data model
 
-ClickHouse, all times UTC. `events` is the source of truth, one row per message, tagged with the `source_id` it arrived on. `distinct_id` is `user_id` when identified, otherwise `anonymous_id`; `person_id` is the resolved person. Query `events_resolved` rather than `events` for anything per person. `user_traits`, `group_traits`, and `identities` hold merged traits and id links. Materialised views keep `user_stats`, `group_stats`, `group_members`, `event_stats_daily`, and `touches` current on insert. Full description: `GET /api/projects/default/schema` or the `describe_schema` MCP tool.
+ClickHouse, all times UTC. `events` is the source of truth, one row per message, tagged with the `source_id` it arrived on. `distinct_id` is `user_id` when identified, otherwise `anonymous_id`; `person_id` is the resolved person. Query `events_resolved` rather than `events` for anything per person. `user_traits`, `group_traits`, and `identities` hold merged traits and id links. Location lives on the event (`country`, `region`, `city`, `latitude`, `longitude`) and is rolled up to "last seen in" per person. Materialised views keep `user_stats`, `group_stats`, `group_members`, `event_stats_daily`, and `touches` current on insert. Full description: `GET /api/projects/default/schema` or the `describe_schema` MCP tool.
 
 ## Repository
 

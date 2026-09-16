@@ -15,6 +15,7 @@ import { UserAvatar } from "@/components/users-table";
 import { CopyButton } from "@/components/copy-button";
 import { AttributionCard } from "@/components/attribution";
 import { useSourceName } from "@/components/source-badge";
+import { Location } from "@/components/location";
 import { useUser } from "@/lib/api";
 import { displayName, eventLabel, formatNumber } from "@/lib/format";
 
@@ -75,6 +76,14 @@ export default function UserPage() {
                       <dt className="text-xs text-muted-foreground">Last seen</dt>
                       <dd className="font-medium"><RelativeTime value={user.last_seen} /></dd>
                     </div>
+                    {user.country && (
+                      <div className="col-span-3">
+                        <dt className="text-xs text-muted-foreground">Last seen in</dt>
+                        <dd className="font-medium">
+                          <Location country={user.country} city={user.city} text="full" />
+                        </dd>
+                      </div>
+                    )}
                   </dl>
                   {user.sources.length > 0 && (
                     <div>

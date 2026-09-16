@@ -60,3 +60,45 @@ export function initials(s: string): string {
 export function shortId(id: string, n = 8): string {
   return id.length > n + 3 ? `${id.slice(0, n)}…` : id;
 }
+
+// ---------- location ----------
+
+/**
+ * Flag for an ISO 3166-1 alpha-2 code, built from regional indicator symbols. No icon
+ * set, no sprite: "GB" is U+1F1EC U+1F1E7. Chrome on Windows ships no flag glyphs and
+ * renders the two letters instead, which is a legible fallback rather than tofu.
+ */
+export function flagEmoji(country: string | undefined | null): string {
+  const c = (country ?? "").toUpperCase();
+  if (!/^[A-Z]{2}$/.test(c)) return "";
+  return String.fromCodePoint(...[...c].map((ch) => 0x1f1e6 + ch.charCodeAt(0) - 65));
+}
+
+let regionNames: Intl.DisplayNames | null | undefined;
+
+/** "GB" -> "United Kingdom", from the platform's own CLDR data. */
+export function countryName(country: string | undefined | null): string {
+  const c = (country ?? "").toUpperCase();
+  if (!/^[A-Z]{2}$/.test(c)) return "";
+  if (regionNames === undefined) {
+    try {
+      regionNames = new Intl.DisplayNames(["en"], { type: "region" });
+    } catch {
+      regionNames = null;
+    }
+  }
+  try {
+    return regionNames?.of(c) ?? c;
+  } catch {
+    return c;
+  }
+}
+
+/**
+ * "London, United Kingdom", or just the country when that is all there is. Region is
+ * deliberately left out: it is an ISO 3166-2 code, and "London, ENG, United Kingdom"
+ * reads worse than the two parts people actually recognise.
+ */
+export function locationLabel(loc: { country?: string; city?: string }): string {
+  return [loc.city, countryName(loc.country) || loc.country].filter(Boolean).join(", ");
+}

@@ -7,6 +7,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { RelativeTime } from "@/components/relative-time";
 import { EmptyState } from "@/components/empty-state";
+import { Location } from "@/components/location";
 import { displayName, formatNumber, initials, shortId } from "@/lib/format";
 import type { UserRecord } from "@/lib/api";
 
@@ -29,9 +30,9 @@ export function UsersTable({ users, loading, showCompany = true, emptyDescriptio
     <Table className="table-fixed">
       <TableHeader>
         <TableRow>
-          <TableHead className="w-[30%]">User</TableHead>
-          <TableHead className="hidden md:table-cell">Email</TableHead>
-          {showCompany && <TableHead className="w-[14%]">Company</TableHead>}
+          <TableHead className="w-[30%] truncate">User</TableHead>
+          <TableHead className="hidden truncate md:table-cell">Email</TableHead>
+          {showCompany && <TableHead className="w-[14%] truncate">Company</TableHead>}
           <TableHead className="w-[72px] text-right">Events</TableHead>
           <TableHead className="w-[96px] text-right">First seen</TableHead>
           <TableHead className="w-[96px] text-right">Last seen</TableHead>
@@ -52,6 +53,7 @@ export function UsersTable({ users, loading, showCompany = true, emptyDescriptio
                     </Badge>
                   )}
                 </Link>
+                <Location country={u.country} city={u.city} text="city" prefix="Last seen in " className="mt-0.5 ml-[38px] text-xs text-muted-foreground" />
               </TableCell>
               <TableCell className="hidden overflow-hidden text-ellipsis text-muted-foreground md:table-cell">{(u.traits.email as string) ?? "—"}</TableCell>
               {showCompany && (
