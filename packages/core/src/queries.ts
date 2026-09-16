@@ -114,6 +114,12 @@ export interface EventRecord {
   user_agent: string;
   locale: string;
   library_name: string;
+  /** Where this message came from, resolved at ingest. '' when nothing could resolve it. */
+  country: string;
+  region: string;
+  city: string;
+  latitude: number;
+  longitude: number;
 }
 
 export interface EventsFilter {
@@ -171,7 +177,8 @@ export async function listEvents(scope: Scope, f: EventsFilter = {}): Promise<Ev
     params.s = f.search;
   }
   const rows = await q<Row>(scope, `SELECT message_id, source_id, person_id, type, event, name, distinct_id, anonymous_id, user_id, group_id,
-            timestamp, received_at, properties, traits, context, url, path, referrer, title, user_agent, locale, library_name
+            timestamp, received_at, properties, traits, context, url, path, referrer, title, user_agent, locale, library_name,
+            country, region, city, latitude, longitude
      FROM events_resolved
      WHERE ${where.join(" AND ")}
      ORDER BY timestamp DESC
@@ -183,6 +190,8 @@ export async function listEvents(scope: Scope, f: EventsFilter = {}): Promise<Ev
     properties: parseJson(r.properties),
     traits: parseJson(r.traits),
     context: parseJson(r.context),
+    latitude: Number(r.latitude ?? 0),
+    longitude: Number(r.longitude ?? 0),
   }));
 }
 
@@ -278,6 +287,10 @@ export interface UserRecord {
   event_count: number;
   group_id: string;
   traits: Record<string, unknown>;
+  /** Where they were last seen. Events carrying no location are ignored, so one
+   *  server-side call does not blank out a person who has been browsing all week. */
+  country: string;
+  city: string;
 }
 
 export interface UsersFilter {
@@ -315,7 +328,7 @@ export async function listUsers(scope: Scope, f: UsersFilter = {}): Promise<User
   }
   const order = { last_seen: "last_seen DESC", first_seen: "first_seen DESC", event_count: "event_count DESC" }[f.orderBy ?? "last_seen"];
   const rows = await q<Row>(scope, `SELECT r.person_id AS distinct_id, r.is_identified AS is_identified, r.first_seen AS first_seen, r.last_seen AS last_seen,
-            r.event_count AS event_count, r.group_id AS group_id, t.traits AS traits
+            r.event_count AS event_count, r.group_id AS group_id, r.country AS country, r.city AS city, t.traits AS traits
      FROM (SELECT * FROM person_stats WHERE project_id = {p:String}) AS r
      LEFT JOIN (SELECT user_id, traits FROM user_traits FINAL WHERE project_id = {p:String}) AS t ON t.user_id = r.person_id
      ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
@@ -335,6 +348,8 @@ function mapUser(r: Row): UserRecord {
     event_count: Number(r.event_count),
     group_id: String(r.group_id ?? ""),
     traits: parseJson(r.traits),
+    country: String(r.country ?? ""),
+    city: String(r.city ?? ""),
   };
 }
 
@@ -360,7 +375,8 @@ export async function getUser(scope: Scope, distinctId: string): Promise<UserDet
   const params = { p: scope.projectId, d: personId, ids };
   const [users, groups, top, sources] = await Promise.all([
     q<Row>(scope, `SELECT {d:String} AS distinct_id, max(s.is_identified) AS is_identified, min(s.first_seen) AS first_seen, max(s.last_seen) AS last_seen,
-              sum(s.event_count) AS event_count, argMaxMerge(s.last_group_id) AS group_id, any(t.traits) AS traits
+              sum(s.event_count) AS event_count, argMaxMerge(s.last_group_id) AS group_id,
+              argMaxMerge(s.last_country) AS country, argMaxMerge(s.last_city) AS city, any(t.traits) AS traits
        FROM user_stats AS s
        LEFT JOIN (SELECT user_id, traits FROM user_traits FINAL WHERE project_id = {p:String} AND user_id = {d:String}) AS t ON t.user_id = {d:String}
        WHERE s.project_id = {p:String} AND s.distinct_id IN ({ids:Array(String)})`,

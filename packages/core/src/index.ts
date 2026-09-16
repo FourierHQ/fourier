@@ -4,6 +4,7 @@ export * from "./schema";
 export * from "./migrate";
 export * from "./projects";
 export * from "./auth";
+export * from "./geo";
 export * from "./ingest";
 export * from "./queries";
 export * from "./sql-guard";

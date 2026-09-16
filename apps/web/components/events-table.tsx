@@ -9,8 +9,9 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { JsonPreview, JsonView } from "@/components/json-view";
 import { RelativeTime } from "@/components/relative-time";
 import { EmptyState } from "@/components/empty-state";
-import { eventLabel, shortId } from "@/lib/format";
+import { eventLabel, locationLabel, shortId } from "@/lib/format";
 import { SourceBadge } from "@/components/source-badge";
+import { Location } from "@/components/location";
 import type { EventRecord } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -75,17 +76,18 @@ export function EventsTable({
       <TableHeader>
         <TableRow>
           <TableHead className="w-8" />
-          <TableHead className="w-[30%]">Event</TableHead>
-          <TableHead className="hidden md:table-cell">Properties</TableHead>
-          {showUser && <TableHead className="w-[15%]">User</TableHead>}
-          {showCompany && <TableHead className="w-[13%]">Company</TableHead>}
+          <TableHead className="w-[30%] truncate">Event</TableHead>
+          <TableHead className="hidden truncate md:table-cell">Properties</TableHead>
+          {showUser && <TableHead className="w-[15%] truncate">User</TableHead>}
+          {showCompany && <TableHead className="w-[13%] truncate">Company</TableHead>}
+          <TableHead className="w-[40px] text-center">From</TableHead>
           <TableHead className="w-[96px] text-right">When</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
         {events.map((e) => {
           const isOpen = open.has(e.message_id);
-          const cols = 4 + (showUser ? 1 : 0) + (showCompany ? 1 : 0);
+          const cols = 5 + (showUser ? 1 : 0) + (showCompany ? 1 : 0);
           return (
             <Fragment key={e.message_id}>
               <TableRow onClick={() => toggle(e.message_id)} className="cursor-pointer" data-state={isOpen ? "selected" : undefined}>
@@ -124,6 +126,9 @@ export function EventsTable({
                     )}
                   </TableCell>
                 )}
+                <TableCell className="text-center">
+                  <Location country={e.country} city={e.city} />
+                </TableCell>
                 <TableCell className="text-right text-xs text-muted-foreground">
                   <RelativeTime value={e.timestamp} />
                 </TableCell>
@@ -149,6 +154,7 @@ export function EventsTable({
                             url: e.url || undefined,
                             referrer: e.referrer || undefined,
                             locale: e.locale || undefined,
+                            location: locationLabel({ country: e.country, city: e.city }) || undefined,
                             library: e.library_name || undefined,
                             user_agent: e.user_agent || undefined,
                             ...e.context,

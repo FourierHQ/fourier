@@ -12,7 +12,7 @@
  * - Materialised views maintain per-user, per-group and per-event rollups.
  */
 
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 /**
  * A migration statement. Plain strings are idempotent `CREATE ... IF NOT EXISTS` and run on
@@ -159,6 +159,13 @@ export const dataStatements: Statement[] = [
     ip              String,
     locale          LowCardinality(String),
     timezone        LowCardinality(String),
+    -- Resolved from the connecting IP at ingest, never sent by the browser. Empty when
+    -- nothing could resolve it. country/region are ISO 3166-1 alpha-2 / 3166-2 codes.
+    country         LowCardinality(String),
+    region          LowCardinality(String),
+    city            String,
+    latitude        Float32,
+    longitude       Float32,
     utm_source      LowCardinality(String),
     utm_medium      LowCardinality(String),
     utm_campaign    LowCardinality(String),
@@ -181,6 +188,13 @@ export const dataStatements: Statement[] = [
   { when: "upgrade", sql: `ALTER TABLE events ADD COLUMN IF NOT EXISTS session_id String AFTER person_id` },
   { when: "upgrade", sql: `ALTER TABLE events ADD COLUMN IF NOT EXISTS session_start UInt8 DEFAULT 0 AFTER session_id` },
   { when: "upgrade", sql: `ALTER TABLE events ADD INDEX IF NOT EXISTS idx_person_id person_id TYPE bloom_filter(0.01) GRANULARITY 4` },
+  // v6 location columns. Existing rows keep empty values: geo is resolved from the
+  // connection at ingest, and that connection is long gone.
+  { when: "upgrade", sql: `ALTER TABLE events ADD COLUMN IF NOT EXISTS country LowCardinality(String) AFTER timezone` },
+  { when: "upgrade", sql: `ALTER TABLE events ADD COLUMN IF NOT EXISTS region LowCardinality(String) AFTER country` },
+  { when: "upgrade", sql: `ALTER TABLE events ADD COLUMN IF NOT EXISTS city String AFTER region` },
+  { when: "upgrade", sql: `ALTER TABLE events ADD COLUMN IF NOT EXISTS latitude Float32 AFTER city` },
+  { when: "upgrade", sql: `ALTER TABLE events ADD COLUMN IF NOT EXISTS longitude Float32 AFTER latitude` },
   // Latest merged traits per user. Ingest reads, merges, writes.
   `CREATE TABLE IF NOT EXISTS user_traits (
     project_id  LowCardinality(String),
@@ -217,10 +231,20 @@ export const dataStatements: Statement[] = [
     first_seen     SimpleAggregateFunction(min, DateTime64(3, 'UTC')),
     last_seen      SimpleAggregateFunction(max, DateTime64(3, 'UTC')),
     event_count    SimpleAggregateFunction(sum, UInt64),
-    last_group_id  AggregateFunction(argMax, String, DateTime64(3, 'UTC'))
+    last_group_id  AggregateFunction(argMax, String, DateTime64(3, 'UTC')),
+    last_country   AggregateFunction(argMax, String, DateTime64(3, 'UTC')),
+    last_city      AggregateFunction(argMax, String, DateTime64(3, 'UTC'))
   ) ENGINE = AggregatingMergeTree
   ORDER BY (project_id, distinct_id)`,
 
+  { when: "upgrade", sql: `ALTER TABLE user_stats ADD COLUMN IF NOT EXISTS last_country AggregateFunction(argMax, String, DateTime64(3, 'UTC')) AFTER last_group_id` },
+  { when: "upgrade", sql: `ALTER TABLE user_stats ADD COLUMN IF NOT EXISTS last_city AggregateFunction(argMax, String, DateTime64(3, 'UTC')) AFTER last_country` },
+  // v6: recreated so it maintains last_country / last_city. Upgrade-only for the same
+  // reason as touches_mv — the gap between DROP and CREATE loses whatever arrives in it.
+  { when: "upgrade", sql: `DROP VIEW IF EXISTS user_stats_mv` },
+  // A location-less event (a server-side call, an import) must not blank out where
+  // someone was last seen, so rows without a country are argMax'd against epoch and
+  // only win when there is nothing better.
   `CREATE MATERIALIZED VIEW IF NOT EXISTS user_stats_mv TO user_stats AS
   SELECT
     project_id,
@@ -229,7 +253,9 @@ export const dataStatements: Statement[] = [
     min(timestamp) AS first_seen,
     max(timestamp) AS last_seen,
     count() AS event_count,
-    argMaxState(group_id, timestamp) AS last_group_id
+    argMaxState(group_id, timestamp) AS last_group_id,
+    argMaxState(country, if(country != '', timestamp, toDateTime64(0, 3))) AS last_country,
+    argMaxState(city, if(city != '', timestamp, toDateTime64(0, 3))) AS last_city
   FROM events
   WHERE distinct_id != ''
   GROUP BY project_id, distinct_id`,
@@ -330,7 +356,9 @@ export const dataStatements: Statement[] = [
     min(s.first_seen) AS first_seen,
     max(s.last_seen) AS last_seen,
     sum(s.event_count) AS event_count,
-    argMaxMerge(s.last_group_id) AS group_id
+    argMaxMerge(s.last_group_id) AS group_id,
+    argMaxMerge(s.last_country) AS country,
+    argMaxMerge(s.last_city) AS city
   FROM user_stats AS s
   LEFT JOIN identity_map AS i ON i.project_id = s.project_id AND i.from_id = s.distinct_id
   GROUP BY project_id, person_id` },
@@ -374,20 +402,27 @@ export const dataStatements: Statement[] = [
     referrer_host  String,
     landing_url    String,
     landing_path   String,
+    country        LowCardinality(String),
+    region         LowCardinality(String),
+    city           String,
     INDEX idx_touch_distinct distinct_id TYPE bloom_filter(0.01) GRANULARITY 4
   ) ENGINE = ReplacingMergeTree
   ORDER BY (project_id, distinct_id, timestamp, message_id)`,
 
   { when: "upgrade", sql: `ALTER TABLE touches ADD COLUMN IF NOT EXISTS source_id LowCardinality(String) AFTER project_id` },
-  // v3: recreated so it carries source_id. Upgrade-only: dropping an MV on every boot would lose
-  // the events that arrive between the DROP and the CREATE.
+  { when: "upgrade", sql: `ALTER TABLE touches ADD COLUMN IF NOT EXISTS country LowCardinality(String) AFTER landing_path` },
+  { when: "upgrade", sql: `ALTER TABLE touches ADD COLUMN IF NOT EXISTS region LowCardinality(String) AFTER country` },
+  { when: "upgrade", sql: `ALTER TABLE touches ADD COLUMN IF NOT EXISTS city String AFTER region` },
+  // v3: recreated so it carries source_id; v6: and location. Upgrade-only: dropping an MV on
+  // every boot would lose the events that arrive between the DROP and the CREATE.
   { when: "upgrade", sql: `DROP VIEW IF EXISTS touches_mv` },
   `CREATE MATERIALIZED VIEW IF NOT EXISTS touches_mv TO touches AS
   SELECT
     project_id, source_id, message_id, distinct_id, anonymous_id, user_id, group_id, session_id, timestamp,
     multiIf(utm_source != '' OR utm_campaign != '', 'campaign', referrer_host != '' AND referrer_host != host, 'referral', 'direct') AS kind,
     utm_source, utm_medium, utm_campaign, utm_content, utm_term,
-    referrer, referrer_host, url AS landing_url, path AS landing_path
+    referrer, referrer_host, url AS landing_url, path AS landing_path,
+    country, region, city
   FROM events
   WHERE type IN ('page', 'screen', 'track')
     AND (session_start = 1 OR utm_source != '' OR utm_campaign != '' OR (referrer_host != '' AND referrer_host != host))`,
@@ -432,7 +467,11 @@ events — one row per message (track, page, screen, identify, group, alias)
   timestamp, sent_at, received_at
   properties (JSON string), traits (JSON string), context (JSON string)
   url, host, path, search, referrer, referrer_host, title, user_agent, ip, locale, timezone
+  country (ISO 3166-1 alpha-2, e.g. 'GB'), region (ISO 3166-2 subdivision, e.g. 'ENG'), city, latitude, longitude
   utm_source, utm_medium, utm_campaign, utm_content, utm_term, library_name, library_version
+  Location is resolved from the connecting IP when the event arrives, so it is where that
+  message came from, not a fixed attribute of the person — one traveller has events in
+  several countries. It is '' when nothing could resolve it; filter with country != ''.
   For track: event = the event name. For page: event = '$page', name = page name.
   For screen: '$screen'. identify: '$identify'. group: '$group'. alias: '$alias'.
   Read JSON with JSONExtractString(properties, 'plan'), JSONExtractInt(properties, 'amount'),
@@ -444,7 +483,8 @@ events_resolved — THE table to query for anything per person. Same columns as 
 
 identity_map — view: from_id (anonymous id or previous user id) -> to_id (user id), conflicts resolve to the earliest link.
 
-person_stats — view: per person_id: is_identified, first_seen, last_seen, event_count, group_id (latest company).
+person_stats — view: per person_id: is_identified, first_seen, last_seen, event_count, group_id (latest company),
+  country, city (where they were last seen, ignoring events that carry no location).
 
 person_sources (AggregatingMergeTree, GROUP BY project_id, distinct_id, source_id)
   first_seen (min), last_seen (max), event_count (sum). Join via identity_map to get per-person product usage.
@@ -452,7 +492,7 @@ person_sources (AggregatingMergeTree, GROUP BY project_id, distinct_id, source_i
 touches — one row per arrival for attribution: session starts, and any page view with UTMs or an external referrer.
   project_id, source_id, distinct_id, anonymous_id, user_id, group_id, session_id, timestamp
   kind ('campaign' | 'referral' | 'direct'), utm_source, utm_medium, utm_campaign, utm_content, utm_term,
-  referrer, referrer_host, landing_url, landing_path
+  referrer, referrer_host, landing_url, landing_path, country, region, city
 touches_resolved — touches with person_id resolved. First touch = argMin(..., timestamp) per person_id,
   last touch = argMax. Every touch is kept, so any attribution model (linear, U-shaped) is an aggregation.
 
@@ -466,7 +506,8 @@ group_traits — companies / workspaces (use FINAL)
   project_id, group_id, traits (JSON string), updated_at
 
 user_stats (AggregatingMergeTree, GROUP BY project_id, distinct_id)
-  is_identified (max), first_seen (min), last_seen (max), event_count (sum), last_group_id (argMaxMerge)
+  is_identified (max), first_seen (min), last_seen (max), event_count (sum),
+  last_group_id / last_country / last_city (all argMaxMerge)
 
 group_stats (AggregatingMergeTree, GROUP BY project_id, group_id)
   first_seen (min), last_seen (max), event_count (sum), users (uniqMerge)

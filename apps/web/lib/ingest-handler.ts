@@ -1,4 +1,4 @@
-import { batchSchema, ingest, messageSchema, resolveWriteKey, type IncomingMessage } from "@fourierhq/core";
+import { batchSchema, geoFromHeaders, ingest, messageSchema, resolveWriteKey, type IncomingMessage } from "@fourierhq/core";
 import { ready } from "./db";
 import { error, json } from "./http";
 
@@ -63,6 +63,17 @@ export async function handleIngest(req: Request, forcedType?: IncomingMessage["t
   }
 
   // The environment comes from the write key, so a deployment can only write to its own.
-  const result = await ingest(project, messages, { sourceId: source.id, ip: clientIp(req), userAgent: req.headers.get("user-agent") ?? undefined }, environment);
+  const result = await ingest(
+    project,
+    messages,
+    {
+      sourceId: source.id,
+      ip: clientIp(req),
+      userAgent: req.headers.get("user-agent") ?? undefined,
+      // Whatever Vercel / Cloudflare / CloudFront already resolved for this connection.
+      geo: geoFromHeaders(req.headers),
+    },
+    environment,
+  );
   return json({ success: true, ...result });
 }

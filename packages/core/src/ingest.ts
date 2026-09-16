@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { getDataClient } from "./client";
 import { DEFAULT_ENVIRONMENT, type Environment } from "./environments";
+import { EMPTY_GEO, ensureGeoDb, geoFromContext, geoFromIp, type Geo } from "./geo";
 import type { Project } from "./projects";
 
 const json = z.record(z.string(), z.unknown());
@@ -65,6 +66,11 @@ export interface EventRow {
   ip: string;
   locale: string;
   timezone: string;
+  country: string;
+  region: string;
+  city: string;
+  latitude: number;
+  longitude: number;
   utm_source: string;
   utm_medium: string;
   utm_campaign: string;
@@ -80,6 +86,8 @@ export interface IngestMeta {
   ip?: string;
   userAgent?: string;
   receivedAt?: Date;
+  /** What the CDN in front of us said about the connecting address. See ./geo. */
+  geo?: Geo | null;
 }
 
 function str(v: unknown): string {
@@ -155,6 +163,16 @@ export function normalize(project: Project, msg: IncomingMessage, meta: IngestMe
   const url = str(props.url ?? page.url);
   const referrer = str(props.referrer ?? page.referrer);
 
+  // Location, in order of how much we trust it. The edge headers in `meta.geo` describe
+  // whoever opened the connection — which is the visitor for a browser, but the
+  // customer's own server when a server-side SDK relays events for its users. Those
+  // messages say so by carrying context.ip, and that is the cue to ignore the edge and
+  // resolve the address they named instead.
+  const ctxIp = str(ctx.ip);
+  const ip = ctxIp || str(meta.ip);
+  const relayed = ctxIp !== "" && ctxIp !== str(meta.ip);
+  const geo = geoFromContext(ctx) ?? (relayed ? null : meta.geo) ?? geoFromIp(ip) ?? EMPTY_GEO;
+
   return {
     project_id: project.id,
     source_id: meta.sourceId ?? "default",
@@ -184,9 +202,14 @@ export function normalize(project: Project, msg: IncomingMessage, meta: IngestMe
     referrer_host: hostOf(referrer),
     title: str(props.title ?? page.title),
     user_agent: str(ctx.userAgent ?? meta.userAgent),
-    ip: str(ctx.ip ?? meta.ip),
+    ip,
     locale: str(ctx.locale),
     timezone: str(ctx.timezone ?? get(ctx, ["timezone"])),
+    country: geo.country,
+    region: geo.region,
+    city: geo.city,
+    latitude: geo.latitude,
+    longitude: geo.longitude,
     utm_source: str(campaign.source),
     utm_medium: str(campaign.medium),
     utm_campaign: str(campaign.name ?? campaign.campaign),
@@ -248,6 +271,9 @@ export async function ingest(
   environment: Environment = DEFAULT_ENVIRONMENT,
 ): Promise<IngestResult> {
   const client = getDataClient(environment);
+  // Opens the optional local geo database on the first batch and is a no-op after that,
+  // which is what lets normalize() resolve an address without being async.
+  await ensureGeoDb();
   const rows: EventRow[] = [];
   const accepted: IncomingMessage[] = [];
   let rejected = 0;
