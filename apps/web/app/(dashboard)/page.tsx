@@ -96,7 +96,7 @@ export default function OverviewPage() {
 
   return (
     <>
-      <PageHeader title="Overview" description={overview.data?.project.name} />
+      <PageHeader title="Overview" />
       <div className="space-y-6 p-4 md:p-6">
         {overview.isError && (
           <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-4 text-sm">

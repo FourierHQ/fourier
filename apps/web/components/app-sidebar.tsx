@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Activity, Bot, Building2, Database, LayoutDashboard, LogOut, Moon, Plug, ShieldOff, Sun, Users } from "lucide-react";
+import { Activity, Bot, Building2, LayoutDashboard, LogOut, Moon, Plug, ShieldOff, Sun, Users } from "lucide-react";
 import { useTheme } from "next-themes";
 import {
   Sidebar,
@@ -17,10 +17,8 @@ import {
   SidebarMenuItem,
   SidebarRail,
 } from "@/components/ui/sidebar";
-import { FourierIcon } from "@/components/logo";
-import { useAuthStatus, useHealth, useLogout, useOverview } from "@/lib/api";
+import { useAuthStatus, useLogout } from "@/lib/api";
 import { EnvironmentSwitcher } from "@/components/environment-switcher";
-import { cn } from "@/lib/utils";
 
 const nav = [
   { href: "/", label: "Overview", icon: LayoutDashboard },
@@ -35,30 +33,16 @@ const setup = [
 
 export function AppSidebar() {
   const pathname = usePathname();
-  const health = useHealth();
-  const overview = useOverview();
   const auth = useAuthStatus();
   const logout = useLogout();
   const router = useRouter();
   const { resolvedTheme, setTheme } = useTheme();
   const isActive = (href: string) => (href === "/" ? pathname === "/" : pathname.startsWith(href));
-  const receiving = (overview.data?.overview.total_events ?? 0) > 0;
 
   return (
     <Sidebar collapsible="icon">
       <SidebarHeader>
         <SidebarMenu>
-          <SidebarMenuItem>
-            <SidebarMenuButton size="lg" asChild>
-              <Link href="/">
-                <FourierIcon />
-                <div className="grid flex-1 text-left text-sm leading-tight">
-                  <span className="truncate font-semibold">Fourier</span>
-                  <span className="truncate text-xs text-muted-foreground">{overview.data?.project.name ?? "Analytics"}</span>
-                </div>
-              </Link>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
           <SidebarMenuItem>
             <EnvironmentSwitcher />
           </SidebarMenuItem>
@@ -102,24 +86,6 @@ export function AppSidebar() {
       </SidebarContent>
       <SidebarFooter>
         <SidebarMenu>
-          <SidebarMenuItem>
-            <SidebarMenuButton tooltip="ClickHouse" asChild>
-              <div className="cursor-default">
-                <Database />
-                <span className="flex items-center gap-2 truncate">
-                  <span
-                    className={cn(
-                      "size-2 shrink-0 rounded-full",
-                      health.isLoading ? "bg-muted-foreground" : health.data?.ok ? (receiving ? "bg-emerald-500" : "bg-amber-500") : "bg-destructive",
-                    )}
-                  />
-                  <span className="truncate text-xs text-muted-foreground">
-                    {health.isLoading ? "Connecting…" : health.data?.ok ? (receiving ? "Receiving events" : "Connected, no events yet") : "ClickHouse unreachable"}
-                  </span>
-                </span>
-              </div>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
           <SidebarMenuItem>
             <SidebarMenuButton tooltip="Toggle theme" onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}>
               <Sun className="dark:hidden" />
