@@ -622,10 +622,36 @@ function touchWhere(scope: Scope, f: TouchesFilter) {
   return { where: where.join(" AND "), params };
 }
 
-/** Every recorded arrival, newest first. */
+/**
+ * What makes two rows the same arrival: one person, one session, landing with the same
+ * attribution. Events other than the first carry the referrer of the page that loaded them,
+ * so a single arrival can leave a row per event; older rows predate the ingest-side fix and
+ * are still in the table. A session that genuinely changes attribution partway through — an
+ * external link back in under a new campaign — keeps both, because the key covers the
+ * campaign too. Sessionless rows (server-side messages) fall back to message_id, so they
+ * never collapse into each other.
+ */
+const ARRIVAL_KEY = `person_id, if(session_id != '', session_id, message_id), kind,
+  utm_source, utm_medium, utm_campaign, utm_content, utm_term, referrer_host`;
+
+/** Every recorded arrival, newest first, one row per arrival. */
 export async function listTouches(scope: Scope, f: TouchesFilter = {}): Promise<TouchRecord[]> {
   const { where, params } = touchWhere(scope, f);
-  return q<TouchRecord>(scope, `SELECT ${TOUCH_COLS} FROM touches_resolved WHERE ${where} ORDER BY timestamp DESC LIMIT {limit:UInt32}`, params);
+  // The earliest row of an arrival is the arrival: it holds the landing page that was actually
+  // landed on, and the time it happened. message_id makes the sort key unique, so the pick is
+  // defined rather than left to chance when two rows share a millisecond — belt and braces, since
+  // no test can tell it apart from its absence: ClickHouse happens to order equal keys stably.
+  return q<TouchRecord>(
+    scope,
+    `SELECT ${TOUCH_COLS} FROM (
+       SELECT ${TOUCH_COLS} FROM touches_resolved
+       WHERE ${where}
+       ORDER BY timestamp ASC, message_id ASC
+       LIMIT 1 BY ${ARRIVAL_KEY}
+     )
+     ORDER BY timestamp DESC LIMIT {limit:UInt32}`,
+    params,
+  );
 }
 
 export interface Attribution {
@@ -686,7 +712,9 @@ export async function attributionReport(
   const model = opts.model === "last" ? "last" : "first";
   const { where, params } = touchWhere(scope, { groupId: opts.groupId, sourceId: opts.sourceId, after: opts.from, before: opts.to });
   params.limit = Math.min(Math.max(opts.limit ?? 50, 1), 500);
-  // pick one touch per person, then group people by the dimension
+  // pick one touch per person, then group people by the dimension. No dedupe needed: argMin and
+  // argMax over the repeated rows of one arrival return that arrival's value either way, and the
+  // counts are over people, not touches.
   const col = by === "source_id" ? "if(source_id = '', 'default', source_id)" : by;
   const pick =
     model === "first"

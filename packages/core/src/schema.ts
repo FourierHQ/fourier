@@ -12,7 +12,7 @@
  * - Materialised views maintain per-user, per-group and per-event rollups.
  */
 
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 
 /**
  * A migration statement. Plain strings are idempotent `CREATE ... IF NOT EXISTS` and run on
@@ -380,8 +380,14 @@ export const dataStatements: Statement[] = [
 
   // ---- attribution touches ----
   //
-  // One row per arrival: a session start, or any page view carrying UTMs or an external referrer.
+  // Arrivals: a session start, anything carrying UTMs, or a page view with an external referrer.
   // kind = campaign (utm present) | referral (external referrer) | direct (neither).
+  //
+  // Only a page or screen view can raise a REFERRAL touch. Every message carries the page context
+  // of whatever loaded it, so a scroll-depth or click track fired on a page reached from an
+  // external link looks exactly like the arrival that started it, and admitting those counted one
+  // arrival as many. The other two routes stay open to any type: a track can start a session, and
+  // a server-side track can name its own campaign — neither repeats a referrer it did not cause.
   `CREATE TABLE IF NOT EXISTS touches (
     project_id     LowCardinality(String),
     source_id      LowCardinality(String),
@@ -425,8 +431,13 @@ export const dataStatements: Statement[] = [
     country, region, city
   FROM events
   WHERE type IN ('page', 'screen', 'track')
-    AND (session_start = 1 OR utm_source != '' OR utm_campaign != '' OR (referrer_host != '' AND referrer_host != host))`,
+    AND (session_start = 1
+      OR utm_source != '' OR utm_campaign != ''
+      OR (type IN ('page', 'screen') AND referrer_host != '' AND referrer_host != host))`,
 
+  // Deliberately not deduplicated here: LIMIT BY inside a view interacts with predicate pushdown,
+  // and a time filter pushed under it would change which row represents an arrival. listTouches in
+  // queries.ts owns that collapse — anything new reading this view has to do the same or say why not.
   { when: "change", sql: `CREATE OR REPLACE VIEW touches_resolved AS
   SELECT
     t.* ,
@@ -489,7 +500,10 @@ person_stats — view: per person_id: is_identified, first_seen, last_seen, even
 person_sources (AggregatingMergeTree, GROUP BY project_id, distinct_id, source_id)
   first_seen (min), last_seen (max), event_count (sum). Join via identity_map to get per-person product usage.
 
-touches — one row per arrival for attribution: session starts, and any page view with UTMs or an external referrer.
+touches — arrivals for attribution: session starts, anything carrying UTMs, and page views with an
+  external referrer. Close to one row per arrival but not guaranteed to be one — a landing page with
+  UTMs writes a row per message on it — so reads collapse rows sharing a person, a session and the
+  same attribution down to the earliest. Count arrivals off listTouches, never off this table.
   project_id, source_id, distinct_id, anonymous_id, user_id, group_id, session_id, timestamp
   kind ('campaign' | 'referral' | 'direct'), utm_source, utm_medium, utm_campaign, utm_content, utm_term,
   referrer, referrer_host, landing_url, landing_path, country, region, city

@@ -237,7 +237,7 @@ export function registerFourierTools(server: McpServer) {
     {
       title: "List attribution touches",
       description:
-        "Every recorded arrival, newest first: session starts and any page view with UTM parameters or an external referrer. kind is 'campaign', 'referral' or 'direct'. Filter by person or company. Every touch is kept, so first-touch, last-touch and multi-touch models are all derivable.",
+        "Every recorded arrival, newest first: session starts, anything carrying UTM parameters, and page views with an external referrer. kind is 'campaign', 'referral' or 'direct'. Filter by person or company. One row per arrival — the repeated messages of a single page load are collapsed — and every distinct arrival is kept, so first-touch, last-touch and multi-touch models are all derivable.",
       inputSchema: z.object({
         project_id: projectArg, environment: environmentArg,
         person_id: z.string().optional().describe("User id or anonymous id"),
