@@ -33,13 +33,20 @@ const DOT: Record<Tone, string> = {
 };
 
 /**
- * Whether the environment you are looking at is actually taking events.
+ * Whether the environment you are looking at is actually taking events. This is
+ * the only thing the dot says — it carries no information about which
+ * environment you picked, so amber and red always mean the same thing wherever
+ * you are.
  *
  * "Receiving" is the last 24 hours rather than "has ever received": a project
  * that was wired up months ago and went quiet yesterday is not receiving
  * anything, and a dot that stayed green forever after the first event would say
- * nothing worth reading. ClickHouse being unreachable outranks both — there is
- * no honest answer about event flow when the database cannot be queried.
+ * nothing worth reading.
+ *
+ * Red is for broken rather than merely quiet, and an environment that has never
+ * seen a single event is broken: either nothing is installed or the write key is
+ * wrong, and both want fixing rather than waiting out. Amber is the softer case
+ * — this worked once and has gone quiet, which may well be the weekend.
  */
 function useIngestStatus(): { tone: Tone; summary: string } {
   const health = useHealth();
@@ -52,7 +59,7 @@ function useIngestStatus(): { tone: Tone; summary: string } {
   // Quiet. How long it has been quiet is the thing you go looking for the moment
   // the dot turns amber, so say that rather than "no events in the last 24 hours".
   if (o.last_event_at) return { tone: "idle", summary: `Last event ${relativeTime(o.last_event_at)}` };
-  return { tone: "idle", summary: "No events yet" };
+  return { tone: "down", summary: "No events yet" };
 }
 
 /**
@@ -88,13 +95,15 @@ export function EnvironmentSwitcher() {
           </span>
           <div className="grid flex-1 text-left text-sm leading-tight">
             <span className="truncate font-semibold">Fourier</span>
-            <span
-              className={cn(
-                "flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground",
-                // Non-production is tinted so you cannot mistake preview numbers for real ones at a glance.
-                environment !== "production" && "text-amber-600 dark:text-amber-500",
-              )}
-            >
+            {/*
+              Non-production used to be tinted amber so you could not mistake
+              preview numbers for real ones at a glance. It no longer needs to
+              shout: the environment is the second line of the brand block now
+              rather than a control tucked in a row below it. Dropping the tint
+              also gives amber back to the dot, which was the more useful of two
+              signals wearing one colour.
+            */}
+            <span className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
               <span className={cn("size-1.5 shrink-0 rounded-full", DOT[status.tone])} />
               <span className="truncate">{ENVIRONMENT_LABELS[environment]}</span>
             </span>
