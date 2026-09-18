@@ -11,7 +11,7 @@ import { DeltaBadge, MetricLabel, RateCell } from "@/components/web/metric";
 import { RankedTable } from "@/components/web/ranked-table";
 import { NeedsGoal, NoTraffic, Panel } from "@/components/web/states";
 import { formatNumber, formatPoints } from "@/lib/format";
-import { errorOf, unwrap, useWebConversions, useWebDefinitions, type GoalSummaryRow } from "@/lib/web-api";
+import { countingLabel, errorOf, unwrap, useWebConversions, useWebDefinitions, type GoalSummaryRow } from "@/lib/web-api";
 import { P, useWebState } from "@/lib/web-state";
 
 /**
@@ -34,7 +34,8 @@ export default function ConversionsPage() {
   const fn = unwrap(report.data?.funnel);
   const supporting = unwrap(report.data?.supporting);
   const avail = unwrap(report.data?.availability);
-  const goalName = scope?.goal?.name ?? null;
+  // What the conversion columns count: one goal, all of them, or nothing yet.
+  const goalName = countingLabel(scope);
   const loading = report.isLoading;
   const selectedGoal = get(P.goal) ?? scope?.goal?.id ?? null;
 
@@ -68,7 +69,7 @@ export default function ConversionsPage() {
               <div className="flex flex-wrap items-start justify-between gap-2">
                 <div>
                   <CardTitle>Goal performance</CardTitle>
-                  <CardDescription>Every primary goal, against the same sessions. Select one to use it across the section.</CardDescription>
+                  <CardDescription>Every primary goal, against the same sessions. Select one to narrow the whole section to it.</CardDescription>
                 </div>
                 <ManageGoalsDialog />
               </div>
@@ -122,7 +123,7 @@ export default function ConversionsPage() {
           <div className="grid gap-6 lg:grid-cols-2">
             <Card>
               <CardHeader>
-                <CardTitle>{goalName ?? "Selected goal"} over time</CardTitle>
+                <CardTitle>{goalName ?? "Conversions"} over time</CardTitle>
                 <CardDescription>Conversion rate, with the sessions behind each point</CardDescription>
               </CardHeader>
               <CardContent>
@@ -140,7 +141,11 @@ export default function ConversionsPage() {
                   </MetricLabel>
                 </CardTitle>
                 <CardDescription>
-                  {fn?.is_path_specific ? "One path to this goal" : "A visit, and then the goal"}
+                  {fn?.is_path_specific
+                    ? "One path to this goal"
+                    : selectedGoal
+                      ? "A visit, and then the goal"
+                      : "A visit, and then any conversion. Narrow to one goal to see a configured path."}
                 </CardDescription>
               </CardHeader>
               <CardContent className="p-0">

@@ -172,18 +172,29 @@ export function primaryGoals(goals: Goal[]): Goal[] {
 }
 
 /**
- * The goal a report opens on when the reader has not picked one: the one flagged as
- * default, else the first primary goal. Null when no primary goal exists at all, which
- * is a setup state the reports must show rather than a zero they must invent.
+ * The goal to reach for when a report needs exactly one and the reader has not named
+ * one — a funnel, which cannot be drawn to "any of three things". Null when no primary
+ * goal exists at all, which is a setup state rather than a zero.
  */
 export function defaultGoal(goals: Goal[]): Goal | null {
   const primary = primaryGoals(goals);
   return primary.find((g) => g.is_default) ?? primary[0] ?? null;
 }
 
+/**
+ * Which goal the reader has narrowed to, or null for all of them.
+ *
+ * Null is the default and it means *every* primary goal, not none: a site with three
+ * goals should answer "how is it doing" by counting visits that completed any of them,
+ * rather than picking one and quietly ignoring the other two. Narrowing to a single
+ * goal is a refinement the reader asks for.
+ *
+ * An id that names nothing — a stale link, a deleted goal — also resolves to all, which
+ * is the answer that omits nothing.
+ */
 export function resolveGoal(goals: Goal[], id: string | null | undefined): Goal | null {
-  if (!id) return defaultGoal(goals);
-  return primaryGoals(goals).find((g) => g.id === id) ?? defaultGoal(goals);
+  if (!id) return null;
+  return primaryGoals(goals).find((g) => g.id === id) ?? null;
 }
 
 export interface UpsertInput {

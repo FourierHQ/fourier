@@ -368,6 +368,49 @@ test("page groups aggregate from sessions, not by summing page rows", async () =
   assert.equal(product?.unique_viewers.current, 4, "a1 and a5 and a7 on /pricing, a3 on /product/api — counted once each");
 });
 
+test("with no goal named, conversions are every primary goal, counted once", async () => {
+  // A third primary goal that fires in a session another goal already claims: s4 both
+  // clicked the CTA and booked the demo. Without it the fixtures could not tell a
+  // distinct-session count from a sum, because no visit completes two goals.
+  await upsertDefinition(project.id, "goal", {
+    id: "also-primary",
+    name: "CTA clicked (primary)",
+    config: { type: "primary", match: "event", event: "CTA Clicked" },
+  });
+
+  const all = await web({ goal: null });
+  const h = await headline(all);
+  assert.equal(h.goal_name, "All conversions", "the cards say what they are counting");
+
+  // s1 signed up, s4 booked and clicked, s5 booked. Three visits did something.
+  assert.equal(h.converting_sessions.current, 3);
+
+  // Summing the goals would say four, because s4 would be counted by two of them. That
+  // is the number a naive total produces and it exceeds the visits it came from.
+  const summed = (await goalSummary(all)).reduce((n, g) => n + g.converting_sessions.current, 0);
+  assert.equal(summed, 4, "the per-goal rows do add to more than the distinct total");
+  assert.ok(h.converting_sessions.current < summed, "so the headline must not be their sum");
+
+  // The rate is against the same sessions as every other rate on the page.
+  assert.equal(h.conversion_rate.numerator, 3);
+  assert.equal(h.conversion_rate.denominator, h.sessions.current);
+
+  // Narrowing to one goal counts only that goal, against the same denominator.
+  const narrowed = await headline(await web({ goal: DEMO }));
+  assert.equal(narrowed.goal_name, "Demo booked");
+  assert.equal(narrowed.converting_sessions.current, 2);
+  assert.equal(narrowed.sessions.current, h.sessions.current, "narrowing the goal must not narrow the visits");
+
+  // A funnel cannot be drawn to whichever of three things happened, so with no goal
+  // named it falls back to the honest two steps rather than a configured path.
+  const f = await funnel(all);
+  assert.equal(f.is_path_specific, false);
+  assert.deepEqual(f.steps.map((x) => x.name), ["Website session", "Any conversion"]);
+  assert.equal(f.steps[1].sessions, 3);
+
+  await deleteDefinition(project.id, "goal", "also-primary");
+});
+
 test("page groups overlap deterministically: the first matching rule wins", async () => {
   // Two groups that both claim /demo, and which no other configured group touches. The
   // one that gets it must be decided by the operator's stated order and nothing else —

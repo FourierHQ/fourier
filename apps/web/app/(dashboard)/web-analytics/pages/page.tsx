@@ -9,7 +9,7 @@ import { PageGroupsDialog } from "@/components/web/page-groups";
 import { RankedTable } from "@/components/web/ranked-table";
 import { NoMatches, NoTraffic, Panel } from "@/components/web/states";
 import { formatDuration, formatNumber, shortPath } from "@/lib/format";
-import { errorOf, unwrap, useWebPages, type LandingPageRow, type PageRow } from "@/lib/web-api";
+import { countingLabel, errorOf, unwrap, useWebPages, type LandingPageRow, type PageRow } from "@/lib/web-api";
 import { useWebState } from "@/lib/web-state";
 
 /**
@@ -31,7 +31,8 @@ export default function PagesPage() {
   const scope = report.data?.scope;
   const rows = unwrap(report.data?.rows);
   const avail = unwrap(report.data?.availability);
-  const goalName = scope?.goal?.name ?? null;
+  // What the conversion columns count: one goal, all of them, or nothing yet.
+  const goalName = countingLabel(scope);
   const loading = report.isLoading;
   const isGroups = groupBy === "group";
 

@@ -60,6 +60,20 @@ export function errorOf(s: Settled<unknown> | undefined): string | undefined {
   return s && "error" in s ? s.error : undefined;
 }
 
+/**
+ * What the conversion figures on screen are counting.
+ *
+ * Null means no primary goal is configured, which is a setup prompt rather than a zero.
+ * Otherwise it is the goal the reader narrowed to, or all of them — the default, since
+ * a site with three goals should answer "how is it doing" by counting visits that
+ * completed any of them rather than one picked on their behalf.
+ */
+export function countingLabel(scope: ScopeEcho | undefined): string | null {
+  if (!scope) return null;
+  if (scope.goal) return scope.goal.name;
+  return scope.goals.some((g) => g.type === "primary") ? "All conversions" : null;
+}
+
 export interface ScopeEcho {
   range: {
     preset: string;

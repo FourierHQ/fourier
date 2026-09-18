@@ -10,7 +10,7 @@ import { ConversionCard, DeltaBadge, MetricCard, MetricLabel, RateCell } from "@
 import { RankedTable } from "@/components/web/ranked-table";
 import { NeedsGoal, NoMatches, NoTraffic, Panel } from "@/components/web/states";
 import { formatNumber, formatPoints, formatRate, shortPath } from "@/lib/format";
-import { errorOf, unwrap, useWebOverview, type BreakdownRow, type LandingPageRow } from "@/lib/web-api";
+import { countingLabel, errorOf, unwrap, useWebOverview, type BreakdownRow, type LandingPageRow } from "@/lib/web-api";
 import { P, WEB_ROOT, useWebState } from "@/lib/web-state";
 
 /**
@@ -43,7 +43,8 @@ export default function OverviewPage() {
     converting: conv.map((p) => ({ bucket: p.bucket, value: p.converting, previous: null })),
     rate: conv.map((p) => ({ bucket: p.bucket, value: p.rate ?? 0, previous: null })),
   };
-  const goalName = scope?.goal?.name ?? null;
+  // What the conversion columns count: one goal, all of them, or nothing yet.
+  const goalName = countingLabel(scope);
   const loading = report.isLoading;
 
   if (report.isSuccess && avail && !avail.has_traffic) {

@@ -158,12 +158,21 @@ export interface WebScope {
 }
 
 /**
- * True when the reader has a goal selected. Conversion components must show a setup
- * prompt rather than a row of zeroes when this is false — a zero is a claim that
- * nobody converted, and we are in no position to make it.
+ * Whether there is anything to count conversions against.
+ *
+ * This asks whether a primary goal has been *configured*, not whether the reader has
+ * narrowed to one — they do not have to. When it is false, conversion components show a
+ * setup prompt rather than a row of zeroes, because a zero is a claim that nobody
+ * converted and an unconfigured site is in no position to make it.
  */
 export function hasGoal(w: WebScope): boolean {
-  return w.goal !== null;
+  return primaryGoals(w.goals).length > 0;
+}
+
+/** What the conversion columns are counting, for a label. Null when nothing is configured. */
+export function countingLabel(w: WebScope): string | null {
+  if (w.goal) return w.goal.name;
+  return hasGoal(w) ? "All conversions" : null;
 }
 
 // ---------- the base query every report is counted from ----------
@@ -205,11 +214,14 @@ function sessionBase(w: WebScope): Base {
   const scanFrom = `{${p.add(chTime(range.previous ? range.previous.from : range.current.from))}:DateTime64(3)}`;
   const scanTo = `{${p.add(chTime(new Date(range.current.to.getTime() + SESSION_TAIL_MS)))}:DateTime64(3)}`;
 
-  const selected = w.goal ? matchSql(w.goal.config, p) : "0";
   const primaries = primaryGoals(w.goals);
   // Engagement's goal leg reads EVERY primary goal, never the selected one. Otherwise
   // switching which goal you are looking at would silently move the engagement rate.
   const anyPrimary = primaries.length ? primaries.map((g) => matchSql(g.config, p)).join(" OR ") : "0";
+  // With no goal named, a conversion is any primary goal — counted as distinct sessions,
+  // so a visit that signs up AND books a demo is one converting session and not two.
+  // Summing the goals instead would produce a total that exceeds the visits it came from.
+  const selected = w.goal ? matchSql(w.goal.config, p) : anyPrimary;
 
   const filterParts: string[] = [`s.project_id = ${project}`, window];
   if (!filters.includeBots) filterParts.push("s.is_bot = 0");
@@ -330,6 +342,10 @@ export interface Headline {
   converting_sessions: Delta;
   conversion_rate: RateDelta;
   /** Null when no goal is configured — a setup state, not a zero. */
+  /**
+   * What the conversion figures count: a goal's name, "All conversions", or null when
+   * none is configured — which the cards must render as a setup prompt, not a zero.
+   */
   goal_name: string | null;
 }
 
@@ -352,7 +368,7 @@ export async function headline(w: WebScope): Promise<Headline> {
     sessions: delta(sessions, prevOr(w, prevSessions)),
     converting_sessions: delta(num(r?.converting), prevOr(w, num(r?.prev_converting))),
     conversion_rate: rateDelta([num(r?.converting), sessions], prevOr(w, [num(r?.prev_converting), prevSessions] as [number, number])),
-    goal_name: w.goal?.name ?? null,
+    goal_name: countingLabel(w),
   };
 }
 
@@ -1105,9 +1121,14 @@ export interface Funnel {
 export async function funnel(w: WebScope): Promise<Funnel> {
   const { cte, params, project, scanFrom, scanTo } = sessionBase(w);
   const goal = w.goal;
-  if (!goal) return { steps: [], total_conversions: 0, is_path_specific: false };
+  if (!hasGoal(w)) return { steps: [], total_conversions: 0, is_path_specific: false };
 
-  const configured = goal.config.funnel ?? [];
+  // A path can only be drawn to one destination. Counting conversions across every
+  // primary goal is a perfectly good number, but "demo page viewed, then form started,
+  // then WHICHEVER of three things happened" is not a funnel — so a configured path is
+  // used only when the reader has actually narrowed to the goal that owns it. Otherwise
+  // this is the honest default: a visit, and then a conversion.
+  const configured = goal?.config.funnel ?? [];
   const p = new Params("fn");
 
   if (!configured.length) {
@@ -1122,7 +1143,7 @@ export async function funnel(w: WebScope): Promise<Funnel> {
       steps: [
         { name: "Website session", sessions, step_rate: null, dropped: 0, drop_rate: null },
         {
-          name: goal.name,
+          name: goal?.name ?? "Any conversion",
           sessions: converting,
           step_rate: sessions > 0 ? (converting / sessions) * 100 : null,
           dropped: sessions - converting,

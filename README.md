@@ -202,6 +202,8 @@ Goals, supporting actions and page groups are defined in the dashboard and store
 
 A **primary goal** is something the site exists to produce and is the only thing a conversion rate counts. A **supporting action** — a CTA click, a form start, a download — is reported on its own and never added to a conversion total.
 
+Reports count **all conversions** by default: a site with three goals answers "how is it doing" with the visits that completed any of them, counted once each — a visit that signs up and books a demo is one converting session, not two. Narrowing to a single goal is a refinement, and it is a separate control from the filters on purpose: a filter changes which visits are counted, while the goal changes only what counts as a conversion. The session total stays exactly where it was, which is visible in every rate's denominator.
+
 ## Accounts and access
 
 Two kinds of credential, because sending data and reading it are different jobs.

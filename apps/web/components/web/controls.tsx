@@ -26,6 +26,8 @@ import { P, useWebState } from "@/lib/web-state";
  */
 
 const ALL = "__all__";
+/** Sentinel for "no goal named", which the URL represents by the parameter being absent. */
+const ALL_GOALS = "__all_goals__";
 
 function SiteControl() {
   const sources = useSources();
@@ -144,10 +146,20 @@ function CompareControl({ scope }: { scope?: ScopeEcho }) {
   );
 }
 
+/**
+ * Which conversions the report counts — all of them, or one.
+ *
+ * It sits beside Site, Date range and Comparison rather than inside Filters, because it
+ * is not one. Every filter narrows the visits under consideration, changing the
+ * numerator and the denominator together; this changes only what the numerator counts,
+ * and the session total stays exactly where it was. Putting it among the filter chips
+ * would say otherwise, and the natural reading of "Goal: Demo requested" as a filter is
+ * a conversion rate of 100%.
+ */
 function GoalControl({ scope }: { scope?: ScopeEcho }) {
   const { get, set } = useWebState();
   const primary = (scope?.goals ?? []).filter((g) => g.type === "primary");
-  const selected = get(P.goal) ?? scope?.goal?.id ?? "";
+  const selected = get(P.goal) ?? scope?.goal?.id ?? ALL_GOALS;
 
   if (!primary.length) {
     return (
@@ -159,12 +171,16 @@ function GoalControl({ scope }: { scope?: ScopeEcho }) {
     );
   }
   return (
-    <Select value={selected} onValueChange={(v) => set({ [P.goal]: v })}>
-      <SelectTrigger size="sm" className="w-[190px]" aria-label="Conversion goal">
+    <Select value={selected} onValueChange={(v) => set({ [P.goal]: v === ALL_GOALS ? null : v })}>
+      <SelectTrigger size="sm" className="w-[190px]" aria-label="Conversions counted">
         <Target className="size-3.5 text-muted-foreground" />
         <SelectValue />
       </SelectTrigger>
       <SelectContent>
+        {/* First and default. A visit that completes two goals is one converting
+            session here, not two — these are distinct visits, never a sum of the rows
+            on the Conversions page. */}
+        <SelectItem value={ALL_GOALS}>All conversions</SelectItem>
         {primary.map((g) => (
           <SelectItem key={g.id} value={g.id}>
             {g.name}

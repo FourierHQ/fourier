@@ -11,7 +11,7 @@ import { DeltaBadge, MetricLabel, RateCell } from "@/components/web/metric";
 import { RankedTable } from "@/components/web/ranked-table";
 import { NoMatches, NoTraffic, Panel } from "@/components/web/states";
 import { formatNumber, formatRate, formatRatio } from "@/lib/format";
-import { errorOf, unwrap, useWebAcquisition, type BreakdownRow } from "@/lib/web-api";
+import { countingLabel, errorOf, unwrap, useWebAcquisition, type BreakdownRow } from "@/lib/web-api";
 import { P, WEB_ROOT, useWebState } from "@/lib/web-state";
 
 /**
@@ -45,7 +45,8 @@ export default function AcquisitionPage() {
   const performance = unwrap(report.data?.performance);
   const byChannel = unwrap(report.data?.by_channel);
   const avail = unwrap(report.data?.availability);
-  const goalName = scope?.goal?.name ?? null;
+  // What the conversion columns count: one goal, all of them, or nothing yet.
+  const goalName = countingLabel(scope);
   const loading = report.isLoading;
   const group = GROUPS.find((g) => g.value === grouping) ?? GROUPS[0];
 
