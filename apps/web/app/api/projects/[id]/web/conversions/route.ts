@@ -7,7 +7,7 @@ import {
   headline,
   landingPages,
   pagesInConvertingSessions,
-  pagesLeadingToConversions,
+  conversionPages,
   supportingActions,
 } from "@fourierhq/core";
 import { resolveProject } from "@/lib/db";
@@ -25,10 +25,11 @@ export const GET = handle(requireProjectAccess(async (req: Request, { params }: 
   const project = await resolveProject(id);
   if (!project) return error("Project not found", 404);
   const w = await webScopeFromRequest(req, project);
-  // "Which pages drive conversions" asked two ways. The strict reading is the last page
-  // before the one the conversion happened on; the loose one is any page the converting
-  // visits went through, which needs a baseline to mean anything. Both are cheap, and
-  // which is wanted depends on the question, so the client toggles between them.
+  // "Which pages drive conversions" asked two ways. The direct reading credits the page
+  // a conversion fired on and, separately, the page before it — two observations, since
+  // a form may be on a page of its own or embedded in a content page. The loose one is
+  // any page the converting visits went through, which needs a baseline to mean
+  // anything. Which is wanted depends on the question, so the client toggles.
   const reach = new URL(req.url).searchParams.get("pages") === "anywhere" ? "anywhere" : "leading";
 
   return json({
@@ -44,7 +45,7 @@ export const GET = handle(requireProjectAccess(async (req: Request, { params }: 
       supporting: supportingActions(w),
       credit: conversionCredit(w, { limit: 12 }),
       landing: landingPages(w, { limit: 8, orderBy: "converting_sessions" }),
-      page_rows: reach === "anywhere" ? pagesInConvertingSessions(w, { limit: 8 }) : pagesLeadingToConversions(w, { limit: 8 }),
+      page_rows: reach === "anywhere" ? pagesInConvertingSessions(w, { limit: 8 }) : conversionPages(w, { limit: 8 }),
       availability: availability(w),
     })),
   });

@@ -1575,39 +1575,53 @@ export async function conversionCredit(w: WebScope, opts: { limit?: number } = {
     total: all.reduce((n, r) => n + r.entry, 0),
   };
 }
-
-export interface LeadingPageRow {
+export interface ConversionPageRow {
   path: string;
   title: string;
-  /** Converting sessions whose last page before the conversion page was this one. */
-  converting_sessions: number;
-  /** Share of all converting sessions, 0-100. */
-  share: number;
-  /** True for the row counting visits that converted on the page they arrived on. */
-  is_entry: boolean;
+  /** Conversions that happened on this page. */
+  converted_on: number;
+  /** Conversions that happened on the next page the visitor went to. */
+  led_to: number;
+  /** The two added, for ranking. Never a claim that one conversion happened twice. */
+  involved: number;
+}
+
+export interface ConversionPages {
+  rows: ConversionPageRow[];
+  total: number;
+  /**
+   * Conversions on the page the visit arrived on. Nothing preceded them, so they count
+   * under `converted_on` and toward no page's `led_to` — which is why the two columns
+   * do not share a total.
+   */
+  on_arrival: number;
 }
 
 /**
- * The page people were on immediately before the one where they converted.
+ * Which pages produce conversions, told as two facts rather than one guess.
  *
- * "Top converting pages" read literally is circular: if the goal fires on /book-a-demo
- * then /book-a-demo tops the list by construction, and the report has told you where
- * your form is. The page worth knowing is the one that sent them there — the last thing
- * they read before the page the conversion happened on.
+ * `converted_on` is where the goal actually fired. `led_to` is the page the visitor was
+ * on immediately before, when the conversion happened somewhere else.
  *
- * Which page that is comes out of the data rather than out of goal configuration: the
- * conversion event carries the path it fired on, and everything on that path is skipped
- * when looking back. So a goal that fires on a thank-you page credits the form page, and
- * a goal that fires on the form page credits whatever led to the form, without either
- * having to be declared.
+ * Both exist because a form is not always on a page of its own. A dedicated
+ * /book-a-demo is a destination: it tops `converted_on` by construction and tells you
+ * nothing you did not already know, while the page that sent them there is the one
+ * worth having. But embed that same form on /product/analytics and the conversion page
+ * IS the page doing the work — crediting its predecessor would hand the win to whatever
+ * happened to come before. One site can have both arrangements, for the same goal.
  *
- * Visits that converted on the page they arrived on have no earlier page. They are a
- * row of their own rather than dropped, because "the landing page did all of it" is an
- * answer, and silently omitting them would make the percentages describe a smaller
- * population than the one in the heading.
+ * Nothing here infers which arrangement a page is in, because nothing reliably can.
+ * Both numbers are observations and they sit side by side: conversions on it and none
+ * led to it is a form people convert on; none on it and many led to it is a page that
+ * persuades; both is a content page with a form embedded, which is the case that made
+ * a single column wrong.
+ *
+ * Each column accounts for every conversion at most once — `converted_on` sums to the
+ * total, `led_to` to the total minus those that converted on arrival — so neither can
+ * double-count, and the two are never summed across pages.
  */
-export async function pagesLeadingToConversions(w: WebScope, opts: { limit?: number; groupBy?: "page" | "group" } = {}): Promise<LeadingPageRow[]> {
-  if (!hasGoal(w)) return [];
+export async function conversionPages(w: WebScope, opts: { limit?: number; groupBy?: "page" | "group" } = {}): Promise<ConversionPages> {
+  if (!hasGoal(w)) return { rows: [], total: 0, on_arrival: 0 };
   const { cte, params, project, scanFrom, scanTo } = sessionBase(w);
   const p = new Params("lg");
   const conversion = conversionMatchSql(w, p);
@@ -1639,39 +1653,53 @@ export async function pagesLeadingToConversions(w: WebScope, opts: { limit?: num
        WHERE e.project_id = ${project} AND e.type = 'page' AND b.period = 'current'
          AND e.timestamp >= ${scanFrom} AND e.timestamp < ${scanTo}
      ),
-     leading AS (
+     resolved AS (
        SELECT
          c.session_id AS session_id,
-         argMaxIf(v.path, v.ts, v.ts <= c.at AND v.path != c.conv_path) AS page,
-         anyIf(v.title, v.ts <= c.at AND v.path != c.conv_path AND v.title != '') AS title,
-         countIf(v.ts <= c.at AND v.path != c.conv_path) AS earlier
+         c.conv_path AS conv_path,
+         -- The last page before the conversion that is not the conversion page itself.
+         -- Skipping the path and not just that one view matters when someone comes back
+         -- to it: /demo, /pricing, /demo is led to by /pricing, not by /demo.
+         argMaxIf(v.path, v.ts, v.ts <= c.at AND v.path != c.conv_path) AS from_page,
+         countIf(v.ts <= c.at AND v.path != c.conv_path) AS earlier,
+         anyIf(v.title, v.title != '') AS title
        FROM conv_events AS c
        LEFT JOIN views AS v ON v.session_id = c.session_id
-       GROUP BY c.session_id
+       GROUP BY c.session_id, c.conv_path
      ),
-     totals AS (SELECT uniqExact(session_id) AS n FROM leading)
+     totals AS (SELECT uniqExact(session_id) AS n, uniqExactIf(session_id, earlier = 0) AS arrivals FROM resolved),
+     roles AS (
+       SELECT session_id, conv_path AS page, title, 'on' AS role FROM resolved
+       UNION ALL
+       SELECT session_id, from_page AS page, title, 'from' AS role FROM resolved WHERE earlier > 0
+     )
      SELECT
-       if(earlier = 0, '', ${key}) AS key,
+       ${key} AS key,
        anyIf(title, title != '') AS title,
-       uniqExact(session_id) AS sessions,
-       (SELECT n FROM totals) AS total
-     FROM leading
+       uniqExactIf(session_id, role = 'on') AS converted_on,
+       uniqExactIf(session_id, role = 'from') AS led_to,
+       (SELECT n FROM totals) AS total,
+       (SELECT arrivals FROM totals) AS on_arrival
+     FROM roles
      GROUP BY key
-     ORDER BY sessions DESC
+     ORDER BY converted_on + led_to DESC
      LIMIT ${limit}`,
     { ...params, ...p.values },
   );
 
-  return rows.map((r) => {
-    const sessions = num(r.sessions);
-    const total = num(r.total);
-    const path = String(r.key ?? "");
-    return {
-      path,
-      title: String(r.title ?? ""),
-      converting_sessions: sessions,
-      share: total > 0 ? (sessions / total) * 100 : 0,
-      is_entry: path === "",
-    };
-  });
+  return {
+    rows: rows.map((r) => {
+      const convertedOn = num(r.converted_on);
+      const ledTo = num(r.led_to);
+      return {
+        path: String(r.key ?? ""),
+        title: String(r.title ?? ""),
+        converted_on: convertedOn,
+        led_to: ledTo,
+        involved: convertedOn + ledTo,
+      };
+    }),
+    total: num(rows[0]?.total),
+    on_arrival: num(rows[0]?.on_arrival),
+  };
 }

@@ -22,36 +22,52 @@ import {
   type CreditRow,
   type GoalSummaryRow,
   type LandingPageRow,
-  type LeadingPageRow,
+  type ConversionPages,
+  type ConversionPageRow,
 } from "@/lib/web-api";
 import { P, useWebState } from "@/lib/web-state";
 
 /** Extracted so each mode's rows are typed by the branch that reaches them, not by a cast. */
-function LeadingPages({ rows, loading }: { rows: LeadingPageRow[] | undefined; loading?: boolean }) {
-  const most = Math.max(...(rows ?? []).map((r) => r.converting_sessions), 1);
+function ConversionPagesTable({ data, loading }: { data: ConversionPages | undefined; loading?: boolean }) {
+  const rows = data?.rows;
+  const most = Math.max(...(rows ?? []).map((r) => r.involved), 1);
   return (
-    <RankedTable<LeadingPageRow>
+    <RankedTable<ConversionPageRow>
       rows={rows}
       loading={loading}
-      rowKey={(r) => (r.is_entry ? "__entry__" : r.path)}
-      barOf={(r) => r.converting_sessions / most}
+      rowKey={(r) => r.path}
+      barOf={(r) => r.involved / most}
       empty={<p className="px-6 py-6 text-sm text-muted-foreground">No conversions recorded in this period.</p>}
-      caption="The page the conversion fired on is excluded — it cannot have sent anyone to itself, and leaving it in would rank your form above everything that led people to it."
+      caption={
+        <>
+          Two separate counts, never added together. A page with conversions <em>on</em> it and none <em>led to</em> is a form
+          people convert on; the reverse is a page that persuades and hands off. Both, and it is a content page with a form
+          embedded.
+          {data && data.on_arrival > 0 && (
+            <> {formatNumber(data.on_arrival)} of {formatNumber(data.total)} converted on the page they arrived on, so nothing preceded them.</>
+          )}
+        </>
+      }
       columns={[
+        { key: "path", header: "Page", cell: (r) => <span className="font-medium" title={r.path}>{shortPath(r.path, 26)}</span> },
         {
-          key: "path",
-          header: "Page",
-          cell: (r) =>
-            r.is_entry ? (
-              <span className="text-muted-foreground">Converted on the page they arrived on</span>
-            ) : (
-              <span className="font-medium" title={r.path}>
-                {shortPath(r.path, 26)}
-              </span>
-            ),
+          key: "on",
+          header: (
+            <MetricLabel hint="The goal fired while the visitor was on this page — a form on the page itself, or a confirmation page they were sent to.">
+              Converted on it
+            </MetricLabel>
+          ),
+          cell: (r) => (r.converted_on > 0 ? formatNumber(r.converted_on) : <span className="text-muted-foreground">—</span>),
         },
-        { key: "sessions", header: "Conversions", cell: (r) => formatNumber(r.converting_sessions) },
-        { key: "share", header: "Share", cell: (r) => formatRate(r.share) },
+        {
+          key: "led",
+          header: (
+            <MetricLabel hint="The visitor was here immediately before converting somewhere else. A page with a form embedded will show both columns, which is the point of having two.">
+              Led to one
+            </MetricLabel>
+          ),
+          cell: (r) => (r.led_to > 0 ? formatNumber(r.led_to) : <span className="text-muted-foreground">—</span>),
+        },
       ]}
     />
   );
@@ -330,17 +346,17 @@ export default function ConversionsPage() {
               <CardHeader>
                 <div className="flex flex-wrap items-start justify-between gap-2">
                   <div>
-                    <CardTitle>Pages that lead to conversions</CardTitle>
+                    <CardTitle>Pages that convert</CardTitle>
                     <CardDescription>
                       {data?.pages === "anywhere"
                         ? "Pages the converting visits went through, against how often every visit sees them"
-                        : "The last page before the one the conversion happened on"}
+                        : "Where conversions happened, and which pages led to them"}
                     </CardDescription>
                   </div>
                   <Tabs value={pagesMode} onValueChange={(v) => set({ pages: v === "leading" ? null : v })}>
                     <TabsList className="h-7">
                       <TabsTrigger value="leading" className="px-2 text-[11px]">
-                        Led to it
+                        Direct
                       </TabsTrigger>
                       <TabsTrigger value="anywhere" className="px-2 text-[11px]">
                         Anywhere in visit
@@ -355,7 +371,7 @@ export default function ConversionsPage() {
                     {data?.pages === "anywhere" ? (
                       <AssociatedPages rows={unwrap(data.page_rows)} loading={loading} />
                     ) : (
-                      <LeadingPages rows={unwrap(data?.page_rows)} loading={loading} />
+                      <ConversionPagesTable data={unwrap(data?.page_rows)} loading={loading} />
                     )}
                   </div>
                 </Panel>

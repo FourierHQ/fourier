@@ -44,7 +44,7 @@ import {
   funnel,
   conversionCredit,
   pagesInConvertingSessions,
-  pagesLeadingToConversions,
+  conversionPages,
   goalSummary,
   supportingActions,
   availability,
@@ -373,28 +373,34 @@ test("crediting the same conversions three ways moves them, never adds to them",
   assert.deepEqual(await conversionCredit(await web({ goal: null, goals: [] })), { rows: [], total: 0 }, "nothing configured credits nothing");
 });
 
-test("the page that led to a conversion is never the page it happened on", async () => {
+test("a page is credited for conversions on it and for conversions it led to, separately", async () => {
   const w = await web({ goal: null });
-  const rows = await pagesLeadingToConversions(w, { limit: 20 });
-  const byPath = Object.fromEntries(rows.map((r) => [r.is_entry ? "(entry)" : r.path, r.converting_sessions]));
+  const { rows, total, on_arrival } = await conversionPages(w, { limit: 100 });
+  const byPath = Object.fromEntries(rows.map((r) => [r.path, r]));
 
-  // s1 read "/" and then /pricing, where it signed up — so "/" is what led to it, and
-  // /pricing, the page the conversion fired on, must not be credited for sending
-  // anyone to itself. That circularity is the whole reason this report exists.
-  assert.equal(byPath["/"], 1);
-  assert.ok(!("/pricing" in byPath), "the page a conversion happened on is not a page that led to it");
-  assert.ok(!("/demo" in byPath), "nor is /demo, where the other two conversions fired");
+  // s1 read "/" and then signed up on /pricing. /pricing is where it happened; "/" is
+  // what led to it. s5 arrived on /pricing and converted there without going anywhere,
+  // so /pricing is credited again under converted_on and nothing is led_to.
+  assert.equal(byPath["/pricing"].converted_on, 2, "a page keeps credit for conversions that happen on it");
+  assert.equal(byPath["/pricing"].led_to, 0);
+  assert.equal(byPath["/"].led_to, 1, "and the page before gets its own, separate credit");
+  assert.equal(byPath["/"].converted_on, 0);
 
-  // s4 and s5 both converted on the page they arrived on. That is an answer — the
-  // landing page did all the work — so they get a row rather than vanishing, which
-  // would leave the shares describing fewer visits than the heading claims.
-  assert.equal(byPath["(entry)"], 2);
-  const total = rows.reduce((n, r) => n + r.converting_sessions, 0);
-  const h = await headline(w);
-  assert.equal(total, h.converting_sessions.current, "every converting visit is accounted for exactly once");
-  assert.ok(Math.abs(rows.reduce((n, r) => n + r.share, 0) - 100) < 0.01, "and the shares add to a hundred");
+  // The case that made one column wrong: /pricing both hosts conversions and is read on
+  // the way to others. Excluding the conversion page would have thrown the first away.
+  assert.ok(byPath["/pricing"].converted_on > 0 && byPath["/demo"].converted_on > 0, "both conversion pages are present");
 
-  assert.deepEqual(await pagesLeadingToConversions(await web({ goal: null, goals: [] })), [], "no goal means nothing to rank");
+  // Neither column may count a conversion twice, and between them they must lose none.
+  assert.equal(rows.reduce((n, r) => n + r.converted_on, 0), total, "every conversion happened on exactly one page");
+  assert.equal(
+    rows.reduce((n, r) => n + r.led_to, 0),
+    total - on_arrival,
+    "and every one that had an earlier page is credited to exactly one",
+  );
+  assert.equal(on_arrival, 2, "s4 and s5 converted on the page they arrived on");
+  assert.equal(total, (await headline(w)).converting_sessions.current);
+
+  assert.deepEqual(await conversionPages(await web({ goal: null, goals: [] })), { rows: [], total: 0, on_arrival: 0 });
 });
 
 test("pages in converting visits are shown against how often every visit sees them", async () => {

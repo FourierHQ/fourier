@@ -18,7 +18,8 @@ import type {
   SeriesPoint,
   ConversionCredit,
   ConvertingPageRow,
-  LeadingPageRow,
+  ConversionPageRow,
+  ConversionPages,
   SupportingActionRow,
   TrafficSeries,
   VisitorMix,
@@ -47,7 +48,8 @@ export type {
   SeriesPoint,
   ConversionCredit,
   ConvertingPageRow,
-  LeadingPageRow,
+  ConversionPageRow,
+  ConversionPages,
   SupportingActionRow,
   TrafficSeries,
   VisitorMix,
@@ -158,7 +160,7 @@ interface ConversionsReportBase extends Report {
 
 /** Discriminated on `pages` for the reason PagesReport is — the two modes have different rows. */
 export type ConversionsReport =
-  | (ConversionsReportBase & { pages: "leading"; page_rows: Settled<LeadingPageRow[]> })
+  | (ConversionsReportBase & { pages: "leading"; page_rows: Settled<ConversionPages> })
   | (ConversionsReportBase & { pages: "anywhere"; page_rows: Settled<ConvertingPageRow[]> });
 
 /**
