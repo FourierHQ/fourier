@@ -211,6 +211,25 @@ export async function accountFromSessionToken(token: string): Promise<Account | 
 
 export const SESSION_MAX_AGE = SESSION_TTL_SECONDS;
 
+// ---------- roles ----------
+
+/**
+ * Two roles, because there are only two questions worth asking of a
+ * self-hosted install: may this person change who else gets in, and may they
+ * look at the data. Everyone reads everything (see canAccessProject); admins
+ * additionally manage accounts.
+ */
+export const ROLES = ["admin", "member"] as const;
+export type Role = (typeof ROLES)[number];
+
+export function isRole(value: string): value is Role {
+  return (ROLES as readonly string[]).includes(value);
+}
+
+export function isAdmin(account: Pick<Account, "role"> | null): boolean {
+  return account?.role === "admin";
+}
+
 // ---------- accounts ----------
 
 export async function countAccounts(): Promise<number> {
@@ -278,6 +297,10 @@ export async function createAccount(input: CreateAccountInput): Promise<Account>
   if (provider === "local" && (input.password?.length ?? 0) < 8) {
     throw new Error("Password must be at least 8 characters");
   }
+  // Least privilege by default: the one account that needs to be an admin —
+  // the first one — asks for it explicitly.
+  const role = input.role ?? "member";
+  if (!isRole(role)) throw new Error(`Role must be one of: ${ROLES.join(", ")}`);
   if (await getAccountRowByEmail(email)) throw new Error("An account with that email already exists");
 
   const now = new Date().toISOString();
@@ -286,7 +309,7 @@ export async function createAccount(input: CreateAccountInput): Promise<Account>
     email,
     name: input.name?.trim() || email.split("@")[0],
     password_hash: input.password ? await hashPassword(input.password) : "",
-    role: input.role ?? "admin",
+    role,
     auth_provider: provider,
     provider_user_id: input.providerUserId ?? "",
     token_version: 1,
@@ -309,26 +332,112 @@ export async function authenticate(email: string, password: string): Promise<Acc
   return account;
 }
 
-async function writeAccountRow(row: AccountRow & { password_hash: string }): Promise<void> {
+/**
+ * Accounts live in a ReplacingMergeTree, so every change is a whole-row insert
+ * with a fresh updated_at rather than an UPDATE. Read the row, change fields,
+ * write it back — anything else silently drops the columns you left out.
+ */
+async function writeAccountRow(row: AccountRow & { password_hash: string }): Promise<AccountRow> {
+  const written = { ...row, updated_at: new Date().toISOString() };
   await getControlClient().insert({
     table: "accounts",
-    values: [{ ...row, updated_at: new Date().toISOString() }],
+    values: [written],
     format: "JSONEachRow",
     clickhouse_settings: { async_insert: 0 },
   });
+  return written;
+}
+
+async function getAccountRow(id: string): Promise<AccountRow | null> {
+  const res = await getControlClient().query({
+    query: `SELECT ${ACCOUNT_COLUMNS} FROM accounts FINAL WHERE id = {id:String} AND deleted = 0 LIMIT 1`,
+    query_params: { id },
+    format: "JSONEachRow",
+  });
+  return ((await res.json()) as AccountRow[])[0] ?? null;
 }
 
 export async function setPassword(accountId: string, password: string): Promise<void> {
   if (password.length < 8) throw new Error("Password must be at least 8 characters");
-  const res = await getControlClient().query({
-    query: `SELECT ${ACCOUNT_COLUMNS} FROM accounts FINAL WHERE id = {id:String} AND deleted = 0 LIMIT 1`,
-    query_params: { id: accountId },
-    format: "JSONEachRow",
-  });
-  const row = ((await res.json()) as AccountRow[])[0];
+  const row = await getAccountRow(accountId);
   if (!row) throw new Error("Account not found");
   // Bumping the version ends every existing session — a password change should.
   await writeAccountRow({ ...row, password_hash: await hashPassword(password), token_version: Number(row.token_version) + 1 });
+}
+
+/** The caller proves they know the current password, so a borrowed session can't change it. */
+export async function changePassword(accountId: string, currentPassword: string, nextPassword: string): Promise<void> {
+  const row = await getAccountRow(accountId);
+  if (!row) throw new Error("Account not found");
+  if (!row.password_hash) throw new Error("This account signs in through an identity provider, so it has no password to change");
+  if (!(await verifyPassword(currentPassword, row.password_hash))) throw new Error("Current password is incorrect");
+  await setPassword(accountId, nextPassword);
+}
+
+export interface UpdateAccountInput {
+  name?: string;
+  email?: string;
+  role?: string;
+}
+
+export async function updateAccount(accountId: string, patch: UpdateAccountInput): Promise<Account> {
+  const row = await getAccountRow(accountId);
+  if (!row) throw new Error("Account not found");
+
+  const next = { ...row };
+
+  if (patch.name !== undefined) {
+    const name = patch.name.trim();
+    if (!name) throw new Error("Name cannot be empty");
+    next.name = name;
+  }
+
+  if (patch.email !== undefined) {
+    const email = patch.email.trim().toLowerCase();
+    if (!email.includes("@")) throw new Error("A valid email is required");
+    if (email !== row.email) {
+      const clash = await getAccountRowByEmail(email);
+      if (clash) throw new Error("An account with that email already exists");
+      next.email = email;
+    }
+  }
+
+  if (patch.role !== undefined && patch.role !== row.role) {
+    if (!isRole(patch.role)) throw new Error(`Role must be one of: ${ROLES.join(", ")}`);
+    // Demoting the last admin would lock everyone out of account management
+    // with no way back in short of editing ClickHouse by hand.
+    if (row.role === "admin" && patch.role !== "admin" && (await countAdmins()) < 2) {
+      throw new Error("This is the only admin; promote someone else first");
+    }
+    next.role = patch.role;
+  }
+
+  return toAccount(await writeAccountRow(next));
+}
+
+/**
+ * Soft delete: the row stays so historical joins keep resolving, but every read
+ * filters `deleted = 0`, which also kills the account's sessions and read keys
+ * — both resolve through getAccountById.
+ */
+export async function deleteAccount(accountId: string): Promise<void> {
+  const row = await getAccountRow(accountId);
+  if (!row) throw new Error("Account not found");
+  if (row.role === "admin" && (await countAdmins()) < 2) {
+    throw new Error("This is the only admin; promote someone else first");
+  }
+  // Bumped as well as flagged, so a token minted a moment ago is rejected even
+  // if a replica is still catching up on the deleted flag.
+  await writeAccountRow({ ...row, deleted: 1, token_version: Number(row.token_version) + 1 });
+}
+
+export async function countAdmins(): Promise<number> {
+  const res = await getControlClient().query({
+    query: `SELECT count() AS n FROM accounts FINAL WHERE deleted = 0 AND role = 'admin'`,
+    format: "JSONEachRow",
+  });
+  const rows = (await res.json()) as { n: number | string }[];
+  return Number(rows[0]?.n ?? 0);
 }
 
 // ---------- read keys ----------
