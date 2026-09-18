@@ -170,13 +170,19 @@ async function main() {
   // Sixty days, not thirty: the default report compares the last thirty against the
   // thirty before them, and a seed that stops at the boundary makes every change column
   // read "+21050%" against the two visits that happened to fall the other side of it.
-  for (let i = 0; i < 800; i++) {
-    const anonymousId = crypto.randomUUID();
-    // Mildly growing — roughly 40% more traffic in the recent half than the earlier
-    // one, which is what a site that is going well actually looks like. A steeper curve
-    // makes every change column read in the thousands and teaches nobody anything.
-    const daysAgo = Math.floor(59 * Math.pow(Math.random(), 1.3));
-    const start = now - daysAgo * DAY - rand(0, DAY);
+  // Mildly growing — roughly 40% more traffic in the recent half than the earlier one,
+  // which is what a site that is going well actually looks like. A steeper curve makes
+  // every change column read in the thousands and teaches nobody anything.
+  const visitTimes = Array.from({ length: 800 }, () => now - Math.floor(59 * Math.pow(Math.random(), 1.3)) * DAY - rand(0, DAY)).sort((a, b) => a - b);
+  // About a third of visits are somebody coming back. Emitted oldest-first and reusing
+  // an id only from a visit already generated, so a returning visitor's first sighting
+  // genuinely precedes their return — otherwise the new/returning split would depend on
+  // the order the seed happened to write rows in.
+  const seenVisitors: string[] = [];
+  for (const start of visitTimes) {
+    const returning = seenVisitors.length > 20 && Math.random() < 0.32;
+    const anonymousId = returning ? pick(seenVisitors) : crypto.randomUUID();
+    if (!returning) seenVisitors.push(anonymousId);
     const w = pick(LOCATIONS);
     const ua = pick(UAS);
     const geo = { country: w.country, region: w.region, city: w.city, latitude: w.latitude, longitude: w.longitude };
