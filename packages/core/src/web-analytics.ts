@@ -348,16 +348,20 @@ export async function trend(w: WebScope, metric: TrendMetric = "visitors"): Prom
   const bucket = bucketSql("started_at", w.range.interval, w.range.timezone);
   const shifted = bucketSql(`started_at + toIntervalMillisecond({shift:Int64})`, w.range.interval, w.range.timezone);
   const agg = metric === "visitors" ? "uniqExact(person_id)" : "uniqExact(session_id)";
+  // The literal tag is `series`, not `period`. ClickHouse resolves a WHERE against
+  // aliases declared in the same SELECT, so `'previous' AS period ... WHERE period =
+  // 'previous'` compares the constant with itself, matches every row, and shifts the
+  // whole range forward — a chart that looks plausible and is entirely wrong.
 
   const rows = await q<Row>(
     w.scope,
     `${cte}
-     SELECT bucket, sumIf(v, period = 'current') AS value, sumIf(v, period = 'previous') AS previous
+     SELECT bucket, sumIf(v, series = 'current') AS value, sumIf(v, series = 'previous') AS previous
      FROM (
-       SELECT ${bucket} AS bucket, 'current' AS period, ${agg} AS v
+       SELECT ${bucket} AS bucket, 'current' AS series, ${agg} AS v
        FROM scoped WHERE period = 'current' GROUP BY bucket
        UNION ALL
-       SELECT ${shifted} AS bucket, 'previous' AS period, ${agg} AS v
+       SELECT ${shifted} AS bucket, 'previous' AS series, ${agg} AS v
        FROM scoped WHERE period = 'previous' GROUP BY bucket
      )
      GROUP BY bucket ORDER BY bucket`,
@@ -837,11 +841,11 @@ async function pageTrend(w: WebScope, path: string, basis: "landing" | "viewers"
   const sql =
     basis === "landing"
       ? `${cte}
-         SELECT bucket, sumIf(v, period = 'current') AS value, sumIf(v, period = 'previous') AS previous FROM (
-           SELECT ${bucket("started_at")} AS bucket, 'current' AS period, uniqExact(session_id) AS v
+         SELECT bucket, sumIf(v, series = 'current') AS value, sumIf(v, series = 'previous') AS previous FROM (
+           SELECT ${bucket("started_at")} AS bucket, 'current' AS series, uniqExact(session_id) AS v
            FROM scoped WHERE period = 'current' AND entry_path = ${target} GROUP BY bucket
            UNION ALL
-           SELECT ${bucket(shift)} AS bucket, 'previous' AS period, uniqExact(session_id) AS v
+           SELECT ${bucket(shift)} AS bucket, 'previous' AS series, uniqExact(session_id) AS v
            FROM scoped WHERE period = 'previous' AND entry_path = ${target} GROUP BY bucket
          ) GROUP BY bucket ORDER BY bucket`
       : `${cte},
@@ -853,11 +857,11 @@ async function pageTrend(w: WebScope, path: string, basis: "landing" | "viewers"
              AND e.timestamp >= ${scanFrom} AND e.timestamp < ${scanTo}
              AND ${normalizedPath("e.path")} = ${target}
          )
-         SELECT bucket, sumIf(v, period = 'current') AS value, sumIf(v, period = 'previous') AS previous FROM (
-           SELECT ${bucket("ts")} AS bucket, 'current' AS period, uniqExact(person_id) AS v
+         SELECT bucket, sumIf(v, series = 'current') AS value, sumIf(v, series = 'previous') AS previous FROM (
+           SELECT ${bucket("ts")} AS bucket, 'current' AS series, uniqExact(person_id) AS v
            FROM views WHERE period = 'current' GROUP BY bucket
            UNION ALL
-           SELECT ${bucket("ts + toIntervalMillisecond({shift:Int64})")} AS bucket, 'previous' AS period, uniqExact(person_id) AS v
+           SELECT ${bucket("ts + toIntervalMillisecond({shift:Int64})")} AS bucket, 'previous' AS series, uniqExact(person_id) AS v
            FROM views WHERE period = 'previous' GROUP BY bucket
          ) GROUP BY bucket ORDER BY bucket`;
 
@@ -1239,5 +1243,48 @@ export async function availability(w: WebScope): Promise<Availability> {
     has_primary_goal: primaryGoals(w.goals).length > 0,
     has_supporting_actions: w.goals.some((g) => g.config.type === "supporting"),
     engagement_tracked: num(all?.eng) > 0,
+  };
+}
+
+// ---------- filter menus ----------
+
+export interface FilterValues {
+  sources: string[];
+  campaigns: string[];
+  mediums: string[];
+  countries: string[];
+}
+
+/**
+ * The values worth offering in the filter menus.
+ *
+ * Read with the dimension filters dropped, so that having selected one campaign you can
+ * still switch to another: a menu populated from the already-filtered rows would narrow
+ * to the single value you had picked, which is the classic filter-menu dead end.
+ * The site selection and the date range do still apply — those genuinely change which
+ * values exist.
+ */
+export async function filterValues(w: WebScope): Promise<FilterValues> {
+  const unfiltered: WebScope = {
+    ...w,
+    filters: { sourceId: w.filters.sourceId, includeBots: w.filters.includeBots },
+  };
+  const { cte, params } = sessionBase(unfiltered);
+  const pick = (col: string) =>
+    `arraySort(arrayFilter(x -> x != '', groupUniqArrayIf(200)(${col}, period = 'current')))`;
+  const [r] = await q<Row>(
+    w.scope,
+    `${cte}
+     SELECT ${pick("utm_source")} AS sources, ${pick("utm_campaign")} AS campaigns,
+            ${pick("utm_medium")} AS mediums, ${pick("country")} AS countries
+     FROM scoped`,
+    params,
+  );
+  const list = (v: unknown): string[] => (Array.isArray(v) ? v.map(String) : []);
+  return {
+    sources: list(r?.sources),
+    campaigns: list(r?.campaigns),
+    mediums: list(r?.mediums),
+    countries: list(r?.countries),
   };
 }

@@ -458,7 +458,23 @@ export class Fourier extends Emitter {
     const now = Date.now();
     this.engagement = { ms: 0, lastTick: now, lastActivity: now, page: pageContext() };
     this.bindEngagement();
+    this.startTicking();
+  }
+
+  /**
+   * The clock only runs while there is something to measure. Hidden tabs stop it
+   * entirely rather than ticking into a counter that discards every tick, which keeps
+   * a backgrounded tab genuinely idle instead of merely pointless.
+   */
+  private startTicking(): void {
     if (!this.engagementTimer) this.engagementTimer = setInterval(() => this.tickEngagement(), ENGAGEMENT_TICK_MS);
+  }
+
+  private stopTicking(): void {
+    if (this.engagementTimer) {
+      clearInterval(this.engagementTimer);
+      this.engagementTimer = null;
+    }
   }
 
   private tickEngagement(): void {
@@ -486,12 +502,17 @@ export class Fourier extends Emitter {
       window.addEventListener(type, seen, { passive: true, capture: true });
     }
     // A tab coming back to the front is attention, and it also resets the tick clock so
-    // the hidden stretch is never credited retroactively.
+    // the hidden stretch is never credited retroactively. Going away stops the clock;
+    // banking the time is bindUnload's handler, which runs first and also flushes.
     document.addEventListener("visibilitychange", () => {
       if (!this.engagement) return;
       this.engagement.lastTick = Date.now();
-      if (document.visibilityState === "visible") seen();
-      else this.endEngagement({ keepOpen: true });
+      if (document.visibilityState === "visible") {
+        seen();
+        this.startTicking();
+      } else {
+        this.stopTicking();
+      }
     });
   }
 
@@ -506,10 +527,9 @@ export class Fourier extends Emitter {
     this.tickEngagement();
     const ms = Math.round(e.ms);
     this.engagement = opts.keepOpen ? { ...e, ms: 0, lastTick: Date.now() } : null;
-    if (!opts.keepOpen && this.engagementTimer) {
-      clearInterval(this.engagementTimer);
-      this.engagementTimer = null;
-    }
+    // Closing the page for good stops the clock; keepOpen leaves it to the
+    // visibilitychange handler, which stops it on the way out and restarts it on return.
+    if (!opts.keepOpen) this.stopTicking();
     // Nothing measured is nothing to report. An empty beacon would still cost a request
     // and would land in the table as a page view that engaged nobody for zero seconds,
     // which is indistinguishable from one the SDK never measured.

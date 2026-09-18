@@ -1,3 +1,13 @@
+/**
+ * The package root is server-only.
+ *
+ * `geo` reaches for maxmind, and although it does so behind a dynamic import, a bundler
+ * still follows the reference and tries to resolve node:fs for the browser. Anything
+ * running in a client component must therefore import the subpath it actually needs —
+ * `@fourierhq/core/periods`, `@fourierhq/core/classify` — or import types only, which
+ * are erased. Importing this file from a "use client" component fails the build with an
+ * error about `fs` that says nothing about why.
+ */
 export * from "./client";
 export * from "./environments";
 export * from "./schema";

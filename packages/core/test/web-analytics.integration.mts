@@ -35,6 +35,7 @@ import {
   listGoals,
   listPageGroups,
   headline,
+  trend,
   breakdown,
   landingPages,
   allPages,
@@ -438,6 +439,31 @@ test("comparison is against the same elapsed distance, and absent when switched 
   assert.equal(on.sessions.previous, 0);
   assert.equal(on.sessions.change, null, "dividing by zero is not +∞%");
   assert.equal(on.sessions.is_new, true);
+});
+
+test("the trend keeps the two periods apart and inside the selected range", async () => {
+  const w = await web();
+  const points = await trend(w, "sessions");
+  assert.ok(points.length > 0);
+
+  // Every bucket must fall inside the selected range. The comparison period is shifted
+  // forward to line up with it, so nothing may land beyond either end — a previous-period
+  // point drawn a month into the future is the signature of a WHERE that matched every
+  // row instead of one period's, which is a wrong chart rather than an error.
+  const from = w.range.current.from.getTime();
+  const to = w.range.current.to.getTime();
+  for (const p of points) {
+    const t = new Date(`${p.bucket.replace(" ", "T")}Z`).getTime();
+    assert.ok(t >= from - 86_400_000 && t < to, `bucket ${p.bucket} is outside ${w.range.current.from.toISOString()}..${w.range.current.to.toISOString()}`);
+  }
+
+  // The seeded visits are all inside the current period, so the two series must not
+  // agree: if the period filter were ineffective both would carry the same totals.
+  const current = points.reduce((n, p) => n + p.value, 0);
+  const previous = points.reduce((n, p) => n + (p.previous ?? 0), 0);
+  const h = await headline(w);
+  assert.equal(current, h.sessions.current, "the series sums to the headline");
+  assert.equal(previous, 0, "nothing was seeded in the preceding week");
 });
 
 test("page detail describes observed navigation and does not invent exits", async () => {
