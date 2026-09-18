@@ -34,13 +34,19 @@ export type Statement = string | { sql: string; when: "upgrade" | "change" };
 export const PAGE_LEAVE = "$page_leave";
 
 /**
- * Events hidden from every report unless the operator says otherwise.
+ * System events: messages Fourier's own SDK sends to make the product work, rather
+ * than things a person did. They are kept out of the activity views by default.
  *
- * $page_leave is here because it is the one event Fourier's own SDK sends that nobody
- * asked for: one per page view, doubling the event count of a site that only has page
- * views, for a measurement that is already reported as engagement time. It stays a
- * default rather than a hard-coded exclusion so that an operator debugging their
- * instrumentation can switch it back on and see the rows.
+ * Kept out, not ignored. $page_leave carries the foreground time its page held, and
+ * that measurement is read in two places the hidden set deliberately does not reach:
+ * the sessions rollup above, which sums it into engaged_ms at write time, and the
+ * per-page engagement report, which reads the raw rows. Engagement time, engaged
+ * sessions and the engagement rate are all computed from these events whether or not
+ * they are shown. What hiding removes is only their appearance as activity — one row
+ * per page view in the feed, and a second copy of every page view in the totals.
+ *
+ * It is a default rather than a hard-coded exclusion so that an operator debugging
+ * their instrumentation can switch it back on and see the rows.
  */
 export const SYSTEM_HIDDEN_EVENTS: readonly string[] = [PAGE_LEAVE];
 

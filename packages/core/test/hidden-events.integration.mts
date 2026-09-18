@@ -38,10 +38,14 @@ import {
   listGroups,
   listUsers,
   migrateAll,
+  allPages,
+  landingPages,
+  resolveRange,
   scope,
   setEventHidden,
   type Project,
   type Scope,
+  type WebScope,
 } from "../src/index";
 
 const cfg = () => ({ ...configFromEnv(), database: BASE });
@@ -255,6 +259,44 @@ test("ordering by event count sorts on the corrected number", async () => {
   assert.equal(byCount[0].distinct_id, "user-a");
   assert.equal(byCount.at(-1)!.distinct_id, "anon-noisy");
   assert.equal(byCount.find((u) => u.distinct_id === "anon-noisy")!.event_count, 1);
+});
+
+test("hiding a system event changes what is shown, never what is measured", async () => {
+  // The whole point of $page_leave is the foreground time it carries, and that is read
+  // two ways the hidden set deliberately does not reach: summed into engaged_ms by the
+  // sessions rollup at write time, and read off the raw rows by the per-page report.
+  //
+  // So engagement has to come out identical whether or not the event is shown. It is
+  // one `excludeHidden` away from silently becoming zero — added by someone tidying up
+  // web-analytics.ts to match queries.ts — and the failure would look like a product
+  // nobody engages with rather than like a bug.
+  const web = (hiddenEvents: readonly string[]): WebScope => ({
+    scope: scope(project.id, "production", hiddenEvents),
+    range: resolveRange({ preset: "30d", now: new Date() }),
+    filters: {},
+    goal: null,
+    goals: [],
+    pageGroups: [],
+  });
+
+  const [shownPages, hiddenPages] = await Promise.all([allPages(web([])), allPages(web([PAGE_LEAVE]))]);
+  const measured = shownPages.filter((p) => p.measured_views > 0);
+  assert.ok(measured.length > 0, "fixture measured no engagement at all");
+  assert.deepEqual(
+    hiddenPages.map((p) => [p.path, p.avg_engagement_ms, p.measured_views]),
+    shownPages.map((p) => [p.path, p.avg_engagement_ms, p.measured_views]),
+    "hiding $page_leave changed measured engagement time",
+  );
+
+  // And the session-level judgement built on it — engaged_ms feeds engaged_base, which
+  // is what an engagement rate counts.
+  const [shownLanding, hiddenLanding] = await Promise.all([landingPages(web([])), landingPages(web([PAGE_LEAVE]))]);
+  assert.deepEqual(
+    hiddenLanding.map((p) => [p.path, p.engagement_rate.rate, p.engagement_rate.numerator]),
+    shownLanding.map((p) => [p.path, p.engagement_rate.rate, p.engagement_rate.numerator]),
+    "hiding $page_leave changed the engagement rate",
+  );
+  assert.ok(shownLanding.some((p) => (p.engagement_rate.numerator ?? 0) > 0), "fixture had no engaged sessions");
 });
 
 test("the per-event rollup agrees with the events it was built from", async () => {
