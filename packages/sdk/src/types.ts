@@ -91,6 +91,15 @@ export interface FourierOptions {
   /** Inactivity gap that starts a new session, in ms. Default 30 minutes. 0 disables sessions. */
   sessionTimeout?: number;
   /**
+   * Measure how long each page actually held attention and report it as `$page_leave`.
+   * Default true. Only foreground time with recent interaction is counted, so the number
+   * means something; turn it off and Fourier's engagement reports say the measurement is
+   * missing rather than showing a zero.
+   */
+  engagement?: boolean;
+  /** Visible-but-untouched time after which the engagement clock stops, in ms. Default 5 minutes. */
+  engagementIdleTimeout?: number;
+  /**
    * Domains that share this user's identity but can't share cookies, e.g. ["app.example.io", "example.io"].
    * Links to them get `ajs_aid` (and `ajs_uid` when identified) appended so the visitor stays one person
    * across sites. Matches the domain and its subdomains. On arrival, those parameters are read and removed.

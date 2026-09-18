@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Activity, Bot, Building2, LayoutDashboard, LogOut, Moon, Plug, Settings, ShieldOff, Sun, Users } from "lucide-react";
+import { Activity, Bot, Building2, Globe, LayoutDashboard, LogOut, Moon, Plug, Settings, ShieldOff, Sun, Users } from "lucide-react";
 import { useTheme } from "next-themes";
 import {
   Sidebar,
@@ -22,6 +22,9 @@ import { EnvironmentSwitcher } from "@/components/environment-switcher";
 
 const nav = [
   { href: "/", label: "Overview", icon: LayoutDashboard },
+  // One entry, not four. Acquisition, Pages and Conversions are tabs inside the
+  // section, and campaigns, referrers, devices and page groups live inside those.
+  { href: "/web-analytics", label: "Web Analytics", icon: Globe },
   { href: "/events", label: "Events", icon: Activity },
   { href: "/users", label: "Users", icon: Users },
   { href: "/companies", label: "Companies", icon: Building2 },

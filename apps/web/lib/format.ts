@@ -102,3 +102,56 @@ export function countryName(country: string | undefined | null): string {
 export function locationLabel(loc: { country?: string; city?: string }): string {
   return [loc.city, countryName(loc.country) || loc.country].filter(Boolean).join(", ");
 }
+
+// ---------- web analytics ----------
+
+/**
+ * A rate, or an em dash when there is nothing to divide by. Never "0%": a rate with an
+ * empty denominator is unavailable, and printing zero asserts that nobody converted
+ * when in fact nobody visited.
+ */
+export function formatRate(rate: number | null | undefined, digits = 1): string {
+  if (rate == null || Number.isNaN(rate)) return "—";
+  return `${rate.toFixed(rate >= 10 ? 0 : digits)}%`;
+}
+
+/** "12 of 480 sessions" — the working behind a rate, shown next to it rather than on hover. */
+export function formatRatio(numerator: number, denominator: number, unit = "sessions"): string {
+  return `${formatNumber(numerator)} of ${formatNumber(denominator)} ${unit}`;
+}
+
+/** Percentage points, for a change in a share. Distinct from a percentage change. */
+export function formatPoints(pp: number | null | undefined): string {
+  if (pp == null || Number.isNaN(pp)) return "—";
+  return `${pp > 0 ? "+" : pp < 0 ? "−" : ""}${Math.abs(pp).toFixed(1)} pp`;
+}
+
+/**
+ * A period-over-period change. `null` with a current value above zero means the previous
+ * period was empty, which reads as "New" — an infinite percentage increase is arithmetic,
+ * not information.
+ */
+export function formatChange(change: number | null | undefined, isNew = false): string {
+  if (isNew) return "New";
+  if (change == null || !Number.isFinite(change)) return "—";
+  const pct = change * 100;
+  return `${pct > 0 ? "+" : pct < 0 ? "−" : ""}${Math.abs(pct) >= 10 ? Math.abs(pct).toFixed(0) : Math.abs(pct).toFixed(1)}%`;
+}
+
+/** Measured attention. Null stays null: an unmeasured page is not a page nobody read. */
+export function formatDuration(ms: number | null | undefined): string {
+  if (ms == null || Number.isNaN(ms)) return "—";
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const rest = s % 60;
+  if (m < 60) return rest ? `${m}m ${rest}s` : `${m}m`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+/** A path, shortened from the middle so both the section and the leaf stay readable. */
+export function shortPath(path: string, max = 44): string {
+  if (path.length <= max) return path;
+  const head = Math.ceil((max - 1) / 2);
+  return `${path.slice(0, head)}…${path.slice(path.length - (max - head - 1))}`;
+}
