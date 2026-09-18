@@ -46,10 +46,10 @@ export const P = {
 const CARRIED: string[] = Object.values(P);
 
 /**
- * Filters that describe one site's traffic and mean nothing on another. Dropped when
- * the site changes, rather than silently applied — an empty report caused by a stale
- * campaign filter looks exactly like a site with no visitors, and the reader has no way
- * to tell which they are seeing.
+ * Filters that describe one source's traffic and mean nothing on another. Dropped when
+ * the source changes, rather than silently applied — an empty report caused by a stale
+ * campaign filter looks exactly like a source with no visitors, and the reader has no
+ * way to tell which they are seeing.
  */
 const SITE_SPECIFIC: string[] = [P.channel, P.utmSource, P.utmMedium, P.utmCampaign, P.goal];
 
@@ -95,7 +95,7 @@ export function useWebState() {
     [pathname, router, search],
   );
 
-  /** Switching site clears the selections that only made sense for the previous one. */
+  /** Switching source clears the selections that only made sense for the previous one. */
   const setSite = useCallback(
     (sourceId: string | null) => {
       const cleared: ParamPatch = Object.fromEntries(SITE_SPECIFIC.map((k) => [k, null]));

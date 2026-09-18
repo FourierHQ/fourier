@@ -1,7 +1,7 @@
 /**
  * Turning a Web Analytics URL into the scope every report runs against.
  *
- * The control bar's whole state lives in the query string — site, dates, comparison,
+ * The control bar's whole state lives in the query string — source, dates, comparison,
  * goal, filters — so a view can be bookmarked and sent to someone, and so navigating
  * between the four pages carries the selection across. This is the one place that
  * reads it, so the four routes cannot drift into parsing "the last 30 days" three

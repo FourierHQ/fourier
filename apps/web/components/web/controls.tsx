@@ -19,7 +19,7 @@ import { P, useWebState } from "@/lib/web-state";
 /**
  * The control bar every report shares.
  *
- *     Site · Date range · Comparison · Conversion goal · Filters
+ *     Source · Date range · Comparison · Conversion goal · Filters
  *
  * All of it is URL state, so the bar is a view onto the query string rather than
  * something that has to be kept in step with it.
@@ -29,22 +29,31 @@ const ALL = "__all__";
 /** Sentinel for "no goal named", which the URL represents by the parameter being absent. */
 const ALL_GOALS = "__all_goals__";
 
-function SiteControl() {
+/**
+ * Which of the project's sources to report on — the marketing site, the web app, each
+ * with its own write key.
+ *
+ * "Source" and not "site", because that is what the rest of Fourier already calls them:
+ * the install page issues keys per source, the events table badges them, the API takes
+ * `source=`. The campaign parameter that wants the same word is qualified instead, as
+ * "campaign source", which is what it actually is — it exists only when a link was
+ * tagged, which is why most traffic has none.
+ */
+function SourceControl() {
   const sources = useSources();
   const { get, setSite } = useWebState();
   const current = get(P.source) ?? ALL;
   const list = sources.data ?? [];
-  // With a single site there is nothing to choose between, and a select showing one
-  // option is a control that only ever wastes a click.
+  // One source is not a choice, and a select with a single option only wastes a click.
   if (list.length <= 1) return null;
   return (
     <Select value={current} onValueChange={(v) => setSite(v === ALL ? null : v)}>
-      <SelectTrigger size="sm" className="w-[170px]" aria-label="Site">
+      <SelectTrigger size="sm" className="w-[190px]" aria-label="Source">
         <Globe className="size-3.5 text-muted-foreground" />
         <SelectValue />
       </SelectTrigger>
       <SelectContent>
-        <SelectItem value={ALL}>All sites</SelectItem>
+        <SelectItem value={ALL}>All sources</SelectItem>
         {list.map((s) => (
           <SelectItem key={s.id} value={s.id}>
             {s.name}
@@ -149,7 +158,7 @@ function CompareControl({ scope }: { scope?: ScopeEcho }) {
 /**
  * Which conversions the report counts — all of them, or one.
  *
- * It sits beside Site, Date range and Comparison rather than inside Filters, because it
+ * It sits beside Source, Date range and Comparison rather than inside Filters, because it
  * is not one. Every filter narrows the visits under consideration, changing the
  * numerator and the denominator together; this changes only what the numerator counts,
  * and the session total stays exactly where it was. Putting it among the filter chips
@@ -193,8 +202,8 @@ function GoalControl({ scope }: { scope?: ScopeEcho }) {
 
 const FILTER_LABELS: Record<string, string> = {
   [P.channel]: "Channel",
-  [P.utmSource]: "Source",
-  [P.utmMedium]: "Medium",
+  [P.utmSource]: "Campaign source",
+  [P.utmMedium]: "Campaign medium",
   [P.utmCampaign]: "Campaign",
   [P.country]: "Country",
   [P.device]: "Device",
@@ -233,8 +242,8 @@ function FilterMenu() {
       <DropdownMenuContent align="end" className="max-h-[70vh] w-60 overflow-y-auto">
         {group(P.visitor, "Visitor", ["new", "returning"], (o) => (o === "new" ? "New" : "Returning"))}
         {group(P.channel, "Channel", v?.channels ?? [])}
-        {group(P.utmSource, "Source", v?.sources ?? [])}
-        {group(P.utmMedium, "Medium", v?.mediums ?? [])}
+        {group(P.utmSource, "Campaign source", v?.sources ?? [])}
+        {group(P.utmMedium, "Campaign medium", v?.mediums ?? [])}
         {group(P.utmCampaign, "Campaign", v?.campaigns ?? [])}
         {group(P.device, "Device", v?.devices ?? [])}
         {group(P.browser, "Browser", v?.browsers ?? [])}
@@ -287,7 +296,7 @@ export function WebControls({ scope }: { scope?: ScopeEcho }) {
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap items-center gap-2">
-        <SiteControl />
+        <SourceControl />
         <RangeControl scope={scope} />
         <CompareControl scope={scope} />
         <div className="ml-auto flex items-center gap-2">

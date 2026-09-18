@@ -9,7 +9,7 @@ import { cn } from "@/lib/utils";
 /**
  * The several different kinds of nothing.
  *
- * A report with no rows can mean the site has no traffic, or that the filters match
+ * A report with no rows can mean the source has no traffic, or that the filters match
  * none of it, or that no goal is configured, or that a measurement was never collected,
  * or that the query failed. They need different sentences and different next steps, and
  * showing "0" for all five is how a dashboard teaches people not to trust it.
@@ -26,13 +26,13 @@ function Frame({ icon, title, body, action, className }: { icon: ReactNode; titl
   );
 }
 
-/** Nothing was recorded for this site in this range. */
+/** Nothing was recorded for the selected source in this range. */
 export function NoTraffic({ rangeLabel }: { rangeLabel?: string }) {
   return (
     <Frame
       icon={<Gauge className="size-6" />}
       title="No traffic recorded"
-      body={<>Nothing arrived for this site {rangeLabel ? <>in {rangeLabel.toLowerCase()}</> : "in the selected period"}. If you have just installed tracking, visits appear here within a few seconds.</>}
+      body={<>Nothing arrived for this source {rangeLabel ? <>in {rangeLabel.toLowerCase()}</> : "in the selected period"}. If you have just installed tracking, visits appear here within a few seconds.</>}
       action={
         <Button variant="outline" size="sm" asChild>
           <Link href="/setup">Check your install</Link>
@@ -48,7 +48,7 @@ export function NoMatches({ onClear }: { onClear?: () => void }) {
     <Frame
       icon={<Filter className="size-6" />}
       title="No results for these filters"
-      body="This site had traffic in the selected period, but nothing matches the current filters."
+      body="This source had traffic in the selected period, but nothing matches the current filters."
       action={
         onClear && (
           <Button variant="outline" size="sm" onClick={onClear}>

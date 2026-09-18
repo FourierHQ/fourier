@@ -113,11 +113,24 @@ export interface AcquisitionReport extends Report {
   by_channel: Settled<BreakdownRow[]>;
 }
 
-export interface PagesReport extends Report {
-  tab: "landing" | "all";
+/**
+ * Discriminated on `tab`, so the rows can only be read after checking which report
+ * they came from.
+ *
+ * This is not pedantry. The tab lives in the URL and changes the instant it is clicked,
+ * while the rows arrive later — and until they do, react-query hands back the previous
+ * tab's payload as placeholder data. A component that decides what to render from the
+ * URL therefore draws the new table over the old table's rows for one frame. With a
+ * union of arrays that was a cast away from compiling, and it read `pageviews` off a
+ * landing row and crashed.
+ */
+interface PagesReportBase extends Report {
   group_by: "page" | "group";
-  rows: Settled<LandingPageRow[] | PageRow[]>;
 }
+
+export type PagesReport =
+  | (PagesReportBase & { tab: "landing"; rows: Settled<LandingPageRow[]> })
+  | (PagesReportBase & { tab: "all"; rows: Settled<PageRow[]> });
 
 export interface PageDetailReport {
   scope: ScopeEcho;

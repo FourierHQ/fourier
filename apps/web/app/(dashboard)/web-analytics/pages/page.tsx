@@ -6,11 +6,46 @@ import { WebControls, useClearFilters } from "@/components/web/controls";
 import { DeltaBadge, MetricLabel, RateCell } from "@/components/web/metric";
 import { PageDetailSheet } from "@/components/web/page-detail";
 import { PageGroupsDialog } from "@/components/web/page-groups";
-import { RankedTable } from "@/components/web/ranked-table";
+import { RankedTable, type Column } from "@/components/web/ranked-table";
 import { NoMatches, NoTraffic, Panel } from "@/components/web/states";
 import { formatDuration, formatNumber, shortPath } from "@/lib/format";
 import { countingLabel, errorOf, unwrap, useWebPages, type LandingPageRow, type PageRow } from "@/lib/web-api";
 import { useWebState } from "@/lib/web-state";
+
+/** Extracted so `rows` is PageRow[] by construction rather than by a cast. */
+function AllPagesTable({
+  rows,
+  loading,
+  isGroups,
+  columns,
+  onSelect,
+}: {
+  rows: PageRow[] | undefined;
+  loading?: boolean;
+  isGroups: boolean;
+  columns: Column<PageRow>[];
+  onSelect?: (row: PageRow) => void;
+}) {
+  const busiest = Math.max(...(rows ?? []).map((r) => r.pageviews.current), 1);
+  return (
+    <RankedTable<PageRow>
+      rows={rows}
+      loading={loading}
+      rowKey={(r) => r.path}
+      barOf={(r) => r.pageviews.current / busiest}
+      onSelect={onSelect}
+      columns={columns}
+      empty={<p className="px-6 py-6 text-sm text-muted-foreground">No page views recorded in this period.</p>}
+      caption={
+        <>
+          No conversion rate here on purpose: whether a page was on the way to a conversion is not something this table can
+          separate from everyone passing through it. Landing pages carry one because the visit started there.
+          {isGroups && " Group totals are counted from the underlying visitors, not summed from page rows."}
+        </>
+      }
+    />
+  );
+}
 
 /**
  * Pages: which parts of the website attract attention and lead to action?
@@ -23,18 +58,30 @@ export default function PagesPage() {
   const { get, set } = useWebState();
   const clearFilters = useClearFilters();
 
+  // What the reader has asked for. The controls render from this so a click responds
+  // immediately, even while the rows for it are still on their way.
   const tab = get("tab") === "all" ? "all" : "landing";
   const groupBy = get("group_by") === "group" ? "group" : "page";
   const selected = get("page");
   const report = useWebPages(tab, groupBy);
 
-  const scope = report.data?.scope;
-  const rows = unwrap(report.data?.rows);
-  const avail = unwrap(report.data?.availability);
+  // What is actually on screen. Deliberately NOT the two above: until the new rows
+  // arrive, react-query hands back the previous tab's payload, and the two tabs have
+  // different row shapes. Rendering the table the URL asks for over the data the server
+  // last sent is how "All pages" read `pageviews` off a landing row.
+  const data = report.data;
+  const scope = data?.scope;
+  const avail = unwrap(data?.availability);
   // What the conversion columns count: one goal, all of them, or nothing yet.
   const goalName = countingLabel(scope);
   const loading = report.isLoading;
-  const isGroups = groupBy === "group";
+  const isGroups = data?.group_by === "group";
+  // The rows on screen belong to a request that has been superseded; say so quietly
+  // rather than letting a stale table look live.
+  const stale = report.isPlaceholderData;
+  // How many rows came back, whichever shape they are. Narrowing to read the count
+  // rather than casting, so this keeps working when a third tab appears.
+  const rowCount = data && "data" in data.rows ? data.rows.data.length : undefined;
 
   if (report.isSuccess && avail && !avail.has_traffic) {
     return (
@@ -123,7 +170,7 @@ export default function PagesPage() {
     <div className="space-y-6 p-4 md:p-6">
       <WebControls scope={scope} />
 
-      {avail?.has_traffic && report.isSuccess && (rows?.length ?? 0) === 0 ? (
+      {avail?.has_traffic && !stale && rowCount === 0 ? (
         <Card>
           <CardContent className="p-0">
             <NoMatches onClear={clearFilters} />
@@ -167,37 +214,30 @@ export default function PagesPage() {
             </div>
           </CardHeader>
           <CardContent className="p-0">
-            <Panel error={errorOf(report.data?.rows)} onRetry={() => report.refetch()}>
-              {tab === "landing" ? (
+            <Panel error={errorOf(data?.rows)} onRetry={() => report.refetch()}>
+              <div className={stale ? "opacity-60 transition-opacity" : "transition-opacity"}>
+              {data?.tab === "all" ? (
+                <AllPagesTable
+                  rows={unwrap(data.rows)}
+                  loading={loading}
+                  isGroups={isGroups}
+                  columns={allColumns}
+                  onSelect={isGroups ? undefined : (r) => set({ page: r.path, basis: "viewers" })}
+                />
+              ) : (
                 <RankedTable<LandingPageRow>
-                  rows={rows as LandingPageRow[] | undefined}
+                  rows={unwrap(data?.rows)}
                   loading={loading}
                   rowKey={(r) => r.path}
-                  barOf={(r) => r.landing_sessions.current / Math.max(...((rows as LandingPageRow[]) ?? []).map((x) => x.landing_sessions.current), 1)}
+                  barOf={(r) => r.landing_sessions.current / Math.max(...(unwrap(data?.rows) ?? []).map((x) => x.landing_sessions.current), 1)}
                   // Groups are a rollup, not a page, so there is no page detail behind them.
                   onSelect={isGroups ? undefined : (r) => set({ page: r.path, basis: "landing" })}
                   columns={landingColumns}
                   empty={<p className="px-6 py-6 text-sm text-muted-foreground">No landing pages recorded in this period.</p>}
                   caption={isGroups ? "Group totals are counted from the underlying visits, not summed from the pages inside them — someone who saw three pages in a group is one visitor to it." : undefined}
                 />
-              ) : (
-                <RankedTable<PageRow>
-                  rows={rows as PageRow[] | undefined}
-                  loading={loading}
-                  rowKey={(r) => r.path}
-                  barOf={(r) => r.pageviews.current / Math.max(...((rows as PageRow[]) ?? []).map((x) => x.pageviews.current), 1)}
-                  onSelect={isGroups ? undefined : (r) => set({ page: r.path, basis: "viewers" })}
-                  columns={allColumns}
-                  empty={<p className="px-6 py-6 text-sm text-muted-foreground">No page views recorded in this period.</p>}
-                  caption={
-                    <>
-                      No conversion rate here on purpose: whether a page was on the way to a conversion is not something this
-                      table can separate from everyone passing through it. Landing pages carry one because the visit started there.
-                      {isGroups && " Group totals are counted from the underlying visitors, not summed from page rows."}
-                    </>
-                  }
-                />
               )}
+              </div>
             </Panel>
           </CardContent>
         </Card>

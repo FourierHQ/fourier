@@ -187,7 +187,9 @@ Sessions come from the SDK: 30 minutes of inactivity starts a new one, configura
 
 An opinionated report on how a marketing website is doing, in four pages and no dashboard to build: **Overview**, **Acquisition**, **Pages**, **Conversions**. Campaigns, referrers, devices, browsers, geography and page groups live inside those four as groupings, drilldowns and filters, because a sidebar of fourteen reports is one nobody finishes reading.
 
-One control bar runs the section — site, date range, comparison, conversion goal, filters — and it lives entirely in the URL, so a view can be bookmarked or sent to someone and moving between reports keeps what you were looking at.
+One control bar runs the section — source, date range, comparison, conversion goal, filters — and it lives entirely in the URL, so a view can be bookmarked or sent to someone and moving between reports keeps what you were looking at.
+
+"Source" means what it means everywhere else in Fourier: a website or app with its own write key. The campaign parameter that wants the same word is reported as **campaign source**, which is what it is — it exists only where a link was tagged, so most traffic has none.
 
 Everything is counted in **sessions**, off one rollup that the `sessions` materialised view maintains. A few consequences are worth knowing, because they are what make the numbers hold up:
 

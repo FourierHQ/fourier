@@ -132,7 +132,7 @@ export interface TrafficSeries {
 // ---------- scope ----------
 
 export interface WebFilters {
-  /** The site. Fourier calls it a source; it is the same control. */
+  /** Which source — website or app — to report on. Null is all of them. */
   sourceId?: string | null;
   channel?: string | null;
   utmSource?: string | null;
@@ -240,8 +240,8 @@ function sessionBase(w: WebScope): Base {
 
   // First-seen is read over ALL history and is deliberately not subject to the report's
   // filters: someone who first arrived from an ad in March is a returning visitor in
-  // September whatever this report is filtered to. Scoped to the selected site when one
-  // is selected, because "new to this site" is the question being asked.
+  // September whatever this report is filtered to. Scoped to the selected source when there
+  // is one, because "new to this site" is the question being asked.
   const firstSeenFilter = filters.sourceId ? `AND ps.source_id = {${p.add(filters.sourceId)}:String}` : "";
 
   // A session's visitor is new if they were first seen inside the period that session
@@ -1276,8 +1276,8 @@ export interface Availability {
 
 export async function availability(w: WebScope): Promise<Availability> {
   // "No traffic" is asked without the reader's filters, so a report with no rows can say
-  // whether the site is silent or the filters simply match nothing. The site selection
-  // stays on: a different site having traffic is not this one having traffic.
+  // whether the source is silent or the filters simply match nothing. The source selection
+  // stays on: another source having traffic is not this one having traffic.
   const unfiltered: WebScope = {
     ...w,
     filters: { includeBots: w.filters.includeBots, sourceId: w.filters.sourceId },
