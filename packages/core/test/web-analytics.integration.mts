@@ -32,6 +32,7 @@ import {
   resolveRange,
   scope,
   upsertDefinition,
+  deleteDefinition,
   listGoals,
   listPageGroups,
   headline,
@@ -47,7 +48,7 @@ import {
   conversionTrend,
   pageDetail,
   type Goal,
-  type PageGroup,
+  type PathRule,
   type Project,
   type WebScope,
 } from "../src/index";
@@ -367,6 +368,42 @@ test("page groups aggregate from sessions, not by summing page rows", async () =
   assert.equal(product?.unique_viewers.current, 4, "a1 and a5 and a7 on /pricing, a3 on /product/api — counted once each");
 });
 
+test("page groups overlap deterministically: the first matching rule wins", async () => {
+  // Two groups that both claim /demo, and which no other configured group touches. The
+  // one that gets it must be decided by the operator's stated order and nothing else —
+  // not by insertion order, not by however the rows happen to arrive.
+  const rules = { narrow: { op: "contains" as const, value: "demo" }, broad: { op: "prefix" as const, value: "/demo" } };
+  const put = (id: string, name: string, position: number, rule: PathRule) =>
+    upsertDefinition(project.id, "page_group", { id, name, position, config: { rules: [rule] } });
+
+  await put("overlap-a", "Demo by name", 100, rules.narrow);
+  await put("overlap-b", "Demo section", 101, rules.broad);
+
+  const grouped = async () => {
+    const rows = await landingPages(await web(), { groupBy: "group", limit: 50 });
+    return Object.fromEntries(rows.map((r) => [r.path, r.landing_sessions.current]));
+  };
+
+  let byKey = await grouped();
+  assert.equal(byKey["Demo by name"], 2, "the earlier group claims the overlapping page");
+  assert.ok(!byKey["Demo section"], "and the later one does not also count it");
+
+  // Swap the order and the same visits move, with nothing else changed.
+  await put("overlap-a", "Demo by name", 101, rules.narrow);
+  await put("overlap-b", "Demo section", 100, rules.broad);
+  byKey = await grouped();
+  assert.equal(byKey["Demo section"], 2, "order decides the answer, and it is the only thing that does");
+  assert.ok(!byKey["Demo by name"], "a page belongs to one group, never to both");
+
+  // Which is what makes the totals safe to read: every visit is counted once.
+  const total = Object.values(byKey).reduce((n, v) => n + v, 0);
+  const h = await headline(await web());
+  assert.equal(total, h.sessions.current, "the groups partition the visits rather than overlapping them");
+
+  await deleteDefinition(project.id, "page_group", "overlap-a");
+  await deleteDefinition(project.id, "page_group", "overlap-b");
+});
+
 test("new and returning are exclusive, sum to the total, and come from full history", async () => {
   const mix = await visitorMix(await web());
   assert.equal(mix.new_visitors + mix.returning_visitors, mix.total, "the two groups partition the visitors");
@@ -422,9 +459,18 @@ test("no goal configured is distinguishable from nobody converting", async () =>
 });
 
 test("no filter matches is distinguishable from no traffic", async () => {
-  const state = await availability(await web({ filters: { country: "ZZ" } }));
+  // The two halves of the distinction come from different places on purpose:
+  // availability answers "did this site have visits at all", ignoring the reader's
+  // filters, and the report itself answers "did any of them match". Asking the second
+  // question twice would mean a second full scan for something already in hand.
+  const filtered = await web({ filters: { country: "ZZ" } });
+  const state = await availability(filtered);
+  const h = await headline(filtered);
   assert.equal(state.has_traffic, true, "the site has traffic");
-  assert.equal(state.has_matches, false, "this filter does not");
+  assert.equal(h.sessions.current, 0, "and this filter matches none of it");
+
+  const empty = await web({ range: resolveRange({ preset: "custom", from: "2020-01-01", to: "2020-01-07", now: NOW }) });
+  assert.equal((await availability(empty)).has_traffic, false, "an empty period is a different answer");
 });
 
 test("comparison is against the same elapsed distance, and absent when switched off", async () => {
@@ -443,8 +489,12 @@ test("comparison is against the same elapsed distance, and absent when switched 
 
 test("the trend keeps the two periods apart and inside the selected range", async () => {
   const w = await web();
-  const points = await trend(w, "sessions");
+  const series = await trend(w);
+  const points = series.sessions;
   assert.ok(points.length > 0);
+  // Both metrics come from one scan and must share a bucket set, or the toggle would
+  // shift the chart sideways.
+  assert.deepEqual(series.visitors.map((p) => p.bucket), points.map((p) => p.bucket));
 
   // Every bucket must fall inside the selected range. The comparison period is shifted
   // forward to line up with it, so nothing may land beyond either end — a previous-period

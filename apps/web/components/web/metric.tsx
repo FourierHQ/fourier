@@ -180,13 +180,10 @@ export function ConversionCard({
       delta={delta}
       sparkline={sparkline}
       loading={loading}
-      footer={
-        rate
-          ? formatRatio(rate.numerator, rate.denominator)
-          : goalName
-            ? goalName
-            : undefined
-      }
+      // The goal is named on every conversion card, whether or not there is a ratio to
+      // show beside it. With two primary goals configured, a bare "2.0%" leaves the
+      // reader to go and check the control bar for which one it counts.
+      footer={[goalName, rate ? formatRatio(rate.numerator, rate.denominator) : null].filter(Boolean).join(" · ") || undefined}
       hint={goalName ? `Counting "${goalName}". A visit that completes the goal more than once is counted as one converting session.` : undefined}
     />
   );

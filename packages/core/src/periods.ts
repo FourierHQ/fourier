@@ -176,12 +176,23 @@ export function resolveRange(input: RangeInput = {}): ResolvedRange {
   let current: Period;
   if (input.preset === "custom" || (!isPreset(input.preset) && (input.from || input.to))) {
     preset = "custom";
-    const from = input.from ? new Date(input.from) : addDays(startOfDay(now, timezone), -29);
-    // An inclusive end date in the URL ("to=2026-09-18") means all of that day, so a
-    // bare date is pushed to the following midnight. A full timestamp is taken as given.
-    const rawTo = input.to ? new Date(input.to) : addDays(startOfDay(now, timezone), 1);
-    const dateOnly = typeof input.to === "string" && /^\d{4}-\d{2}-\d{2}$/.test(input.to);
-    const to = dateOnly ? addDays(startOfDay(rawTo, timezone), 1) : rawTo;
+    // A bare date in the URL names a day in the reader's zone, not an instant in UTC.
+    // `new Date("2026-09-01")` is midnight UTC, which is 20:00 the previous evening in
+    // New York and 09:00 the same morning in Tokyo — so both ends are anchored to the
+    // zone's own midnight rather than taken literally. A full timestamp is unambiguous
+    // and is used as given.
+    const dateOnly = (v: string | null | undefined) => typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v);
+    const from = input.from
+      ? dateOnly(input.from)
+        ? startOfDay(new Date(`${input.from}T12:00:00Z`), timezone)
+        : new Date(input.from)
+      : addDays(startOfDay(now, timezone), -29);
+    // The end date is inclusive: "to=2026-09-07" means all of the 7th.
+    const to = input.to
+      ? dateOnly(input.to)
+        ? addDays(startOfDay(new Date(`${input.to}T12:00:00Z`), timezone), 1)
+        : new Date(input.to)
+      : addDays(startOfDay(now, timezone), 1);
     // An unparseable or inverted custom range falls back to the default rather than
     // throwing: a bad URL should show the default report, not an error page.
     const usable = !Number.isNaN(from.getTime()) && !Number.isNaN(to.getTime()) && to > from;

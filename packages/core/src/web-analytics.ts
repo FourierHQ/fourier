@@ -118,6 +118,17 @@ export interface SeriesPoint {
   previous: number | null;
 }
 
+/**
+ * Both traffic metrics over one set of buckets. They are counted together rather than
+ * on demand because they come from the same scan: fetching one per toggle would make
+ * switching between Visitors and Sessions a round trip, and would leave the headline
+ * card for whichever metric is not selected with no sparkline to draw.
+ */
+export interface TrafficSeries {
+  visitors: SeriesPoint[];
+  sessions: SeriesPoint[];
+}
+
 // ---------- scope ----------
 
 export interface WebFilters {
@@ -255,6 +266,7 @@ function sessionBase(w: WebScope): Base {
       s.person_id AS person_id,
       s.source_id AS source_id,
       s.started_at AS started_at,
+      s.ended_at AS ended_at,
       s.pageviews AS pageviews,
       s.events AS events,
       s.engaged_ms AS engaged_ms,
@@ -296,6 +308,17 @@ const AGG = {
   prevEngagedSessions: `uniqExactIf(session_id, period = 'previous' AND engaged = 1)`,
 };
 
+/**
+ * The same aggregate, bound to the left-hand table.
+ *
+ * goalSummary and supportingActions join `scoped` against a per-session flag table, and
+ * both sides carry session_id. An unqualified reference is ambiguous: ClickHouse happens
+ * to resolve it leftwards today, but if that ever changed the unmatched rows of a LEFT
+ * JOIN would contribute an empty id, the denominator would collapse to roughly the
+ * numerator, and conversion rates would climb towards 100% without anything erroring.
+ */
+const qualified = (agg: string) => agg.replace(/\b(session_id|person_id|period)\b/g, "s.$1");
+
 const hasPrev = (w: WebScope) => w.range.previous !== null;
 const prevOr = <T>(w: WebScope, v: T): T | null => (hasPrev(w) ? v : null);
 
@@ -335,39 +358,40 @@ export async function headline(w: WebScope): Promise<Headline> {
 
 // ---------- trends ----------
 
-export type TrendMetric = "visitors" | "sessions";
-
 /**
- * A metric over time with the comparison period drawn against it. The previous series
- * is shifted forward by the distance between the two period starts, so bucket i of one
- * lands on bucket i of the other and a single chart can draw both.
+ * Visitors and sessions over time, with the comparison period drawn against each. The
+ * previous series is shifted forward by the distance between the two period starts, so
+ * bucket i of one lands on bucket i of the other and a single chart can draw both.
  */
-export async function trend(w: WebScope, metric: TrendMetric = "visitors"): Promise<SeriesPoint[]> {
+export async function trend(w: WebScope): Promise<TrafficSeries> {
   const { cte, params } = sessionBase(w);
   const offset = alignOffsetMs(w.range);
   const bucket = bucketSql("started_at", w.range.interval, w.range.timezone);
   const shifted = bucketSql(`started_at + toIntervalMillisecond({shift:Int64})`, w.range.interval, w.range.timezone);
-  const agg = metric === "visitors" ? "uniqExact(person_id)" : "uniqExact(session_id)";
-  // The literal tag is `series`, not `period`. ClickHouse resolves a WHERE against
-  // aliases declared in the same SELECT, so `'previous' AS period ... WHERE period =
-  // 'previous'` compares the constant with itself, matches every row, and shifts the
-  // whole range forward — a chart that looks plausible and is entirely wrong.
 
   const rows = await q<Row>(
     w.scope,
     `${cte}
-     SELECT bucket, sumIf(v, series = 'current') AS value, sumIf(v, series = 'previous') AS previous
+     SELECT
+       bucket,
+       sumIf(v, series = 'current') AS visitors,
+       sumIf(v, series = 'previous') AS prev_visitors,
+       sumIf(s, series = 'current') AS sessions,
+       sumIf(s, series = 'previous') AS prev_sessions
      FROM (
-       SELECT ${bucket} AS bucket, 'current' AS series, ${agg} AS v
+       SELECT ${bucket} AS bucket, 'current' AS series, uniqExact(person_id) AS v, uniqExact(session_id) AS s
        FROM scoped WHERE period = 'current' GROUP BY bucket
        UNION ALL
-       SELECT ${shifted} AS bucket, 'previous' AS series, ${agg} AS v
+       SELECT ${shifted} AS bucket, 'previous' AS series, uniqExact(person_id) AS v, uniqExact(session_id) AS s
        FROM scoped WHERE period = 'previous' GROUP BY bucket
      )
      GROUP BY bucket ORDER BY bucket`,
     { ...params, tz: w.range.timezone, shift: offset },
   );
-  return rows.map((r) => ({ bucket: String(r.bucket), value: num(r.value), previous: hasPrev(w) ? num(r.previous) : null }));
+
+  const series = (value: string, prev: string): SeriesPoint[] =>
+    rows.map((r) => ({ bucket: String(r.bucket), value: num(r[value]), previous: hasPrev(w) ? num(r[prev]) : null }));
+  return { visitors: series("visitors", "prev_visitors"), sessions: series("sessions", "prev_sessions") };
 }
 
 export interface RatePoint {
@@ -453,7 +477,6 @@ export async function breakdown(
        ${AGG.prevSessions} AS prev_sessions,
        ${AGG.engagedSessions} AS engaged_sessions,
        ${AGG.converting} AS converting,
-       any((SELECT total FROM totals)) AS total,
        if((SELECT total FROM totals) > 0, ${AGG.sessions} / (SELECT total FROM totals) * 100, 0) AS share,
        if(${AGG.sessions} > 0, ${AGG.converting} / ${AGG.sessions} * 100, NULL) AS conversion_rate
      FROM scoped
@@ -767,10 +790,14 @@ export interface PageDetail {
 }
 
 /**
- * How long after a visit's last event we are willing to call it finished. Sessions end
+ * How long after a visit's LAST event we are willing to call it finished. Sessions end
  * by inactivity, so a visit whose last event was four minutes ago has not exited the
  * page — it is still being read. Counting it as an exit would inflate the exit row for
  * the pages people are on right now, which are the ones you are usually looking at.
+ *
+ * Measured from ended_at, never from started_at: a visit that began two hours ago and
+ * was still moving a minute ago is not finished, and asking when it started answers a
+ * different question that happens to look like the right one.
  */
 const SESSION_SETTLED_MS = 30 * 60 * 1000;
 
@@ -937,7 +964,7 @@ async function nextPagesAfter(w: WebScope, path: string): Promise<NextPageRow[]>
      ),
      settled AS (
        SELECT session_id FROM scoped WHERE period = 'current'
-       GROUP BY session_id HAVING max(started_at) < now64(3) - toIntervalMillisecond({settled:Int64})
+       GROUP BY session_id HAVING max(ended_at) < now64(3) - toIntervalMillisecond({settled:Int64})
      )
      SELECT
        multiIf(next_path != '', next_path, session_id IN (SELECT session_id FROM settled), '', NULL) AS key,
@@ -1010,7 +1037,7 @@ export async function goalSummary(w: WebScope): Promise<GoalSummaryRow[]> {
   const p = new Params("gs");
   const flags = primary.map((g, i) => `max(${matchSql(g.config, p)}) AS g${i}`).join(", ");
   const counts = primary
-    .map((_, i) => `uniqExactIf(session_id, period = 'current' AND ifNull(h.g${i}, 0) = 1) AS c${i}, uniqExactIf(session_id, period = 'previous' AND ifNull(h.g${i}, 0) = 1) AS p${i}`)
+    .map((_, i) => `uniqExactIf(s.session_id, s.period = 'current' AND ifNull(h.g${i}, 0) = 1) AS c${i}, uniqExactIf(s.session_id, s.period = 'previous' AND ifNull(h.g${i}, 0) = 1) AS p${i}`)
     .join(", ");
 
   const [r] = await q<Row>(
@@ -1023,7 +1050,7 @@ export async function goalSummary(w: WebScope): Promise<GoalSummaryRow[]> {
          AND timestamp >= ${scanFrom} AND timestamp < ${scanTo}
        GROUP BY session_id
      )
-     SELECT ${AGG.sessions} AS sessions, ${AGG.prevSessions} AS prev_sessions, ${counts}
+     SELECT ${qualified(AGG.sessions)} AS sessions, ${qualified(AGG.prevSessions)} AS prev_sessions, ${counts}
      FROM scoped AS s LEFT JOIN all_goals AS h ON h.session_id = s.session_id`,
     { ...params, ...p.values },
   );
@@ -1175,10 +1202,10 @@ export async function supportingActions(w: WebScope): Promise<SupportingActionRo
   const counts = supporting
     .map(
       (_, i) =>
-        `uniqExactIf(session_id, period = 'current' AND ifNull(h.a${i}, 0) = 1) AS s${i},
-         uniqExactIf(session_id, period = 'previous' AND ifNull(h.a${i}, 0) = 1) AS sp${i},
-         uniqExactIf(person_id, period = 'current' AND ifNull(h.a${i}, 0) = 1) AS u${i},
-         uniqExactIf(person_id, period = 'previous' AND ifNull(h.a${i}, 0) = 1) AS up${i}`,
+        `uniqExactIf(s.session_id, s.period = 'current' AND ifNull(h.a${i}, 0) = 1) AS s${i},
+         uniqExactIf(s.session_id, s.period = 'previous' AND ifNull(h.a${i}, 0) = 1) AS sp${i},
+         uniqExactIf(s.person_id, s.period = 'current' AND ifNull(h.a${i}, 0) = 1) AS u${i},
+         uniqExactIf(s.person_id, s.period = 'previous' AND ifNull(h.a${i}, 0) = 1) AS up${i}`,
     )
     .join(", ");
 
@@ -1213,10 +1240,13 @@ export async function supportingActions(w: WebScope): Promise<SupportingActionRo
  * needs a different sentence, and a zero is only honest for the third.
  */
 export interface Availability {
-  /** Any session at all in the selected period, before filters. */
+  /**
+   * Any session at all in the selected period for this site, before the reader's
+   * filters. Paired with the report's own row count this separates "this site had no
+   * traffic" from "these filters match none of it" — two different sentences, and the
+   * caller already holds the second half, so it is not re-counted here.
+   */
   has_traffic: boolean;
-  /** Any session after the reader's filters — distinguishes "no data" from "no matches". */
-  has_matches: boolean;
   has_primary_goal: boolean;
   has_supporting_actions: boolean;
   /** Whether any page view in range reported measured foreground time. */
@@ -1232,14 +1262,13 @@ export async function availability(w: WebScope): Promise<Availability> {
     filters: { includeBots: w.filters.includeBots, sourceId: w.filters.sourceId },
   };
   const wide = sessionBase(unfiltered);
-  const narrow = sessionBase(w);
-  const [[all], [matched]] = await Promise.all([
-    q<Row>(w.scope, `${wide.cte} SELECT ${AGG.sessions} AS n, sumIf(engaged_ms, period = 'current') AS eng FROM scoped`, wide.params),
-    q<Row>(w.scope, `${narrow.cte} SELECT ${AGG.sessions} AS n FROM scoped`, narrow.params),
-  ]);
+  const [all] = await q<Row>(
+    w.scope,
+    `${wide.cte} SELECT ${AGG.sessions} AS n, sumIf(engaged_ms, period = 'current') AS eng FROM scoped`,
+    wide.params,
+  );
   return {
     has_traffic: num(all?.n) > 0,
-    has_matches: num(matched?.n) > 0,
     has_primary_goal: primaryGoals(w.goals).length > 0,
     has_supporting_actions: w.goals.some((g) => g.config.type === "supporting"),
     engagement_tracked: num(all?.eng) > 0,

@@ -17,6 +17,7 @@ import type {
   RatePoint,
   SeriesPoint,
   SupportingActionRow,
+  TrafficSeries,
   VisitorMix,
 } from "@fourierhq/core";
 import { api, LIVE_INTERVAL, PROJECT } from "./api";
@@ -41,6 +42,7 @@ export type {
   RatePoint,
   SeriesPoint,
   SupportingActionRow,
+  TrafficSeries,
   VisitorMix,
 } from "@fourierhq/core";
 
@@ -80,9 +82,8 @@ interface Report {
 }
 
 export interface OverviewReport extends Report {
-  metric: "visitors" | "sessions";
   headline: Settled<Headline>;
-  trend: Settled<SeriesPoint[]>;
+  trend: Settled<TrafficSeries>;
   conversion_trend: Settled<RatePoint[]>;
   channels: Settled<BreakdownRow[]>;
   landing_pages: Settled<LandingPageRow[]>;
@@ -120,6 +121,22 @@ export interface ConversionsReport extends Report {
 }
 
 /**
+ * The zone the reader's days are measured in.
+ *
+ * Sent with every request rather than written into the URL, so a link shared with a
+ * colleague renders in their own days rather than silently in yours. Someone who wants
+ * a view pinned to one zone — a report that has to mean the same thing to everyone —
+ * puts `tz` in the URL and it wins, because `query()` merges the URL over this.
+ */
+function readerTimezone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+}
+
+/**
  * One request per report rather than one per card: every number on a page then
  * describes the same snapshot, which is the difference between a conversion rate that
  * matches its own numerator and one that was fetched a second later.
@@ -127,7 +144,7 @@ export interface ConversionsReport extends Report {
 function useReport<T>(name: string, extra: Record<string, string | null | undefined> = {}) {
   const environment = useEnvironmentValue();
   const { query } = useWebState();
-  const qs = query({ ...extra, environment });
+  const qs = query({ tz: readerTimezone(), ...extra, environment });
   return useQuery({
     queryKey: ["web", name, qs],
     queryFn: () => api<T>(`/api/projects/${PROJECT}/web/${name}?${qs}`),
@@ -137,7 +154,7 @@ function useReport<T>(name: string, extra: Record<string, string | null | undefi
   });
 }
 
-export const useWebOverview = (metric: "visitors" | "sessions") => useReport<OverviewReport>("overview", { metric });
+export const useWebOverview = () => useReport<OverviewReport>("overview");
 
 export const useWebAcquisition = (groupBy: string, sort: string) => useReport<AcquisitionReport>("acquisition", { group_by: groupBy, sort });
 
@@ -148,7 +165,7 @@ export const useWebConversions = () => useReport<ConversionsReport>("conversions
 export function useWebPageDetail(path: string | null, basis: "landing" | "viewers") {
   const environment = useEnvironmentValue();
   const { query } = useWebState();
-  const qs = query({ path, basis, environment });
+  const qs = query({ tz: readerTimezone(), path, basis, environment });
   return useQuery({
     queryKey: ["web", "page-detail", qs],
     queryFn: () => api<PageDetailReport>(`/api/projects/${PROJECT}/web/page-detail?${qs}`),
@@ -160,7 +177,7 @@ export function useWebPageDetail(path: string | null, basis: "landing" | "viewer
 export function useWebFilterValues() {
   const environment = useEnvironmentValue();
   const { query } = useWebState();
-  const qs = query({ environment });
+  const qs = query({ tz: readerTimezone(), environment });
   return useQuery({
     queryKey: ["web", "filters", qs],
     queryFn: () => api<FilterValues & { channels: string[]; devices: string[]; browsers: string[] }>(`/api/projects/${PROJECT}/web/filters?${qs}`),

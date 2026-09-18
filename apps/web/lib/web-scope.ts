@@ -8,15 +8,7 @@
  * slightly different ways.
  */
 
-import {
-  listGoals,
-  listPageGroups,
-  resolveGoal,
-  resolveRange,
-  type Project,
-  type WebFilters,
-  type WebScope,
-} from "@fourierhq/core";
+import { listGoals, listPageGroups, resolveGoal, resolveRange, type Project, type WebFilters, type WebScope } from "@fourierhq/core";
 import { environmentFromRequest, scope as makeScope } from "./db";
 
 /** Query-string names, exported so the client builds the same URLs the server reads. */
@@ -38,22 +30,6 @@ export const PARAM = {
   visitor: "visitor",
   includeBots: "bots",
 } as const;
-
-/** Filters that survive a change of site. Everything else describes one site's traffic. */
-const SITE_INDEPENDENT = new Set<keyof WebFilters>(["device", "browser", "country", "visitor", "includeBots"]);
-
-/**
- * Which filters to keep when the reader switches site. A campaign or a channel is a
- * fact about one site's traffic, and silently carrying it to another site produces an
- * empty report that looks like an absence of visitors rather than a stale filter.
- */
-export function filtersForNewSite(filters: WebFilters): WebFilters {
-  const out: WebFilters = {};
-  for (const [k, v] of Object.entries(filters) as [keyof WebFilters, unknown][]) {
-    if (SITE_INDEPENDENT.has(k) && v !== undefined && v !== null && v !== "") (out as Record<string, unknown>)[k] = v;
-  }
-  return out;
-}
 
 function str(s: URLSearchParams, key: string): string | null {
   const v = s.get(key);

@@ -2,9 +2,8 @@
 
 import type { ReactNode } from "react";
 import Link from "next/link";
-import { AlertCircle, Filter, Gauge, RefreshCw, Target, WifiOff } from "lucide-react";
+import { AlertCircle, Filter, Gauge, RefreshCw, Target } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 
 /**
@@ -85,16 +84,6 @@ export function NeedsGoal({ action }: { action?: ReactNode }) {
   );
 }
 
-/**
- * A measurement the SDK never sent. Distinct from a zero: nobody is claiming the value
- * is nought, only that nothing was recorded to compute it from.
- */
-export function NotTracked({ what, how }: { what: string; how: ReactNode }) {
-  return (
-    <Frame icon={<WifiOff className="size-6" />} title={`${what} is not being tracked`} body={how} />
-  );
-}
-
 /** A query failed. An error and a retry, never an empty chart that implies zero. */
 export function QueryError({ message, onRetry, compact }: { message?: string; onRetry?: () => void; compact?: boolean }) {
   if (compact) {
@@ -151,12 +140,4 @@ export function Panel({
   if (loading && skeleton) return <>{skeleton}</>;
   if (empty) return <>{empty}</>;
   return <>{children}</>;
-}
-
-export function CardState({ children }: { children: ReactNode }) {
-  return (
-    <Card>
-      <CardContent className="p-0">{children}</CardContent>
-    </Card>
-  );
 }

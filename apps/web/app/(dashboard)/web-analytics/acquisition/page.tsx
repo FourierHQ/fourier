@@ -106,7 +106,7 @@ export default function AcquisitionPage() {
         </div>
       )}
 
-      {avail?.has_traffic && !avail.has_matches ? (
+      {avail?.has_traffic && report.isSuccess && (performance?.length ?? 0) === 0 ? (
         <Card>
           <CardContent className="p-0">
             <NoMatches onClear={clearFilters} />

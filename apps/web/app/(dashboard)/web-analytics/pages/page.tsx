@@ -122,7 +122,7 @@ export default function PagesPage() {
     <div className="space-y-6 p-4 md:p-6">
       <WebControls scope={scope} />
 
-      {avail?.has_traffic && !avail.has_matches ? (
+      {avail?.has_traffic && report.isSuccess && (rows?.length ?? 0) === 0 ? (
         <Card>
           <CardContent className="p-0">
             <NoMatches onClear={clearFilters} />

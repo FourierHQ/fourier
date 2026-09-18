@@ -22,7 +22,7 @@ import { P, WEB_ROOT, useWebState } from "@/lib/web-state";
  */
 export default function OverviewPage() {
   const [metric, setMetric] = useState<"visitors" | "sessions">("visitors");
-  const report = useWebOverview(metric);
+  const report = useWebOverview();
   const router = useRouter();
   const { href, set } = useWebState();
   const clearFilters = useClearFilters();
@@ -36,6 +36,13 @@ export default function OverviewPage() {
   const mix = unwrap(report.data?.visitor_mix);
   const avail = unwrap(report.data?.availability);
   const interval = scope?.range.interval ?? "day";
+  // The conversion cards' sparklines, off the series the page already has. A rate of
+  // null (no sessions in that bucket) plots as zero here: a sparkline is a shape, not a
+  // reading, and the number beside it is the one anyone acts on.
+  const convSeries = conv && {
+    converting: conv.map((p) => ({ bucket: p.bucket, value: p.converting, previous: null })),
+    rate: conv.map((p) => ({ bucket: p.bucket, value: p.rate ?? 0, previous: null })),
+  };
   const goalName = scope?.goal?.name ?? null;
   const loading = report.isLoading;
 
@@ -52,7 +59,10 @@ export default function OverviewPage() {
     );
   }
 
-  const noMatches = avail?.has_traffic && !avail.has_matches;
+  // "No results for these filters" rather than "no traffic": the difference is whether
+  // the site had visits at all, which availability answers, against whether this report
+  // found any, which it already knows without a second query.
+  const noMatches = avail?.has_traffic && report.isSuccess && h?.sessions.current === 0;
 
   return (
     <div className="space-y-6 p-4 md:p-6">
@@ -72,7 +82,7 @@ export default function OverviewPage() {
               hint="Distinct tracked identities with activity in this period. These are browsers we can recognise, not guaranteed unique people: a cleared cookie or a second device counts again."
               value={formatNumber(h?.visitors.current)}
               delta={h?.visitors}
-              sparkline={metric === "visitors" ? trend : undefined}
+              sparkline={trend?.visitors}
               loading={loading}
             />
             <MetricCard
@@ -80,7 +90,7 @@ export default function OverviewPage() {
               hint="Visits. A new session starts after 30 minutes of inactivity."
               value={formatNumber(h?.sessions.current)}
               delta={h?.sessions}
-              sparkline={metric === "sessions" ? trend : undefined}
+              sparkline={trend?.sessions}
               loading={loading}
             />
             <ConversionCard
@@ -88,6 +98,7 @@ export default function OverviewPage() {
               goalName={goalName}
               value={formatNumber(h?.converting_sessions.current)}
               delta={h?.converting_sessions}
+              sparkline={convSeries?.converting}
               loading={loading}
             />
             <ConversionCard
@@ -95,6 +106,7 @@ export default function OverviewPage() {
               goalName={goalName}
               value={formatRate(h?.conversion_rate.rate)}
               rate={h?.conversion_rate}
+              sparkline={convSeries?.rate}
               loading={loading}
             />
           </div>
@@ -121,7 +133,10 @@ export default function OverviewPage() {
               </CardHeader>
               <CardContent>
                 <Panel error={errorOf(report.data?.trend)} onRetry={() => report.refetch()}>
-                  <TrendChart data={trend} label={metric === "visitors" ? "Visitors" : "Sessions"} interval={interval} loading={loading} />
+                  {/* Both series arrive together, so the toggle is instant rather than
+                      a round trip — and the card for whichever metric is not selected
+                      still has a sparkline to draw. */}
+                  <TrendChart data={metric === "visitors" ? trend?.visitors : trend?.sessions} label={metric === "visitors" ? "Visitors" : "Sessions"} interval={interval} loading={loading} />
                 </Panel>
               </CardContent>
             </Card>

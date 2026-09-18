@@ -313,6 +313,11 @@ export function pathRuleSql(rule: PathRule, col: string, params: Params): string
     case "exact":
       return `${norm} = {${params.add(trimmed)}:String}`;
     case "prefix":
+      // Root is the whole site. Without this the rule compiles to `path = '/' OR
+      // startsWith(path, '//')`, whose second branch can never match — so a group whose
+      // author meant "everything" would silently collect the homepage alone. It is also
+      // the value the editor pre-fills, so it is the easiest group anyone can make.
+      if (trimmed === "" || trimmed === "/") return "1";
       // "/blog" matches "/blog" and "/blog/x", but not "/blogroll".
       return `(${norm} = {${params.add(trimmed)}:String} OR startsWith(${norm}, {${params.add(trimmed + "/")}:String}))`;
     case "contains":
@@ -329,7 +334,10 @@ function propertyFilterSql(f: PropertyFilter, params: Params): string {
     case "eq":
       return `${extracted} = {${params.add(f.value ?? "")}:String}`;
     case "neq":
-      return `${extracted} != {${params.add(f.value ?? "")}:String}`;
+      // JSONExtractString returns '' for a key that is not there, which would otherwise
+      // make "plan is not free" true of every event that carries no plan at all — a
+      // half-instrumented event would inflate the goal rather than be excluded from it.
+      return `(JSONHas(properties, ${key}) AND ${extracted} != {${params.add(f.value ?? "")}:String})`;
     case "contains":
       return `position(${extracted}, {${params.add(f.value ?? "")}:String}) > 0`;
   }

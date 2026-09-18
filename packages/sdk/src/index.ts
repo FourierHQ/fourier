@@ -498,9 +498,24 @@ export class Fourier extends Emitter {
     const seen = () => {
       if (this.engagement) this.engagement.lastActivity = Date.now();
     };
-    for (const type of ["pointerdown", "keydown", "scroll", "wheel", "touchstart", "mousemove"]) {
+    for (const type of ["pointerdown", "keydown", "scroll", "wheel", "touchstart"]) {
       window.addEventListener(type, seen, { passive: true, capture: true });
     }
+    // Mouse movement counts as attention, but it fires a hundred times a second and
+    // this is a listener the host page did not ask for on its hottest event. Recording
+    // it at most once a second is indistinguishable at the resolution anything here
+    // measures, and keeps Fourier out of their performance profile.
+    let lastMove = 0;
+    window.addEventListener(
+      "mousemove",
+      () => {
+        const now = Date.now();
+        if (now - lastMove < ENGAGEMENT_TICK_MS) return;
+        lastMove = now;
+        seen();
+      },
+      { passive: true, capture: true },
+    );
     // A tab coming back to the front is attention, and it also resets the tick clock so
     // the hidden stretch is never credited retroactively. Going away stops the clock;
     // banking the time is bindUnload's handler, which runs first and also flushes.
@@ -526,7 +541,11 @@ export class Fourier extends Emitter {
     if (!e) return;
     this.tickEngagement();
     const ms = Math.round(e.ms);
-    this.engagement = opts.keepOpen ? { ...e, ms: 0, lastTick: Date.now() } : null;
+    // Below the reporting minimum the time is carried into the next stretch rather than
+    // thrown away. Someone alt-tabbing every few seconds banks 800ms each time, and
+    // discarding it would report nothing at all for a page they spent a minute on.
+    const carried = ms < ENGAGEMENT_MIN_MS ? e.ms : 0;
+    this.engagement = opts.keepOpen ? { ...e, ms: carried, lastTick: Date.now() } : null;
     // Closing the page for good stops the clock; keepOpen leaves it to the
     // visibilitychange handler, which stops it on the way out and restarts it on return.
     if (!opts.keepOpen) this.stopTicking();
