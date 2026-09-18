@@ -14,7 +14,7 @@
 
 import { botSql, channelSql } from "./classify";
 
-export const SCHEMA_VERSION = 8;
+export const SCHEMA_VERSION = 9;
 
 /**
  * A migration statement. Plain strings are idempotent `CREATE ... IF NOT EXISTS` and run on
@@ -32,6 +32,17 @@ export type Statement = string | { sql: string; when: "upgrade" | "change" };
  * event count, ranking and timeline, the same way identify and group are.
  */
 export const PAGE_LEAVE = "$page_leave";
+
+/**
+ * Events hidden from every report unless the operator says otherwise.
+ *
+ * $page_leave is here because it is the one event Fourier's own SDK sends that nobody
+ * asked for: one per page view, doubling the event count of a site that only has page
+ * views, for a measurement that is already reported as engagement time. It stays a
+ * default rather than a hard-coded exclusion so that an operator debugging their
+ * instrumentation can switch it back on and see the rows.
+ */
+export const SYSTEM_HIDDEN_EVENTS: readonly string[] = [PAGE_LEAVE];
 
 /** A message that records someone looking at something: what a landing page is read off. */
 const IS_VIEW = `type IN ('page', 'screen')`;
@@ -189,6 +200,10 @@ export const controlStatements: Statement[] = [
  * and the one-time backfill that gives an existing install its history. Written once
  * so the two can never drift into computing different sessions.
  */
+// The one place $page_leave is excluded at write time rather than at read time. A
+// session's engagement is computed from it here, so the rollup has to know about it
+// either way, and its `events` column feeds no report — Web Analytics counts sessions
+// and page views. Hiding an event therefore has nothing to correct in this table.
 const sessionRollup = (extra = "") => `SELECT
     project_id,
     session_id,
@@ -421,6 +436,44 @@ export const dataStatements: Statement[] = [
     max(timestamp) AS last_seen
   FROM events
   GROUP BY project_id, day, type, event`,
+
+  // Every event count that is not read straight off `events` comes from one of the
+  // rollups above, and none of them carry the event name — so once an operator hides
+  // an event there is no way to take it back out of a person's or a company's total.
+  // This is that way: the same counts, split by event name, so a report subtracts what
+  // is hidden instead of rebuilding the rollup from raw rows on every page load.
+  //
+  // Keyed on the event first because that is what every read filters on: a hidden set
+  // is a handful of names out of a low-cardinality column, so the subtraction touches
+  // only the granules holding those names.
+  `CREATE TABLE IF NOT EXISTS actor_event_stats (
+    project_id   LowCardinality(String),
+    event        LowCardinality(String),
+    distinct_id  String,
+    group_id     String,
+    source_id    LowCardinality(String),
+    count        SimpleAggregateFunction(sum, UInt64)
+  ) ENGINE = AggregatingMergeTree
+  ORDER BY (project_id, event, distinct_id, group_id, source_id)`,
+
+  `CREATE MATERIALIZED VIEW IF NOT EXISTS actor_event_stats_mv TO actor_event_stats AS
+  SELECT project_id, event, distinct_id, group_id, source_id, count() AS count
+  FROM events
+  GROUP BY project_id, event, distinct_id, group_id, source_id`,
+
+  // History for an install that predates the table, on the same terms as the sessions
+  // backfill below: a materialised view only sees rows inserted after it exists, and a
+  // key the view has already written is skipped rather than added to, because these are
+  // summed counts and covering one twice would over-subtract it. The result is a bounded
+  // under-subtraction for keys that were active during the upgrade boot, never an
+  // over-subtraction that could push a total below zero.
+  { when: "upgrade", sql: `INSERT INTO actor_event_stats
+  SELECT project_id, event, distinct_id, group_id, source_id, count() AS count
+  FROM events
+  WHERE (project_id, event, distinct_id, group_id, source_id) NOT IN (
+    SELECT project_id, event, distinct_id, group_id, source_id FROM actor_event_stats
+  )
+  GROUP BY project_id, event, distinct_id, group_id, source_id` },
 
   // ---- sessions ----
   //
@@ -748,6 +801,16 @@ group_members (AggregatingMergeTree, GROUP BY project_id, group_id, distinct_id)
 
 event_stats_daily (AggregatingMergeTree, GROUP BY project_id, event, day)
   type, count (sum), users (uniqMerge), first_seen (min), last_seen (max)
+
+actor_event_stats (AggregatingMergeTree, GROUP BY project_id, event, distinct_id, group_id, source_id)
+  count (sum). The same counts the rollups above hold, split by event name, so a total can
+  have specific events taken back out of it.
+
+HIDDEN EVENTS. The operator can mark event names as instrumentation rather than activity —
+$page_leave is hidden by default — and the dashboard and every Fourier tool leave those names out
+of every count, chart, ranking and listing. Raw SQL does not: these tables hold every row that ever
+arrived. To agree with what the operator sees, exclude the hidden names (get_schema lists them) with
+event NOT IN (...), and subtract them from any rollup total using actor_event_stats.
 
 Tips: always filter by project_id. Use the rollup tables for counts; query events for
 timelines and property breakdowns; use events_resolved + person_id for funnels (windowFunnel)
