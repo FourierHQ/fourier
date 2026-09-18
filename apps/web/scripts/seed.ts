@@ -146,7 +146,13 @@ async function main() {
       const activity = c.plan === "enterprise" ? 0.8 : c.plan === "pro" ? 0.5 : 0.25;
       for (let day = Math.floor((now - signup) / DAY); day >= 0; day--) {
         if (Math.random() > activity) continue;
-        const sessionStart = now - day * DAY - rand(0, 12) * 3_600_000 - rand(0, 3_600_000);
+        // Clamped to after the signup. The oldest day in this loop lands exactly on the
+        // signup moment, and the random hours then push it up to thirteen hours earlier
+        // — giving the account activity before it existed, and, worse, making that
+        // stray session the person's first recorded touch. Every seeded customer then
+        // looked like it arrived Direct, which is the one thing the attribution report
+        // is there to disprove.
+        const sessionStart = Math.max(signup + 60_000, now - day * DAY - rand(0, 12) * 3_600_000 - rand(0, 3_600_000));
         const n = rand(2, 9);
         let t = sessionStart;
         for (let i = 0; i < n; i++) {
