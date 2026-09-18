@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Activity, Bot, Building2, LayoutDashboard, LogOut, Moon, Plug, ShieldOff, Sun, Users } from "lucide-react";
+import { Activity, Bot, Building2, LayoutDashboard, LogOut, Moon, Plug, Settings, ShieldOff, Sun, Users } from "lucide-react";
 import { useTheme } from "next-themes";
 import {
   Sidebar,
@@ -86,6 +86,14 @@ export function AppSidebar() {
       </SidebarContent>
       <SidebarFooter>
         <SidebarMenu>
+          <SidebarMenuItem>
+            <SidebarMenuButton asChild isActive={isActive("/settings")} tooltip="Settings">
+              <Link href="/settings">
+                <Settings />
+                <span>Settings</span>
+              </Link>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
           <SidebarMenuItem>
             <SidebarMenuButton tooltip="Toggle theme" onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}>
               <Sun className="dark:hidden" />

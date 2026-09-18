@@ -18,6 +18,7 @@ import {
   SESSION_COOKIE,
   SESSION_MAX_AGE,
   needsSetup,
+  isAdmin,
   accountFromApiKey,
   accountFromSessionToken,
   canAccessProject,
@@ -63,19 +64,37 @@ function bearerToken(req: Request): string | null {
   return header?.startsWith("Bearer ") ? header.slice(7).trim() || null : null;
 }
 
-/** Resolves the caller, or null when unauthenticated. Never throws. */
-export async function currentUser(req: Request): Promise<Account | null> {
-  if (authDisabled()) return DEV_ACCOUNT;
+/**
+ * How the caller proved who they are. Worth knowing because a read key is meant
+ * to read: it ships in agent configs and MCP clients, and it must not be able to
+ * mint accounts even when the account behind it is an admin.
+ */
+export type Credential = "dev" | "session" | "read_key";
+
+export interface Caller {
+  user: Account | null;
+  credential: Credential | null;
+}
+
+/** Resolves the caller, or a null user when unauthenticated. Never throws. */
+export async function resolveCaller(req: Request): Promise<Caller> {
+  if (authDisabled()) return { user: DEV_ACCOUNT, credential: "dev" };
   const bearer = bearerToken(req);
   if (bearer) {
     const viaKey = await accountFromApiKey(bearer);
-    if (viaKey) return viaKey;
+    if (viaKey) return { user: viaKey, credential: "read_key" };
     // A session token in the Authorization header is legitimate for non-browser
     // callers that can't hold cookies.
-    return accountFromSessionToken(bearer);
+    const viaToken = await accountFromSessionToken(bearer);
+    return { user: viaToken, credential: viaToken ? "session" : null };
   }
   const cookie = cookieValue(req, SESSION_COOKIE);
-  return cookie ? accountFromSessionToken(cookie) : null;
+  const user = cookie ? await accountFromSessionToken(cookie) : null;
+  return { user, credential: user ? "session" : null };
+}
+
+export async function currentUser(req: Request): Promise<Account | null> {
+  return (await resolveCaller(req)).user;
 }
 
 export interface AuthState {
@@ -110,6 +129,33 @@ export function requireAuth<T extends unknown[]>(fn: (req: Request, ...args: T) 
     }
     return fn(req, ...args);
   };
+}
+
+/**
+ * Wraps a route so a read key can't reach it, only a person with a session.
+ * Read keys are handed to agents and pasted into MCP configs; whatever they can
+ * reach should be worth no more than the data they were minted to read.
+ */
+export function requireSession<T extends unknown[]>(fn: (req: Request, ...args: T) => Promise<Response>) {
+  return requireAuth(async (req: Request, ...args: T) => {
+    const { credential } = await resolveCaller(req);
+    if (credential === "read_key") return error("A read key can only read. Sign in to change accounts.", 403);
+    return fn(req, ...args);
+  });
+}
+
+/**
+ * Account management is admin-only, and never reachable with a read key.
+ * Everything a signed-in member can do to their own account (rename, change
+ * password) checks ownership at the route instead, since "is this me" isn't a
+ * role question.
+ */
+export function requireAdmin<T extends unknown[]>(fn: (req: Request, ...args: T) => Promise<Response>) {
+  return requireSession(async (req: Request, ...args: T) => {
+    const user = await currentUser(req);
+    if (!isAdmin(user)) return error("Only an admin can do that", 403);
+    return fn(req, ...args);
+  });
 }
 
 /**

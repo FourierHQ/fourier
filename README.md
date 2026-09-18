@@ -189,7 +189,7 @@ Two kinds of credential, because sending data and reading it are different jobs.
 
 **Write keys** (`fk_…`) send data in. They ship in your website's JavaScript, they are public by design, and they never need an account — a browser or a backend job must never have to log in to report an event. Nothing about accounts changes ingest.
 
-**Sessions and read keys** (`fr_…`) read data back. The dashboard API, the SQL endpoint and the MCP server all require one.
+**Sessions and read keys** (`fr_…`) read data back. The dashboard API, the SQL endpoint and the MCP server all require one. A read key reads and nothing more: it is pasted into agent configs and MCP clients, so it cannot add, remove or reset accounts even when the account that minted it is an admin.
 
 Getting there is a ladder, so nothing is in your way until it needs to be:
 
@@ -200,6 +200,10 @@ Getting there is a ladder, so nothing is in your way until it needs to be:
 | After that | Sign in, or send `Authorization: Bearer fr_…`. |
 
 Accounts live in ClickHouse alongside everything else — no second database to run. Sessions are signed tokens rather than rows, so signing in doesn't write to ClickHouse, and `FOURIER_SECRET` rotation invalidates every one of them. Passwords are hashed with scrypt from Node's standard library, so there is no native dependency to build.
+
+**Adding people** is the **Settings** page. An admin sets someone's email, an initial password and a role, and passes the two on however the team already talks — there is no mail server to configure, no invitation link to expire, and nothing to receive before you can sign in. The new person changes their password from the same page; an admin can set a fresh one for anybody locked out, which signs that person out everywhere.
+
+Two roles. **Admins** add, remove and reset people. **Members** see everything else — all the data, the SQL endpoint, their own read keys. The first account is the admin; accounts it creates are members unless you say otherwise. The last admin can't be demoted or removed, and nobody can change their own role or delete their own account, so an instance can't be locked out of its own settings.
 
 The `accounts` table carries `auth_provider` and `provider_user_id` from the first release, so adding Google or another OIDC provider later is additive rather than a migration.
 

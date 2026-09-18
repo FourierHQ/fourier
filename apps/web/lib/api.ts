@@ -2,6 +2,7 @@
 
 import { useMutation, useQuery, useQueryClient, type UseQueryOptions } from "@tanstack/react-query";
 import type {
+  Account,
   Attribution,
   AttributionDimension,
   AttributionModel,
@@ -23,6 +24,7 @@ import type {
 } from "@fourierhq/core";
 
 export type {
+  Account,
   Attribution,
   AttributionDimension,
   AttributionModel,
@@ -135,6 +137,50 @@ export function useLogout() {
   return useMutation({
     mutationFn: () => api<{ ok: true }>("/api/auth/logout", { method: "POST" }),
     onSuccess: () => qc.invalidateQueries(),
+  });
+}
+
+// ---------- accounts ----------
+
+export function useAccounts() {
+  return useQuery({ queryKey: ["accounts"], queryFn: () => api<{ accounts: Account[] }>("/api/accounts").then((r) => r.accounts), retry: false });
+}
+
+export function useCreateAccount() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { email: string; password: string; name?: string; role?: string }) =>
+      api<{ account: Account }>("/api/accounts", { method: "POST", body: JSON.stringify(input) }).then((r) => r.account),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["accounts"] }),
+  });
+}
+
+export function useUpdateAccount() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, ...patch }: { id: string; name?: string; email?: string; role?: string; password?: string }) =>
+      api<{ account: Account }>(`/api/accounts/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(patch) }).then((r) => r.account),
+    // Renaming yourself changes the name in the sidebar, which comes from
+    // auth-status rather than this list.
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["accounts"] });
+      qc.invalidateQueries({ queryKey: ["auth-status"] });
+    },
+  });
+}
+
+export function useDeleteAccount() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api<{ ok: true }>(`/api/accounts/${encodeURIComponent(id)}`, { method: "DELETE" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["accounts"] }),
+  });
+}
+
+export function useChangePassword() {
+  return useMutation({
+    mutationFn: (input: { current_password: string; new_password: string }) =>
+      api<{ ok: true }>("/api/auth/password", { method: "POST", body: JSON.stringify(input) }),
   });
 }
 
