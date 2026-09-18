@@ -1459,43 +1459,46 @@ export async function pagesInConvertingSessions(w: WebScope, opts: { limit?: num
 
 export interface CreditRow {
   channel: string;
-  /** Conversions in visits that arrived from this channel. What Acquisition shows. */
-  visit: number;
-  /** Conversions by people whose first recorded arrival was from this channel. */
-  introduced: number;
-  /** introduced − visit. Positive means it opens more than it closes. */
-  gap: number;
+  /** Conversions by people this channel first brought to the site. */
+  conversions: number;
+  /** Of those, the ones that happened on that very first visit. */
+  first_visit: number;
+  /** Of those, the ones where the person left and came back another time to convert. */
+  returned: number;
 }
 
 export interface ConversionCredit {
   rows: CreditRow[];
-  /** The same under both columns. Only the distribution moves. */
   total: number;
+  /** Across all channels, conversions by someone returning. The reason this report exists. */
+  returned: number;
 }
 
 /**
- * The same conversions, credited two ways: to the visit they happened in, and to
- * whatever first brought that person to the site.
+ * Conversions credited to whatever first brought that person to the site, split by
+ * whether they converted there and then or came back to do it.
  *
- * Visit credit — what the Acquisition report shows — is exact and systematically
- * under-credits the top of the funnel. A campaign that introduced someone in March
- * earns nothing when they come back in September, type the address, and convert: that
- * visit is Direct, and Direct did not do the work.
+ * Every other report credits the visit a conversion happened in, which is exact and
+ * systematically under-credits the top of the funnel: a campaign that introduced
+ * someone in March earns nothing when they return in September, type the address and
+ * convert. That visit is Direct, and Direct did not do the work.
  *
- * Both columns count the same conversions and total to the same number, so the gap
- * between them is the whole point and is returned rather than left as arithmetic for
- * the reader.
+ * This was two parallel columns — introduced against converting-visit — and it was
+ * misread the same way twice, as though the second were a subset of the first. It is
+ * not: they are two margins of a cross-tab, and a channel's two numbers can describe
+ * entirely different people. So the comparison is gone and one total is decomposed
+ * instead. `conversions` is the row's total and `first_visit + returned` is exactly it,
+ * which is a relationship a reader can check on the row rather than take on trust.
  *
- * Last touch used to be a third column and was removed: a converting visit raises its
- * own arrival, so last-touch-before-the-visit is the visit itself for all but the few
- * conversions that arrive direct. It repeated the first column while costing a third of
- * the attention the table had to spend.
+ * `returned` is the column worth reading. A channel with conversions only on the first
+ * visit closes what it opens. A channel with a tail of returns is seeding demand that
+ * some later visit gets the credit for everywhere else in this section.
  *
- * This is the one place in the section that looks across sessions. Everything else is
- * session-scoped on purpose; here the question is explicitly about what came before.
+ * This is the one place here that looks across sessions; everything else is
+ * session-scoped on purpose.
  */
 export async function conversionCredit(w: WebScope, opts: { limit?: number } = {}): Promise<ConversionCredit> {
-  if (!hasGoal(w)) return { rows: [], total: 0 };
+  if (!hasGoal(w)) return { rows: [], total: 0, returned: 0 };
   const { cte, params, project } = sessionBase(w);
   const limit = Math.min(Math.max(opts.limit ?? 12, 1), 50);
 
@@ -1515,50 +1518,55 @@ export async function conversionCredit(w: WebScope, opts: { limit?: number } = {
     w.scope,
     `${cte},
      person_first AS (
-       SELECT person_id, argMin(${touchChannel}, timestamp) AS channel
+       SELECT person_id, argMin(${touchChannel}, timestamp) AS channel, min(timestamp) AS first_at, count() AS touches
        FROM touches_resolved
        WHERE project_id = ${project}
        GROUP BY person_id
      ),
      converting AS (
-       SELECT session_id, person_id, channel AS visit_channel
+       SELECT session_id, person_id, started_at, channel AS visit_channel
        FROM scoped WHERE period = 'current' AND converted = 1
      ),
      credited AS (
        SELECT
          c.session_id AS session_id,
-         c.visit_channel AS visit_channel,
          -- Someone with no recorded touch keeps their visit's channel, so every
          -- conversion is credited to something rather than dropping out of the total.
-         ifNull(nullIf(f.channel, ''), c.visit_channel) AS first_channel
+         ifNull(nullIf(f.channel, ''), c.visit_channel) AS channel,
+         -- A touch strictly before this visit began means they had been here before.
+         -- Guarded on the join having matched: an unmatched row carries the epoch,
+         -- which is before everything and would call every conversion a return.
+         --
+         -- Named is_return and not returned, because the aggregate below is called
+         -- returned and ClickHouse resolves a WHERE or -If condition against aliases
+         -- declared in the same SELECT. The condition would compare the aggregate with
+         -- itself, which it rejects here — and silently matched every row the one time
+         -- the types happened to line up. See the note in trend().
+         toUInt8(f.touches > 0 AND f.first_at < c.started_at) AS is_return
        FROM converting AS c
        LEFT JOIN person_first AS f ON f.person_id = c.person_id
      )
-     SELECT 'visit' AS model, visit_channel AS channel, uniqExact(session_id) AS n FROM credited GROUP BY channel
-     UNION ALL
-     SELECT 'first', first_channel, uniqExact(session_id) FROM credited GROUP BY first_channel`,
+     SELECT
+       channel,
+       uniqExact(session_id) AS conversions,
+       uniqExactIf(session_id, is_return = 0) AS first_visit,
+       uniqExactIf(session_id, is_return = 1) AS returned
+     FROM credited
+     GROUP BY channel
+     ORDER BY conversions DESC`,
     params,
   );
 
-  const byChannel = new Map<string, CreditRow>();
-  const get = (channel: string) => {
-    const existing = byChannel.get(channel);
-    if (existing) return existing;
-    const created: CreditRow = { channel, visit: 0, introduced: 0, gap: 0 };
-    byChannel.set(channel, created);
-    return created;
-  };
-  for (const r of rows) {
-    const row = get(String(r.channel) || "Unattributed");
-    if (r.model === "visit") row.visit = num(r.n);
-    else row.introduced = num(r.n);
-  }
-  const all = [...byChannel.values()].map((r) => ({ ...r, gap: r.introduced - r.visit }));
+  const all = rows.map((r) => ({
+    channel: String(r.channel) || "Unattributed",
+    conversions: num(r.conversions),
+    first_visit: num(r.first_visit),
+    returned: num(r.returned),
+  }));
   return {
-    // Ranked by the larger of the two, so a channel that only shows up on one side is
-    // not buried under channels that are middling on both.
-    rows: all.sort((a, b) => Math.max(b.visit, b.introduced) - Math.max(a.visit, a.introduced)).slice(0, limit),
-    total: all.reduce((n, r) => n + r.visit, 0),
+    rows: all.slice(0, limit),
+    total: all.reduce((n, r) => n + r.conversions, 0),
+    returned: all.reduce((n, r) => n + r.returned, 0),
   };
 }
 

@@ -348,39 +348,32 @@ test("funnel steps are ordered, deduplicated, and honest about other routes", as
   assert.equal(f.steps[1].dropped, 1);
 });
 
-test("crediting conversions to what introduced them moves them, never adds to them", async () => {
+test("credit splits one total rather than comparing two", async () => {
   const w = await web({ goal: null });
   const credit = await conversionCredit(w);
   const h = await headline(w);
 
-  // The load-bearing property. The visit a conversion happened in and the channel that
-  // first brought that person are one set of conversions credited two ways, so each
-  // column must account for all of them and neither may count one twice. A model that
-  // double-credits still looks plausible row by row; only the total gives it away.
+  // Every conversion is credited to exactly one channel, and within that channel falls
+  // into exactly one of the two segments. This used to be two parallel columns and was
+  // read twice as though one were a subset of the other; it is now a total and its
+  // parts, and that relationship has to actually hold or the bar lies about itself.
   assert.equal(
-    credit.rows.reduce((n, r) => n + r.visit, 0),
+    credit.rows.reduce((n, r) => n + r.conversions, 0),
     h.converting_sessions.current,
-    "the converting visit accounts for every conversion",
+    "every conversion is credited to one channel",
   );
-  assert.equal(
-    credit.rows.reduce((n, r) => n + r.introduced, 0),
-    h.converting_sessions.current,
-    "and so does whatever introduced them",
-  );
-  assert.equal(credit.total, h.converting_sessions.current);
-
-  // The gap is returned rather than left as arithmetic for the reader, so it has to be
-  // the arithmetic they would have done.
-  for (const r of credit.rows) assert.equal(r.gap, r.introduced - r.visit, `${r.channel}: gap is the difference`);
-
-  // Visit credit is the same number the Acquisition report shows for the same channel,
-  // because it is the same question asked the same way.
-  const byChannel = Object.fromEntries((await breakdown(w, "channel", { limit: 50 })).map((r) => [r.key, r.converting_sessions]));
-  for (const row of credit.rows) {
-    assert.equal(row.visit, byChannel[row.channel] ?? 0, `visit credit for ${row.channel} matches Acquisition`);
+  for (const r of credit.rows) {
+    assert.equal(r.first_visit + r.returned, r.conversions, `${r.channel}: the segments are the total`);
   }
+  assert.equal(credit.total, h.converting_sessions.current);
+  assert.equal(credit.rows.reduce((n, r) => n + r.returned, 0), credit.returned);
 
-  assert.deepEqual(await conversionCredit(await web({ goal: null, goals: [] })), { rows: [], total: 0 }, "nothing configured credits nothing");
+  // Nobody in the fixtures has a touch before the visit they converted in, so all of it
+  // is first-visit. The returning half is exercised by the seeded demo data, which has
+  // people arriving weeks before they convert.
+  assert.equal(credit.returned, 0, "these fixtures convert on first contact");
+
+  assert.deepEqual(await conversionCredit(await web({ goal: null, goals: [] })), { rows: [], total: 0, returned: 0 });
 });
 
 test("a page is credited for conversions on it and for conversions it led to, separately", async () => {

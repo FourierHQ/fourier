@@ -4,7 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { ConversionRateChart, FunnelSteps, PairedBars } from "@/components/web/charts";
+import { ConversionRateChart, FunnelSteps, SplitBars } from "@/components/web/charts";
 import { WebControls } from "@/components/web/controls";
 import { ManageGoalsDialog } from "@/components/web/goals";
 import { ExploreLink } from "@/components/web/explore-link";
@@ -266,30 +266,40 @@ export default function ConversionsPage() {
 
           <Card>
             <CardHeader>
-              <CardTitle>What introduced the people who converted</CardTitle>
+              <CardTitle>What first brought the people who converted</CardTitle>
               <CardDescription>
-                Every other report credits the visit a conversion happened in. Many of these people arrived for the first time
-                long before that — this is where they originally came from.
+                Credited to the channel that introduced each person, wherever they eventually converted. Every other report
+                credits the visit it happened in instead.
               </CardDescription>
             </CardHeader>
             <CardContent className="p-0">
               <Panel error={errorOf(report.data?.credit)} onRetry={() => report.refetch()}>
-                <PairedBars
+                <SplitBars
                   loading={loading}
-                  leftLabel="Introduced them"
-                  rightLabel="Converting visit"
-                  shiftLabel={(n, leans) => (leans === "left" ? `introduced ${formatNumber(n)} more` : `closed ${formatNumber(n)} more`)}
+                  parts={[
+                    { label: "On that first visit", color: "var(--chart-1)" },
+                    { label: "Came back to convert", color: "var(--chart-3)" },
+                  ]}
                   emptyLabel="No conversions to credit in this period."
                   onSelect={(channel) => set({ [P.channel]: channel })}
-                  rows={(credit?.rows ?? []).map((r) => ({ key: r.channel, left: r.introduced, right: r.visit }))}
+                  rows={(credit?.rows ?? []).map((r) => ({ key: r.channel, total: r.conversions, values: [r.first_visit, r.returned] }))}
                 />
                 <p className="border-t px-4 py-3 text-xs leading-relaxed text-muted-foreground">
-                  Both bars count the same {formatNumber(credit?.total)} conversions — only the credit moves. A channel longer on
-                  the first bar brings people who convert later through something else, which no session-scoped report can show;
-                  longer on the second means it closes people that something else introduced.{" "}
-                  <strong className="font-medium">Introduced them</strong> is the first arrival Fourier recorded, not the first
-                  ever: anyone already visiting before you installed tracking counts from their next visit, so a large Direct bar
-                  here is usually the age of your data rather than a channel.
+                  {credit && credit.returned > 0 ? (
+                    <>
+                      {formatNumber(credit.returned)} of {formatNumber(credit.total)} conversions came from someone who had been
+                      here before. Every other report credits those to whatever brought them back — this credits what found them
+                      in the first place.
+                    </>
+                  ) : (
+                    <>
+                      Everyone who converted did so on their first visit, so this matches the Acquisition report exactly. The two
+                      diverge once people start returning before they convert.
+                    </>
+                  )}{" "}
+                  A channel&apos;s conversions split into the two segments and nothing else, so the bar is the row&apos;s total.
+                  &ldquo;First&rdquo; means the first arrival Fourier recorded: anyone already visiting before you installed
+                  tracking counts from their next visit, so on a young install almost everything lands in the first segment.
                 </p>
               </Panel>
             </CardContent>

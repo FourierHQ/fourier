@@ -320,6 +320,88 @@ export function VisitorMixBar({
 }
 
 /**
+ * One total per row, split into its parts.
+ *
+ * Deliberately a single bar rather than two: two bars side by side read as a comparison,
+ * and a reader will try to work out how the smaller relates to the larger. Here the
+ * parts add to the whole, and the bar shows that directly — the segments are the number
+ * beside them, and the row's total is the bar.
+ */
+export function SplitBars({
+  rows,
+  parts,
+  loading,
+  emptyLabel = "Nothing to show yet.",
+  onSelect,
+}: {
+  rows: { key: string; total: number; values: number[] }[] | undefined;
+  parts: { label: string; color: string }[];
+  loading?: boolean;
+  emptyLabel?: string;
+  onSelect?: (key: string) => void;
+}) {
+  if (loading && !rows) {
+    return (
+      <div className="space-y-2 p-4">
+        {Array.from({ length: 5 }).map((_, i) => (
+          <Skeleton key={i} className="h-9" />
+        ))}
+      </div>
+    );
+  }
+  if (!rows?.length) return <p className="px-6 py-6 text-sm text-muted-foreground">{emptyLabel}</p>;
+  const max = Math.max(...rows.map((r) => r.total), 1);
+
+  return (
+    <div>
+      <div className="flex flex-wrap items-center justify-end gap-x-4 gap-y-1 px-4 pb-2 text-[11px] text-muted-foreground">
+        {parts.map((p) => (
+          <span key={p.label} className="inline-flex items-center gap-1.5">
+            <span className="size-2 rounded-[2px]" style={{ background: p.color }} aria-hidden /> {p.label}
+          </span>
+        ))}
+      </div>
+      <div className="divide-y">
+        {rows.map((r) => (
+          <div
+            key={r.key}
+            className={cn("px-4 py-2.5", onSelect && "cursor-pointer hover:bg-muted/40")}
+            onClick={onSelect ? () => onSelect(r.key) : undefined}
+            role={onSelect ? "button" : undefined}
+            tabIndex={onSelect ? 0 : undefined}
+            onKeyDown={onSelect ? (e) => (e.key === "Enter" || e.key === " ") && onSelect(r.key) : undefined}
+          >
+            <div className="mb-1.5 flex items-baseline justify-between gap-3">
+              <span className="truncate text-sm font-medium">{r.key}</span>
+              <span className="shrink-0 text-xs text-muted-foreground">
+                {r.values
+                  .map((v, i) => (v > 0 ? `${formatNumber(v)} ${parts[i].label.toLowerCase()}` : null))
+                  .filter(Boolean)
+                  .join(" · ")}
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="h-3 flex-1 overflow-hidden rounded-sm bg-muted/50">
+                <div className="flex h-full" style={{ width: `${(r.total / max) * 100}%` }}>
+                  {r.values.map((v, i) => (
+                    <div
+                      key={parts[i].label}
+                      style={{ width: `${r.total > 0 ? (v / r.total) * 100 : 0}%`, background: parts[i].color }}
+                      aria-label={`${parts[i].label}: ${v}`}
+                    />
+                  ))}
+                </div>
+              </div>
+              <span className="w-8 shrink-0 text-right text-sm tabular-nums">{formatNumber(r.total)}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/**
  * Two measures of the same categories, as paired bars on one row.
  *
  * A table of two numeric columns makes the reader subtract across the row to find what
