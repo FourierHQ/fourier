@@ -4,7 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { ConversionRateChart, FunnelSteps } from "@/components/web/charts";
+import { ConversionRateChart, FunnelSteps, PairedBars } from "@/components/web/charts";
 import { WebControls } from "@/components/web/controls";
 import { ManageGoalsDialog } from "@/components/web/goals";
 import { ExploreLink } from "@/components/web/explore-link";
@@ -19,7 +19,6 @@ import {
   useWebConversions,
   useWebDefinitions,
   type ConvertingPageRow,
-  type CreditRow,
   type GoalSummaryRow,
   type LandingPageRow,
   type ConversionPages,
@@ -267,53 +266,31 @@ export default function ConversionsPage() {
 
           <Card>
             <CardHeader>
-              <CardTitle>Where the credit goes</CardTitle>
+              <CardTitle>What introduced the people who converted</CardTitle>
               <CardDescription>
-                The same {formatNumber(credit?.total)} conversions, credited three ways. The totals are identical — only the
-                distribution moves.
+                Every other report credits the visit a conversion happened in. Many of these people arrived for the first time
+                long before that — this is where they originally came from.
               </CardDescription>
             </CardHeader>
             <CardContent className="p-0">
               <Panel error={errorOf(report.data?.credit)} onRetry={() => report.refetch()}>
-                <RankedTable<CreditRow>
-                  rows={credit?.rows}
+                <PairedBars
                   loading={loading}
-                  rowKey={(r) => r.channel}
-                  barOf={(r) => (credit?.total ? r.first_touch / credit.total : 0)}
-                  onSelect={(r) => set({ [P.channel]: r.channel })}
-                  empty={<p className="px-6 py-6 text-sm text-muted-foreground">No conversions to credit in this period.</p>}
-                  caption={
-                    <>
-                      <strong className="font-medium">Visit</strong> is where the converting visit came from — the same number
-                      Acquisition shows. <strong className="font-medium">First touch</strong> credits whatever first brought that
-                      person to the site, however long ago. <strong className="font-medium">Last touch</strong> credits their most
-                      recent campaign or referral before the visit, ignoring direct arrivals. A channel that is small under Visit
-                      and large under First touch is doing work the other reports cannot see.
-                    </>
-                  }
-                  columns={[
-                    { key: "channel", header: "Channel", cell: (r) => <span className="font-medium">{r.channel}</span> },
-                    { key: "entry", header: "Visit", cell: (r) => formatNumber(r.entry) },
-                    {
-                      key: "first",
-                      header: (
-                        <MetricLabel hint="The person's first ever recorded arrival, which may be months before they converted.">
-                          First touch
-                        </MetricLabel>
-                      ),
-                      cell: (r) => formatNumber(r.first_touch),
-                    },
-                    {
-                      key: "last",
-                      header: (
-                        <MetricLabel hint="Their most recent campaign or referral at or before the converting visit began. Direct arrivals are skipped, since a visit raises its own, which would make this column a copy of the first.">
-                          Last touch
-                        </MetricLabel>
-                      ),
-                      cell: (r) => formatNumber(r.last_touch),
-                    },
-                  ]}
+                  leftLabel="Introduced them"
+                  rightLabel="Converting visit"
+                  shiftLabel={(n, leans) => (leans === "left" ? `introduced ${formatNumber(n)} more` : `closed ${formatNumber(n)} more`)}
+                  emptyLabel="No conversions to credit in this period."
+                  onSelect={(channel) => set({ [P.channel]: channel })}
+                  rows={(credit?.rows ?? []).map((r) => ({ key: r.channel, left: r.introduced, right: r.visit }))}
                 />
+                <p className="border-t px-4 py-3 text-xs leading-relaxed text-muted-foreground">
+                  Both bars count the same {formatNumber(credit?.total)} conversions — only the credit moves. A channel longer on
+                  the first bar brings people who convert later through something else, which no session-scoped report can show;
+                  longer on the second means it closes people that something else introduced.{" "}
+                  <strong className="font-medium">Introduced them</strong> is the first arrival Fourier recorded, not the first
+                  ever: anyone already visiting before you installed tracking counts from their next visit, so a large Direct bar
+                  here is usually the age of your data rather than a channel.
+                </p>
               </Panel>
             </CardContent>
           </Card>

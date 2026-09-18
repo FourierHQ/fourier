@@ -348,26 +348,36 @@ test("funnel steps are ordered, deduplicated, and honest about other routes", as
   assert.equal(f.steps[1].dropped, 1);
 });
 
-test("crediting the same conversions three ways moves them, never adds to them", async () => {
+test("crediting conversions to what introduced them moves them, never adds to them", async () => {
   const w = await web({ goal: null });
   const credit = await conversionCredit(w);
   const h = await headline(w);
 
-  // The load-bearing property. Entry, first touch and last touch are one set of
-  // converting sessions redistributed, so each must account for all of them and none
-  // may count one twice. A model that double-credits would still look plausible row by
-  // row; only the total gives it away.
-  const sum = (k: "entry" | "first_touch" | "last_touch") => credit.rows.reduce((n, r) => n + r[k], 0);
-  assert.equal(sum("entry"), h.converting_sessions.current, "entry accounts for every conversion");
-  assert.equal(sum("first_touch"), h.converting_sessions.current, "and so does first touch");
-  assert.equal(sum("last_touch"), h.converting_sessions.current, "and so does last touch");
+  // The load-bearing property. The visit a conversion happened in and the channel that
+  // first brought that person are one set of conversions credited two ways, so each
+  // column must account for all of them and neither may count one twice. A model that
+  // double-credits still looks plausible row by row; only the total gives it away.
+  assert.equal(
+    credit.rows.reduce((n, r) => n + r.visit, 0),
+    h.converting_sessions.current,
+    "the converting visit accounts for every conversion",
+  );
+  assert.equal(
+    credit.rows.reduce((n, r) => n + r.introduced, 0),
+    h.converting_sessions.current,
+    "and so does whatever introduced them",
+  );
   assert.equal(credit.total, h.converting_sessions.current);
 
-  // Entry credit is the same number the Acquisition report shows for the same channel,
-  // because it is the same question asked in the same way.
+  // The gap is returned rather than left as arithmetic for the reader, so it has to be
+  // the arithmetic they would have done.
+  for (const r of credit.rows) assert.equal(r.gap, r.introduced - r.visit, `${r.channel}: gap is the difference`);
+
+  // Visit credit is the same number the Acquisition report shows for the same channel,
+  // because it is the same question asked the same way.
   const byChannel = Object.fromEntries((await breakdown(w, "channel", { limit: 50 })).map((r) => [r.key, r.converting_sessions]));
   for (const row of credit.rows) {
-    assert.equal(row.entry, byChannel[row.channel] ?? 0, `entry credit for ${row.channel} matches Acquisition`);
+    assert.equal(row.visit, byChannel[row.channel] ?? 0, `visit credit for ${row.channel} matches Acquisition`);
   }
 
   assert.deepEqual(await conversionCredit(await web({ goal: null, goals: [] })), { rows: [], total: 0 }, "nothing configured credits nothing");

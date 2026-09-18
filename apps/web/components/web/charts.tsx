@@ -318,3 +318,92 @@ export function VisitorMixBar({
     </div>
   );
 }
+
+/**
+ * Two measures of the same categories, as paired bars on one row.
+ *
+ * A table of two numeric columns makes the reader subtract across the row to find what
+ * the report is actually about. Drawing both bars against one scale puts the difference
+ * where it can be seen rather than computed, and the numbers stay beside them for anyone
+ * who needs the exact figure.
+ */
+export function PairedBars({
+  rows,
+  leftLabel,
+  rightLabel,
+  shiftLabel,
+  loading,
+  emptyLabel = "Nothing to compare yet.",
+  onSelect,
+}: {
+  rows: { key: string; left: number; right: number }[] | undefined;
+  leftLabel: string;
+  rightLabel: string;
+  /** How to say the difference in words. Given the size and which way it leans. */
+  shiftLabel: (n: number, leans: "left" | "right") => string;
+  loading?: boolean;
+  emptyLabel?: string;
+  onSelect?: (key: string) => void;
+}) {
+  if (loading && !rows) {
+    return (
+      <div className="space-y-3 p-4">
+        {Array.from({ length: 5 }).map((_, i) => (
+          <Skeleton key={i} className="h-10" />
+        ))}
+      </div>
+    );
+  }
+  if (!rows?.length) return <p className="px-6 py-6 text-sm text-muted-foreground">{emptyLabel}</p>;
+  const max = Math.max(...rows.flatMap((r) => [r.left, r.right]), 1);
+
+  return (
+    <div>
+      <div className="flex items-center justify-end gap-4 px-4 pb-2 text-[11px] text-muted-foreground">
+        <span className="inline-flex items-center gap-1.5">
+          <span className="size-2 rounded-[2px] bg-[var(--chart-1)]" aria-hidden /> {leftLabel}
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          <span className="size-2 rounded-[2px] bg-[var(--chart-3)]" aria-hidden /> {rightLabel}
+        </span>
+      </div>
+      <div className="divide-y">
+        {rows.map((r) => {
+          const shift = r.left - r.right;
+          return (
+            <div
+              key={r.key}
+              className={cn("px-4 py-2.5", onSelect && "cursor-pointer hover:bg-muted/40")}
+              onClick={onSelect ? () => onSelect(r.key) : undefined}
+              role={onSelect ? "button" : undefined}
+              tabIndex={onSelect ? 0 : undefined}
+              onKeyDown={onSelect ? (e) => (e.key === "Enter" || e.key === " ") && onSelect(r.key) : undefined}
+            >
+              <div className="mb-1.5 flex items-baseline justify-between gap-3">
+                <span className="truncate text-sm font-medium">{r.key}</span>
+                <span className="shrink-0 text-xs text-muted-foreground">
+                  {/* The difference, in words. It is the reason the two bars are here,
+                      and a reader should not have to subtract to find it. */}
+                  {shift === 0 ? "even" : shiftLabel(Math.abs(shift), shift > 0 ? "left" : "right")}
+                </span>
+              </div>
+              {([
+                { value: r.left, color: "var(--chart-1)", label: leftLabel },
+                { value: r.right, color: "var(--chart-3)", label: rightLabel },
+              ] as const).map((bar) => (
+                <div key={bar.label} className="flex items-center gap-2">
+                  <div className="h-2.5 flex-1 overflow-hidden rounded-sm bg-muted/50">
+                    <div className="h-full rounded-sm" style={{ width: `${(bar.value / max) * 100}%`, background: bar.color }} />
+                  </div>
+                  <span className="w-8 shrink-0 text-right text-xs tabular-nums" aria-label={`${bar.label}: ${bar.value}`}>
+                    {formatNumber(bar.value)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}

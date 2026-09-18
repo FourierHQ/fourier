@@ -1457,41 +1457,42 @@ export async function pagesInConvertingSessions(w: WebScope, opts: { limit?: num
 
 // ---------- who gets the credit ----------
 
-export type CreditModel = "entry" | "first" | "last";
-
 export interface CreditRow {
   channel: string;
-  /** The channel that brought the visit the conversion happened in. */
-  entry: number;
-  /** The channel that first brought this person to the site, however long ago. */
-  first_touch: number;
-  /** The most recent arrival at or before the converting visit began. */
-  last_touch: number;
+  /** Conversions in visits that arrived from this channel. What Acquisition shows. */
+  visit: number;
+  /** Conversions by people whose first recorded arrival was from this channel. */
+  introduced: number;
+  /** introduced − visit. Positive means it opens more than it closes. */
+  gap: number;
 }
 
 export interface ConversionCredit {
   rows: CreditRow[];
-  /** Identical under all three models. Only the distribution moves. */
+  /** The same under both columns. Only the distribution moves. */
   total: number;
 }
 
 /**
- * The same conversions, credited three ways.
+ * The same conversions, credited two ways: to the visit they happened in, and to
+ * whatever first brought that person to the site.
  *
- * Entry attribution — what the Acquisition report shows — asks where the converting
- * visit came from. It is exact and it systematically under-credits the top of the
- * funnel: a campaign that introduced someone in March gets nothing when they come back
- * in September, type the address, and convert. That visit is Direct, and Direct did not
- * earn it.
+ * Visit credit — what the Acquisition report shows — is exact and systematically
+ * under-credits the top of the funnel. A campaign that introduced someone in March
+ * earns nothing when they come back in September, type the address, and convert: that
+ * visit is Direct, and Direct did not do the work.
  *
- * So the same conversions are also credited to the person's first ever arrival, and to
- * their most recent arrival before the converting visit began. Every model counts the
- * same converting sessions and totals to the same number — which is the point, and why
- * they are shown together rather than one at a time. A channel that is small under
- * entry and large under first touch is doing work the Acquisition page cannot see.
+ * Both columns count the same conversions and total to the same number, so the gap
+ * between them is the whole point and is returned rather than left as arithmetic for
+ * the reader.
+ *
+ * Last touch used to be a third column and was removed: a converting visit raises its
+ * own arrival, so last-touch-before-the-visit is the visit itself for all but the few
+ * conversions that arrive direct. It repeated the first column while costing a third of
+ * the attention the table had to spend.
  *
  * This is the one place in the section that looks across sessions. Everything else is
- * session-scoped on purpose; here the question is explicitly about what happened before.
+ * session-scoped on purpose; here the question is explicitly about what came before.
  */
 export async function conversionCredit(w: WebScope, opts: { limit?: number } = {}): Promise<ConversionCredit> {
   if (!hasGoal(w)) return { rows: [], total: 0 };
@@ -1499,8 +1500,8 @@ export async function conversionCredit(w: WebScope, opts: { limit?: number } = {
   const limit = Math.min(Math.max(opts.limit ?? 12, 1), 50);
 
   // A touch is an arrival by definition, so it always has an entry page to classify;
-  // the host comes off the landing URL. Repeated rows for one arrival are harmless here
-  // because argMin and argMax over them return that arrival's channel either way.
+  // the host comes off the landing URL. Repeated rows for one arrival are harmless
+  // because argMin over them returns that arrival's channel either way.
   const touchChannel = channelSql({
     pageviews: "1",
     utm_source: "utm_source",
@@ -1513,42 +1514,29 @@ export async function conversionCredit(w: WebScope, opts: { limit?: number } = {
   const rows = await q<Row>(
     w.scope,
     `${cte},
-     touch_channels AS (
-       SELECT person_id, timestamp, kind, ${touchChannel} AS channel
+     person_first AS (
+       SELECT person_id, argMin(${touchChannel}, timestamp) AS channel
        FROM touches_resolved
        WHERE project_id = ${project}
+       GROUP BY person_id
      ),
-     person_first AS (
-       SELECT person_id, argMin(channel, timestamp) AS channel FROM touch_channels GROUP BY person_id
-     ),
-     -- Last touch looks only at arrivals that carry a claim. A converting visit raises
-     -- its own arrival, so without this the newest touch at or before it is always
-     -- itself and last touch collapses into entry, which is not a second model — it is
-     -- the same column twice. Ignoring direct here is what Fourier's existing
-     -- attribution already does, for the same reason.
-     marketing_touches AS (SELECT person_id, timestamp, channel FROM touch_channels WHERE kind != 'direct'),
      converting AS (
-       SELECT session_id, person_id, started_at, channel AS entry_channel
+       SELECT session_id, person_id, channel AS visit_channel
        FROM scoped WHERE period = 'current' AND converted = 1
      ),
      credited AS (
        SELECT
          c.session_id AS session_id,
-         c.entry_channel AS entry_channel,
-         ifNull(f.channel, c.entry_channel) AS first_channel,
-         -- ASOF picks the newest qualifying touch at or before the visit started. A
-         -- person with nothing but direct arrivals keeps their entry, so every
+         c.visit_channel AS visit_channel,
+         -- Someone with no recorded touch keeps their visit's channel, so every
          -- conversion is credited to something rather than dropping out of the total.
-         if(t.channel = '', c.entry_channel, t.channel) AS last_channel
+         ifNull(nullIf(f.channel, ''), c.visit_channel) AS first_channel
        FROM converting AS c
        LEFT JOIN person_first AS f ON f.person_id = c.person_id
-       ASOF LEFT JOIN marketing_touches AS t ON c.person_id = t.person_id AND c.started_at >= t.timestamp
      )
-     SELECT 'entry' AS model, entry_channel AS channel, uniqExact(session_id) AS n FROM credited GROUP BY channel
+     SELECT 'visit' AS model, visit_channel AS channel, uniqExact(session_id) AS n FROM credited GROUP BY channel
      UNION ALL
-     SELECT 'first', first_channel, uniqExact(session_id) FROM credited GROUP BY first_channel
-     UNION ALL
-     SELECT 'last', last_channel, uniqExact(session_id) FROM credited GROUP BY last_channel`,
+     SELECT 'first', first_channel, uniqExact(session_id) FROM credited GROUP BY first_channel`,
     params,
   );
 
@@ -1556,25 +1544,24 @@ export async function conversionCredit(w: WebScope, opts: { limit?: number } = {
   const get = (channel: string) => {
     const existing = byChannel.get(channel);
     if (existing) return existing;
-    const created: CreditRow = { channel, entry: 0, first_touch: 0, last_touch: 0 };
+    const created: CreditRow = { channel, visit: 0, introduced: 0, gap: 0 };
     byChannel.set(channel, created);
     return created;
   };
   for (const r of rows) {
     const row = get(String(r.channel) || "Unattributed");
-    const n = num(r.n);
-    if (r.model === "entry") row.entry = n;
-    else if (r.model === "first") row.first_touch = n;
-    else row.last_touch = n;
+    if (r.model === "visit") row.visit = num(r.n);
+    else row.introduced = num(r.n);
   }
-  const all = [...byChannel.values()].sort((a, b) => b.entry + b.first_touch - (a.entry + a.first_touch));
+  const all = [...byChannel.values()].map((r) => ({ ...r, gap: r.introduced - r.visit }));
   return {
-    rows: all.slice(0, limit),
-    // Taken from entry, which every converting session has. The three models are the
-    // same sessions redistributed, so any of them would give this number.
-    total: all.reduce((n, r) => n + r.entry, 0),
+    // Ranked by the larger of the two, so a channel that only shows up on one side is
+    // not buried under channels that are middling on both.
+    rows: all.sort((a, b) => Math.max(b.visit, b.introduced) - Math.max(a.visit, a.introduced)).slice(0, limit),
+    total: all.reduce((n, r) => n + r.visit, 0),
   };
 }
+
 export interface ConversionPageRow {
   path: string;
   title: string;
