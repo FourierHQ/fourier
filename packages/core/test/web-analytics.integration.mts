@@ -42,6 +42,9 @@ import {
   allPages,
   visitorMix,
   funnel,
+  conversionCredit,
+  pagesInConvertingSessions,
+  pagesLeadingToConversions,
   goalSummary,
   supportingActions,
   availability,
@@ -343,6 +346,75 @@ test("funnel steps are ordered, deduplicated, and honest about other routes", as
   assert.equal(f.total_conversions, 2, "s4 and s5 both booked");
   assert.ok(f.total_conversions > f.steps[2].sessions, "one booking arrived by another route, and the funnel says so");
   assert.equal(f.steps[1].dropped, 1);
+});
+
+test("crediting the same conversions three ways moves them, never adds to them", async () => {
+  const w = await web({ goal: null });
+  const credit = await conversionCredit(w);
+  const h = await headline(w);
+
+  // The load-bearing property. Entry, first touch and last touch are one set of
+  // converting sessions redistributed, so each must account for all of them and none
+  // may count one twice. A model that double-credits would still look plausible row by
+  // row; only the total gives it away.
+  const sum = (k: "entry" | "first_touch" | "last_touch") => credit.rows.reduce((n, r) => n + r[k], 0);
+  assert.equal(sum("entry"), h.converting_sessions.current, "entry accounts for every conversion");
+  assert.equal(sum("first_touch"), h.converting_sessions.current, "and so does first touch");
+  assert.equal(sum("last_touch"), h.converting_sessions.current, "and so does last touch");
+  assert.equal(credit.total, h.converting_sessions.current);
+
+  // Entry credit is the same number the Acquisition report shows for the same channel,
+  // because it is the same question asked in the same way.
+  const byChannel = Object.fromEntries((await breakdown(w, "channel", { limit: 50 })).map((r) => [r.key, r.converting_sessions]));
+  for (const row of credit.rows) {
+    assert.equal(row.entry, byChannel[row.channel] ?? 0, `entry credit for ${row.channel} matches Acquisition`);
+  }
+
+  assert.deepEqual(await conversionCredit(await web({ goal: null, goals: [] })), { rows: [], total: 0 }, "nothing configured credits nothing");
+});
+
+test("the page that led to a conversion is never the page it happened on", async () => {
+  const w = await web({ goal: null });
+  const rows = await pagesLeadingToConversions(w, { limit: 20 });
+  const byPath = Object.fromEntries(rows.map((r) => [r.is_entry ? "(entry)" : r.path, r.converting_sessions]));
+
+  // s1 read "/" and then /pricing, where it signed up — so "/" is what led to it, and
+  // /pricing, the page the conversion fired on, must not be credited for sending
+  // anyone to itself. That circularity is the whole reason this report exists.
+  assert.equal(byPath["/"], 1);
+  assert.ok(!("/pricing" in byPath), "the page a conversion happened on is not a page that led to it");
+  assert.ok(!("/demo" in byPath), "nor is /demo, where the other two conversions fired");
+
+  // s4 and s5 both converted on the page they arrived on. That is an answer — the
+  // landing page did all the work — so they get a row rather than vanishing, which
+  // would leave the shares describing fewer visits than the heading claims.
+  assert.equal(byPath["(entry)"], 2);
+  const total = rows.reduce((n, r) => n + r.converting_sessions, 0);
+  const h = await headline(w);
+  assert.equal(total, h.converting_sessions.current, "every converting visit is accounted for exactly once");
+  assert.ok(Math.abs(rows.reduce((n, r) => n + r.share, 0) - 100) < 0.01, "and the shares add to a hundred");
+
+  assert.deepEqual(await pagesLeadingToConversions(await web({ goal: null, goals: [] })), [], "no goal means nothing to rank");
+});
+
+test("pages in converting visits are shown against how often every visit sees them", async () => {
+  const w = await web({ goal: null });
+  const rows = await pagesInConvertingSessions(w, { limit: 20 });
+  const byPath = Object.fromEntries(rows.map((r) => [r.path, r]));
+
+  // /demo is on the path of both demo bookings and is otherwise rarely visited, so it
+  // should be over-represented. The home page is seen by nearly everyone and should not
+  // look impressive just because it is everywhere.
+  assert.ok(byPath["/demo"], "a page the converting visits went through");
+  assert.ok(byPath["/demo"].lift !== null && byPath["/demo"].lift > 1, "over-represented in converting visits");
+
+  for (const r of rows) {
+    // A page cannot appear in more converting visits than visits.
+    assert.ok(r.converting_sessions <= r.sessions, `${r.path}: converting ${r.converting_sessions} <= sessions ${r.sessions}`);
+    assert.ok(r.converting_sessions > 0, "rows with no conversions are not worth a line");
+  }
+
+  assert.deepEqual(await pagesInConvertingSessions(await web({ goal: null, goals: [] })), [], "no goal means nothing to rank");
 });
 
 test("supporting actions are reported separately and never added to conversions", async () => {

@@ -22,7 +22,7 @@
  */
 
 import { getDataClient } from "./client";
-import { browserSql, deviceSql } from "./classify";
+import { browserSql, channelSql, deviceSql } from "./classify";
 import {
   type Goal,
   type PageGroup,
@@ -218,10 +218,7 @@ function sessionBase(w: WebScope): Base {
   // Engagement's goal leg reads EVERY primary goal, never the selected one. Otherwise
   // switching which goal you are looking at would silently move the engagement rate.
   const anyPrimary = primaries.length ? primaries.map((g) => matchSql(g.config, p)).join(" OR ") : "0";
-  // With no goal named, a conversion is any primary goal — counted as distinct sessions,
-  // so a visit that signs up AND books a demo is one converting session and not two.
-  // Summing the goals instead would produce a total that exceeds the visits it came from.
-  const selected = w.goal ? matchSql(w.goal.config, p) : anyPrimary;
+  const selected = conversionMatchSql(w, p);
 
   const filterParts: string[] = [`s.project_id = ${project}`, window];
   if (!filters.includeBots) filterParts.push("s.is_bot = 0");
@@ -306,6 +303,22 @@ function sessionBase(w: WebScope): Base {
   scoped AS (SELECT * FROM base WHERE 1 = 1 ${visitorFilter})`;
 
   return { cte, params: p.values, project, scanFrom, scanTo };
+}
+
+/**
+ * What counts as a conversion, as a predicate over one event row.
+ *
+ * With no goal named it is any primary goal — counted as distinct sessions downstream,
+ * so a visit that signs up AND books a demo is one converting session and not two.
+ * Summing the goals would produce a total larger than the visits it came from.
+ *
+ * Shared with the reports that have to find the conversion event itself rather than
+ * just flag the session, so "where did it happen" can never drift from "did it happen".
+ */
+export function conversionMatchSql(w: WebScope, p: Params): string {
+  if (w.goal) return matchSql(w.goal.config, p);
+  const primaries = primaryGoals(w.goals);
+  return primaries.length ? primaries.map((g) => matchSql(g.config, p)).join(" OR ") : "0";
 }
 
 /** Standard per-period aggregate columns, so every report counts them identically. */
@@ -645,11 +658,22 @@ export interface LandingPageRow {
  * going to convert will report a spectacular rate and tell you nothing about whether
  * the page works as an entry point.
  */
-export async function landingPages(w: WebScope, opts: { limit?: number; groupBy?: "page" | "group" } = {}): Promise<LandingPageRow[]> {
+export async function landingPages(
+  w: WebScope,
+  opts: { limit?: number; groupBy?: "page" | "group"; orderBy?: "landing_sessions" | "converting_sessions" } = {},
+): Promise<LandingPageRow[]> {
   const { cte, params } = sessionBase(w);
   const p = new Params("lp");
   const key = opts.groupBy === "group" ? pageGroupSql(w.pageGroups, "entry_path", p) : "entry_path";
   const limit = Math.min(Math.max(opts.limit ?? 20, 1), 200);
+  // Ranked by conversions, the busiest page is not usually the top row — which is the
+  // point of asking. Sessions break the tie so a page with one of each does not outrank
+  // a page with one conversion from a hundred visits by accident of ordering.
+  const byConversions = opts.orderBy === "converting_sessions";
+  const order = byConversions ? "converting DESC, sessions DESC" : "sessions DESC";
+  // Ranked by conversions, a page with none is not a low-ranking row — it is not a row.
+  // Ranked by traffic it is, because then the question is where people land.
+  const having = byConversions ? "converting > 0" : "sessions > 0 OR prev_sessions > 0";
 
   const rows = await q<Row>(
     w.scope,
@@ -664,8 +688,8 @@ export async function landingPages(w: WebScope, opts: { limit?: number; groupBy?
      FROM scoped
      WHERE entry_path != ''
      GROUP BY key
-     HAVING sessions > 0 OR prev_sessions > 0
-     ORDER BY sessions DESC
+     HAVING ${having}
+     ORDER BY ${order}
      LIMIT ${limit}`,
     { ...params, ...p.values },
   );
@@ -1337,4 +1361,317 @@ export async function filterValues(w: WebScope): Promise<FilterValues> {
     mediums: list(r?.mediums),
     countries: list(r?.countries),
   };
+}
+
+// ---------- which pages the converting visits went through ----------
+
+export interface ConvertingPageRow {
+  path: string;
+  title: string;
+  /** Converting sessions that included this page at any point. */
+  converting_sessions: number;
+  /** Share of all converting sessions that included it, 0-100. */
+  converting_share: number;
+  /** Every session that included it, converting or not — the baseline. */
+  sessions: number;
+  /** Share of all sessions that included it, 0-100. */
+  session_share: number;
+  /**
+   * converting_share / session_share. Above 1 means the page turns up more often in
+   * visits that converted than in visits generally. Null when the baseline is empty.
+   */
+  lift: number | null;
+}
+
+/**
+ * Pages that converting visits passed through, against how often every visit passes
+ * through them.
+ *
+ * The baseline is the whole report. "Seen in 62% of converting visits" is not a finding
+ * — the home page is seen in 90% of everything — and a bare ranking of pages by
+ * conversions is just a ranking of popular pages wearing a conversion label. Set against
+ * the share of all visits, the same number becomes readable: 62% against a 31% baseline
+ * is a page that converting visits seek out.
+ *
+ * It remains an association and the UI says so. A visit that converted and passed
+ * through /pricing does not tell us /pricing did anything; people who are going to
+ * convert read the pricing page, and people who read the pricing page convert, and this
+ * query cannot separate the two. It is a place to look, not a conclusion.
+ */
+export async function pagesInConvertingSessions(w: WebScope, opts: { limit?: number; groupBy?: "page" | "group" } = {}): Promise<ConvertingPageRow[]> {
+  if (!hasGoal(w)) return [];
+  const { cte, params, project, scanFrom, scanTo } = sessionBase(w);
+  const p = new Params("cp");
+  const key = opts.groupBy === "group" ? pageGroupSql(w.pageGroups, "e.path", p) : normalizedPath("e.path");
+  const limit = Math.min(Math.max(opts.limit ?? 10, 1), 100);
+
+  const rows = await q<Row>(
+    w.scope,
+    `${cte},
+     totals AS (
+       SELECT uniqExactIf(session_id, converted = 1) AS converting, uniqExact(session_id) AS sessions
+       FROM scoped WHERE period = 'current'
+     ),
+     page_sessions AS (
+       -- One row per (page, session): a visit that saw a page four times still only
+       -- counts once towards it, the same way it converts only once.
+       SELECT DISTINCT ${key} AS key, b.session_id AS session_id, b.converted AS converted, e.title AS title
+       FROM events AS e
+       INNER JOIN scoped AS b ON b.session_id = e.session_id
+       WHERE e.project_id = ${project} AND e.type = 'page' AND b.period = 'current'
+         AND e.timestamp >= ${scanFrom} AND e.timestamp < ${scanTo}
+     )
+     SELECT
+       key,
+       anyIf(title, title != '') AS title,
+       uniqExactIf(session_id, converted = 1) AS converting,
+       uniqExact(session_id) AS sessions,
+       (SELECT converting FROM totals) AS total_converting,
+       (SELECT sessions FROM totals) AS total_sessions
+     FROM page_sessions
+     GROUP BY key
+     HAVING converting > 0
+     ORDER BY converting DESC, sessions ASC
+     LIMIT ${limit}`,
+    { ...params, ...p.values },
+  );
+
+  return rows.map((r) => {
+    const converting = num(r.converting);
+    const sessions = num(r.sessions);
+    const totalConverting = num(r.total_converting);
+    const totalSessions = num(r.total_sessions);
+    const convertingShare = totalConverting > 0 ? (converting / totalConverting) * 100 : 0;
+    const sessionShare = totalSessions > 0 ? (sessions / totalSessions) * 100 : 0;
+    return {
+      path: String(r.key),
+      title: String(r.title ?? ""),
+      converting_sessions: converting,
+      converting_share: convertingShare,
+      sessions,
+      session_share: sessionShare,
+      lift: sessionShare > 0 ? convertingShare / sessionShare : null,
+    };
+  });
+}
+
+// ---------- who gets the credit ----------
+
+export type CreditModel = "entry" | "first" | "last";
+
+export interface CreditRow {
+  channel: string;
+  /** The channel that brought the visit the conversion happened in. */
+  entry: number;
+  /** The channel that first brought this person to the site, however long ago. */
+  first_touch: number;
+  /** The most recent arrival at or before the converting visit began. */
+  last_touch: number;
+}
+
+export interface ConversionCredit {
+  rows: CreditRow[];
+  /** Identical under all three models. Only the distribution moves. */
+  total: number;
+}
+
+/**
+ * The same conversions, credited three ways.
+ *
+ * Entry attribution — what the Acquisition report shows — asks where the converting
+ * visit came from. It is exact and it systematically under-credits the top of the
+ * funnel: a campaign that introduced someone in March gets nothing when they come back
+ * in September, type the address, and convert. That visit is Direct, and Direct did not
+ * earn it.
+ *
+ * So the same conversions are also credited to the person's first ever arrival, and to
+ * their most recent arrival before the converting visit began. Every model counts the
+ * same converting sessions and totals to the same number — which is the point, and why
+ * they are shown together rather than one at a time. A channel that is small under
+ * entry and large under first touch is doing work the Acquisition page cannot see.
+ *
+ * This is the one place in the section that looks across sessions. Everything else is
+ * session-scoped on purpose; here the question is explicitly about what happened before.
+ */
+export async function conversionCredit(w: WebScope, opts: { limit?: number } = {}): Promise<ConversionCredit> {
+  if (!hasGoal(w)) return { rows: [], total: 0 };
+  const { cte, params, project } = sessionBase(w);
+  const limit = Math.min(Math.max(opts.limit ?? 12, 1), 50);
+
+  // A touch is an arrival by definition, so it always has an entry page to classify;
+  // the host comes off the landing URL. Repeated rows for one arrival are harmless here
+  // because argMin and argMax over them return that arrival's channel either way.
+  const touchChannel = channelSql({
+    pageviews: "1",
+    utm_source: "utm_source",
+    utm_medium: "utm_medium",
+    utm_campaign: "utm_campaign",
+    referrer_host: "referrer_host",
+    entry_host: "domain(landing_url)",
+  });
+
+  const rows = await q<Row>(
+    w.scope,
+    `${cte},
+     touch_channels AS (
+       SELECT person_id, timestamp, kind, ${touchChannel} AS channel
+       FROM touches_resolved
+       WHERE project_id = ${project}
+     ),
+     person_first AS (
+       SELECT person_id, argMin(channel, timestamp) AS channel FROM touch_channels GROUP BY person_id
+     ),
+     -- Last touch looks only at arrivals that carry a claim. A converting visit raises
+     -- its own arrival, so without this the newest touch at or before it is always
+     -- itself and last touch collapses into entry, which is not a second model — it is
+     -- the same column twice. Ignoring direct here is what Fourier's existing
+     -- attribution already does, for the same reason.
+     marketing_touches AS (SELECT person_id, timestamp, channel FROM touch_channels WHERE kind != 'direct'),
+     converting AS (
+       SELECT session_id, person_id, started_at, channel AS entry_channel
+       FROM scoped WHERE period = 'current' AND converted = 1
+     ),
+     credited AS (
+       SELECT
+         c.session_id AS session_id,
+         c.entry_channel AS entry_channel,
+         ifNull(f.channel, c.entry_channel) AS first_channel,
+         -- ASOF picks the newest qualifying touch at or before the visit started. A
+         -- person with nothing but direct arrivals keeps their entry, so every
+         -- conversion is credited to something rather than dropping out of the total.
+         if(t.channel = '', c.entry_channel, t.channel) AS last_channel
+       FROM converting AS c
+       LEFT JOIN person_first AS f ON f.person_id = c.person_id
+       ASOF LEFT JOIN marketing_touches AS t ON c.person_id = t.person_id AND c.started_at >= t.timestamp
+     )
+     SELECT 'entry' AS model, entry_channel AS channel, uniqExact(session_id) AS n FROM credited GROUP BY channel
+     UNION ALL
+     SELECT 'first', first_channel, uniqExact(session_id) FROM credited GROUP BY first_channel
+     UNION ALL
+     SELECT 'last', last_channel, uniqExact(session_id) FROM credited GROUP BY last_channel`,
+    params,
+  );
+
+  const byChannel = new Map<string, CreditRow>();
+  const get = (channel: string) => {
+    const existing = byChannel.get(channel);
+    if (existing) return existing;
+    const created: CreditRow = { channel, entry: 0, first_touch: 0, last_touch: 0 };
+    byChannel.set(channel, created);
+    return created;
+  };
+  for (const r of rows) {
+    const row = get(String(r.channel) || "Unattributed");
+    const n = num(r.n);
+    if (r.model === "entry") row.entry = n;
+    else if (r.model === "first") row.first_touch = n;
+    else row.last_touch = n;
+  }
+  const all = [...byChannel.values()].sort((a, b) => b.entry + b.first_touch - (a.entry + a.first_touch));
+  return {
+    rows: all.slice(0, limit),
+    // Taken from entry, which every converting session has. The three models are the
+    // same sessions redistributed, so any of them would give this number.
+    total: all.reduce((n, r) => n + r.entry, 0),
+  };
+}
+
+export interface LeadingPageRow {
+  path: string;
+  title: string;
+  /** Converting sessions whose last page before the conversion page was this one. */
+  converting_sessions: number;
+  /** Share of all converting sessions, 0-100. */
+  share: number;
+  /** True for the row counting visits that converted on the page they arrived on. */
+  is_entry: boolean;
+}
+
+/**
+ * The page people were on immediately before the one where they converted.
+ *
+ * "Top converting pages" read literally is circular: if the goal fires on /book-a-demo
+ * then /book-a-demo tops the list by construction, and the report has told you where
+ * your form is. The page worth knowing is the one that sent them there — the last thing
+ * they read before the page the conversion happened on.
+ *
+ * Which page that is comes out of the data rather than out of goal configuration: the
+ * conversion event carries the path it fired on, and everything on that path is skipped
+ * when looking back. So a goal that fires on a thank-you page credits the form page, and
+ * a goal that fires on the form page credits whatever led to the form, without either
+ * having to be declared.
+ *
+ * Visits that converted on the page they arrived on have no earlier page. They are a
+ * row of their own rather than dropped, because "the landing page did all of it" is an
+ * answer, and silently omitting them would make the percentages describe a smaller
+ * population than the one in the heading.
+ */
+export async function pagesLeadingToConversions(w: WebScope, opts: { limit?: number; groupBy?: "page" | "group" } = {}): Promise<LeadingPageRow[]> {
+  if (!hasGoal(w)) return [];
+  const { cte, params, project, scanFrom, scanTo } = sessionBase(w);
+  const p = new Params("lg");
+  const conversion = conversionMatchSql(w, p);
+  const key = opts.groupBy === "group" ? pageGroupSql(w.pageGroups, "page", p) : "page";
+  const limit = Math.min(Math.max(opts.limit ?? 10, 1), 100);
+
+  const rows = await q<Row>(
+    w.scope,
+    `${cte},
+     conv_events AS (
+       -- The first completion in each visit, and the page it fired on. First and not
+       -- last, because the visit converted the moment it first completed the goal, and
+       -- anything after that is what someone did having already converted.
+       SELECT
+         e.session_id AS session_id,
+         min(e.timestamp) AS at,
+         argMin(${normalizedPath("e.path")}, e.timestamp) AS conv_path
+       FROM events AS e
+       INNER JOIN scoped AS b ON b.session_id = e.session_id
+       WHERE e.project_id = ${project} AND b.period = 'current'
+         AND e.timestamp >= ${scanFrom} AND e.timestamp < ${scanTo}
+         AND ${conversion}
+       GROUP BY e.session_id
+     ),
+     views AS (
+       SELECT e.session_id AS session_id, ${normalizedPath("e.path")} AS path, e.timestamp AS ts, e.title AS title
+       FROM events AS e
+       INNER JOIN scoped AS b ON b.session_id = e.session_id
+       WHERE e.project_id = ${project} AND e.type = 'page' AND b.period = 'current'
+         AND e.timestamp >= ${scanFrom} AND e.timestamp < ${scanTo}
+     ),
+     leading AS (
+       SELECT
+         c.session_id AS session_id,
+         argMaxIf(v.path, v.ts, v.ts <= c.at AND v.path != c.conv_path) AS page,
+         anyIf(v.title, v.ts <= c.at AND v.path != c.conv_path AND v.title != '') AS title,
+         countIf(v.ts <= c.at AND v.path != c.conv_path) AS earlier
+       FROM conv_events AS c
+       LEFT JOIN views AS v ON v.session_id = c.session_id
+       GROUP BY c.session_id
+     ),
+     totals AS (SELECT uniqExact(session_id) AS n FROM leading)
+     SELECT
+       if(earlier = 0, '', ${key}) AS key,
+       anyIf(title, title != '') AS title,
+       uniqExact(session_id) AS sessions,
+       (SELECT n FROM totals) AS total
+     FROM leading
+     GROUP BY key
+     ORDER BY sessions DESC
+     LIMIT ${limit}`,
+    { ...params, ...p.values },
+  );
+
+  return rows.map((r) => {
+    const sessions = num(r.sessions);
+    const total = num(r.total);
+    const path = String(r.key ?? "");
+    return {
+      path,
+      title: String(r.title ?? ""),
+      converting_sessions: sessions,
+      share: total > 0 ? (sessions / total) * 100 : 0,
+      is_entry: path === "",
+    };
+  });
 }

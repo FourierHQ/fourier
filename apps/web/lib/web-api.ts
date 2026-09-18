@@ -16,6 +16,9 @@ import type {
   PageRow,
   RatePoint,
   SeriesPoint,
+  ConversionCredit,
+  ConvertingPageRow,
+  LeadingPageRow,
   SupportingActionRow,
   TrafficSeries,
   VisitorMix,
@@ -27,6 +30,7 @@ import { useWebState } from "./web-state";
 export type {
   Availability,
   BreakdownRow,
+  CreditRow,
   Delta,
   Funnel,
   FunnelStep,
@@ -41,6 +45,9 @@ export type {
   RateDelta,
   RatePoint,
   SeriesPoint,
+  ConversionCredit,
+  ConvertingPageRow,
+  LeadingPageRow,
   SupportingActionRow,
   TrafficSeries,
   VisitorMix,
@@ -139,13 +146,20 @@ export interface PageDetailReport {
   detail: Settled<PageDetail>;
 }
 
-export interface ConversionsReport extends Report {
+interface ConversionsReportBase extends Report {
   headline: Settled<Headline>;
   goals: Settled<GoalSummaryRow[]>;
   trend: Settled<RatePoint[]>;
   funnel: Settled<Funnel>;
   supporting: Settled<SupportingActionRow[]>;
+  credit: Settled<ConversionCredit>;
+  landing: Settled<LandingPageRow[]>;
 }
+
+/** Discriminated on `pages` for the reason PagesReport is — the two modes have different rows. */
+export type ConversionsReport =
+  | (ConversionsReportBase & { pages: "leading"; page_rows: Settled<LeadingPageRow[]> })
+  | (ConversionsReportBase & { pages: "anywhere"; page_rows: Settled<ConvertingPageRow[]> });
 
 /**
  * The zone the reader's days are measured in.
@@ -187,7 +201,7 @@ export const useWebAcquisition = (groupBy: string, sort: string) => useReport<Ac
 
 export const useWebPages = (tab: string, groupBy: string) => useReport<PagesReport>("pages", { tab, group_by: groupBy });
 
-export const useWebConversions = () => useReport<ConversionsReport>("conversions");
+export const useWebConversions = (pages: string) => useReport<ConversionsReport>("conversions", { pages });
 
 export function useWebPageDetail(path: string | null, basis: "landing" | "viewers") {
   const environment = useEnvironmentValue();
