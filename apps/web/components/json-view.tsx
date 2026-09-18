@@ -27,7 +27,9 @@ function Value({ v }: { v: unknown }) {
 }
 
 export function JsonView({ data, className, nested }: { data: Record<string, unknown>; className?: string; nested?: boolean }) {
-  const entries = Object.entries(data ?? {});
+  // A key set to undefined is a field this event does not have, not a field whose value is
+  // the word "undefined" — callers write `x || undefined` meaning "leave it out".
+  const entries = Object.entries(data ?? {}).filter(([, v]) => v !== undefined);
   if (entries.length === 0) return <span className={cn("text-xs text-muted-foreground", className)}>{"{}"}</span>;
   return (
     <div className={cn("font-mono text-xs leading-relaxed", !nested && "rounded-md bg-muted/40 p-3", className)}>
@@ -47,19 +49,33 @@ export function JsonView({ data, className, nested }: { data: Record<string, unk
   );
 }
 
-/** Compact one-line preview like `plan: pro · amount: 4900` */
-export function JsonPreview({ data, max = 3, className }: { data: Record<string, unknown>; max?: number; className?: string }) {
-  const entries = Object.entries(data ?? {}).filter(([k]) => !["url", "path", "title", "referrer", "search"].includes(k));
+/** Keys a preview leaves out: page context, shown in its own column or not at all. */
+const PAGE_KEYS = ["url", "path", "title", "referrer", "search"];
+
+/**
+ * One property, plus a count of the rest — `plan: pro  +3`. Showing three at a time
+ * meant each one truncated to nothing; one property that fits reads better than three
+ * that don't, and the badge says how much more is behind the row.
+ */
+export function JsonPreview({ data, max = 1, omit = PAGE_KEYS, className }: { data: Record<string, unknown>; max?: number; omit?: string[]; className?: string }) {
+  const entries = Object.entries(data ?? {}).filter(([k]) => !omit.includes(k));
   if (entries.length === 0) return null;
+  const rest = entries.length - max;
   return (
-    <span className={cn("truncate font-mono text-xs text-muted-foreground", className)}>
-      {entries.slice(0, max).map(([k, v], i) => (
-        <span key={k}>
-          {i > 0 && <span className="mx-1.5 opacity-50">·</span>}
-          {k}: <span className="text-foreground/80">{typeof v === "object" ? JSON.stringify(v) : String(v)}</span>
+    <span className={cn("flex min-w-0 items-center gap-1.5 font-mono text-xs text-muted-foreground", className)}>
+      <span className="truncate">
+        {entries.slice(0, max).map(([k, v], i) => (
+          <span key={k}>
+            {i > 0 && <span className="mx-1.5 opacity-50">·</span>}
+            {k}: <span className="text-foreground/80">{typeof v === "object" ? JSON.stringify(v) : String(v)}</span>
+          </span>
+        ))}
+      </span>
+      {rest > 0 && (
+        <span className="shrink-0 rounded-full bg-muted px-1.5 text-[10px] leading-4 text-muted-foreground/70" title={`${rest} more ${rest === 1 ? "property" : "properties"}`}>
+          +{rest}
         </span>
-      ))}
-      {entries.length > max && <span className="ml-1.5 opacity-60">+{entries.length - max}</span>}
+      )}
     </span>
   );
 }
