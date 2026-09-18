@@ -183,6 +183,31 @@ Every arrival is a **touch**: the first message of a session, and any page view 
 
 Sessions come from the SDK: 30 minutes of inactivity starts a new one, configurable with `sessionTimeout`. Server-side events have no session and only create touches when they carry UTMs.
 
+### Web Analytics
+
+An opinionated report on how a marketing website is doing, in four pages and no dashboard to build: **Overview**, **Acquisition**, **Pages**, **Conversions**. Campaigns, referrers, devices, browsers, geography and page groups live inside those four as groupings, drilldowns and filters, because a sidebar of fourteen reports is one nobody finishes reading.
+
+One control bar runs the section — source, date range, comparison, conversion goal, filters — and it lives entirely in the URL, so a view can be bookmarked or sent to someone and moving between reports keeps what you were looking at.
+
+"Source" means what it means everywhere else in Fourier: a website or app with its own write key. The campaign parameter that wants the same word is reported as **campaign source**, which is what it is — it exists only where a link was tagged, so most traffic has none.
+
+Everything is counted in **sessions**, off one rollup that the `sessions` materialised view maintains. A few consequences are worth knowing, because they are what make the numbers hold up:
+
+- **A conversion rate shows its working.** "2.5% — 12 of 480 sessions", never a bare percentage. A rate with nothing to divide by is unavailable, not 0%. A previous period of zero reads "New", not +∞%.
+- **A session converts once**, however many times the goal fires inside it.
+- **Landing-page conversion means conversion in visits that started there** — not conversion among everyone who happened to see the page. The All pages tab carries no conversion column at all, because viewing a page is not evidence it caused anything.
+- **Bots and channels are decided when you read, not when the event arrives.** Both are derived in the `sessions_resolved` view from the stored user agent and campaign, so correcting either re-reports every visit already recorded rather than only the ones that arrive next.
+- **Engagement is measured, not inferred.** The SDK times foreground attention, stops for a hidden or idle tab, and reports it on leaving the page. Where it was never measured the reports say so rather than showing zero seconds. Turn it off with `engagement: false`.
+- **Nothing is invented.** No traffic, no goal configured, a goal nobody has completed, a measurement the SDK never sent, and a filter that matches nothing are five different states with five different messages.
+- **"Which page drives conversions" is two counts, not one.** A page is credited both for conversions that happened *on* it and, separately, for conversions on the page a visitor went to *next*. Neither is enough alone: a dedicated `/book-a-demo` tops the first by construction and tells you nothing, while the same form embedded on a product page makes that page the one doing the work. Both columns are observations, they are never added together, and a page showing both is a content page with a form in it.
+- **Conversions are also credited to what first brought the person**, split by whether they converted then or came back later. Everywhere else credits the visit a conversion happened in, which under-credits whatever introduced someone who returned weeks later to convert. The two segments add to the row's total rather than sitting beside each other as a comparison — a channel with a tail of returns is seeding demand some other visit gets the credit for. "First" means the first arrival Fourier recorded, so on a young install nearly everything is a first visit.
+
+Goals, supporting actions and page groups are defined in the dashboard and stored once for the whole install, not per environment — so a goal can be checked in preview before the tracking that fires it ships. They are compiled into SQL when a report runs, which means naming a goal a week after installing tracking reports the week you already have.
+
+A **primary goal** is something the site exists to produce and is the only thing a conversion rate counts. A **supporting action** — a CTA click, a form start, a download — is reported on its own and never added to a conversion total.
+
+Reports count **all conversions** by default: a site with three goals answers "how is it doing" with the visits that completed any of them, counted once each — a visit that signs up and books a demo is one converting session, not two. Narrowing to a single goal is a refinement, and it is a separate control from the filters on purpose: a filter changes which visits are counted, while the goal changes only what counts as a conversion. The session total stays exactly where it was, which is visible in every rate's denominator.
+
 ## Accounts and access
 
 Two kinds of credential, because sending data and reading it are different jobs.
@@ -222,7 +247,7 @@ Tools: `list_projects`, `list_sources`, `get_overview`, `list_event_names`, `lis
 
 ## Data model
 
-ClickHouse, all times UTC. `events` is the source of truth, one row per message, tagged with the `source_id` it arrived on. `distinct_id` is `user_id` when identified, otherwise `anonymous_id`; `person_id` is the resolved person. Query `events_resolved` rather than `events` for anything per person. `user_traits`, `group_traits`, and `identities` hold merged traits and id links. Location lives on the event (`country`, `region`, `city`, `latitude`, `longitude`) and is rolled up to "last seen in" per person. Materialised views keep `user_stats`, `group_stats`, `group_members`, `event_stats_daily`, and `touches` current on insert. Full description: `GET /api/projects/default/schema` or the `describe_schema` MCP tool.
+ClickHouse, all times UTC. `events` is the source of truth, one row per message, tagged with the `source_id` it arrived on. `distinct_id` is `user_id` when identified, otherwise `anonymous_id`; `person_id` is the resolved person. Query `events_resolved` rather than `events` for anything per person. `user_traits`, `group_traits`, and `identities` hold merged traits and id links. Location lives on the event (`country`, `region`, `city`, `latitude`, `longitude`) and is rolled up to "last seen in" per person. Materialised views keep `user_stats`, `group_stats`, `group_members`, `event_stats_daily`, `sessions` and `touches` current on insert. `sessions` is one row per visit and is what Web Analytics counts; read it through `sessions_resolved`, which merges the aggregate states, resolves the visitor to a person, and classifies the visit's channel and whether it was a bot. `definitions` holds the goals and page groups, in the control database alongside sources. Full description: `GET /api/projects/default/schema` or the `describe_schema` MCP tool.
 
 ## Repository
 
@@ -252,7 +277,7 @@ The mark, the palette, and every icon come from [`brand/`](brand/README.md). Thr
 
 ## Roadmap
 
-Saved reports (funnels, retention, trends), an event and property explorer, multi-project UI, OIDC sign-in, per-write-key rate limiting, and a single-process Docker image for non-Vercel self-hosting.
+Saved reports (retention, trends), an event and property explorer, multi-project UI, OIDC sign-in, per-write-key rate limiting, and a single-process Docker image for non-Vercel self-hosting.
 
 ## Contributing
 

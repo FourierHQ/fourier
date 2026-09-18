@@ -6,7 +6,9 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./environments": "./src/environments.ts"
+    "./environments": "./src/environments.ts",
+    "./periods": "./src/periods.ts",
+    "./classify": "./src/classify.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

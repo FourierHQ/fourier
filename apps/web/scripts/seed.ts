@@ -3,7 +3,7 @@
  * companies (groups), users, page views and product events.
  *   pnpm seed
  */
-import { configFromEnv, ensureDefaultProject, ingest, migrateAll, parseEnvironment, type IncomingMessage } from "@fourierhq/core";
+import { configFromEnv, ensureDefaultProject, ingest, migrateAll, parseEnvironment, upsertDefinition, type IncomingMessage } from "@fourierhq/core";
 
 const COMPANIES = [
   { id: "acme", name: "Acme Inc", plan: "enterprise", industry: "Manufacturing", seats: 120 },
@@ -16,6 +16,23 @@ const COMPANIES = [
 const FIRST = ["Ada", "Grace", "Linus", "Margaret", "Alan", "Barbara", "Dennis", "Ken", "Radia", "Tim", "Hedy", "Guido"];
 const LAST = ["Lovelace", "Hopper", "Torvalds", "Hamilton", "Turing", "Liskov", "Ritchie", "Thompson", "Perlman", "Berners-Lee", "Lamarr", "van Rossum"];
 const PAGES = ["/", "/pricing", "/docs", "/dashboard", "/dashboard/reports", "/settings", "/settings/billing", "/integrations"];
+// The marketing site, which is what Web Analytics reports on. Kept separate from the
+// app's own pages so landing pages, page groups and exits look like a real website.
+const MARKETING_PAGES = ["/", "/pricing", "/product/analytics", "/product/api", "/blog/launching-fourier", "/blog/why-clickhouse", "/docs", "/docs/quickstart", "/about", "/demo"];
+/** Where marketing traffic arrives. Weighted so the ranked tables have a shape to them. */
+const LANDINGS: [string, number][] = [["/", 10], ["/pricing", 5], ["/blog/launching-fourier", 4], ["/product/analytics", 3], ["/blog/why-clickhouse", 3], ["/docs/quickstart", 2], ["/demo", 2]];
+/** How visits arrive, as the SDK would have recorded them. */
+const ARRIVALS: [{ referrer?: string; campaign?: Record<string, string> }, number][] = [
+  [{ referrer: "https://www.google.com/" }, 10],
+  [{}, 8],
+  [{ referrer: "https://news.ycombinator.com/" }, 3],
+  [{ referrer: "https://www.linkedin.com/feed/" }, 2],
+  [{ campaign: { source: "google", medium: "cpc", name: "brand-search" }, referrer: "https://www.google.com/" }, 4],
+  [{ campaign: { source: "linkedin", medium: "paid_social", name: "september-launch" }, referrer: "https://www.linkedin.com/" }, 3],
+  [{ campaign: { source: "newsletter", medium: "email", name: "monthly-digest" } }, 2],
+  [{ referrer: "https://www.producthunt.com/" }, 2],
+  [{ referrer: "https://twitter.com/" }, 2],
+];
 const EVENTS: [string, number, () => Record<string, unknown>][] = [
   ["Report Created", 5, () => ({ type: pick(["funnel", "retention", "trend"]), rows: rand(10, 5000) })],
   ["Report Exported", 2, () => ({ format: pick(["csv", "pdf", "xlsx"]) })],
@@ -51,6 +68,15 @@ function rand(min: number, max: number) {
 }
 function pick<T>(arr: T[]): T {
   return arr[Math.floor(Math.random() * arr.length)];
+}
+function pickWeighted<T>(arr: [T, number][]): T {
+  const total = arr.reduce((s, [, w]) => s + w, 0);
+  let r = Math.random() * total;
+  for (const [v, w] of arr) {
+    r -= w;
+    if (r <= 0) return v;
+  }
+  return arr[0][0];
 }
 function weighted() {
   const total = EVENTS.reduce((s, e) => s + e[1], 0);
@@ -120,7 +146,13 @@ async function main() {
       const activity = c.plan === "enterprise" ? 0.8 : c.plan === "pro" ? 0.5 : 0.25;
       for (let day = Math.floor((now - signup) / DAY); day >= 0; day--) {
         if (Math.random() > activity) continue;
-        const sessionStart = now - day * DAY - rand(0, 12) * 3_600_000 - rand(0, 3_600_000);
+        // Clamped to after the signup. The oldest day in this loop lands exactly on the
+        // signup moment, and the random hours then push it up to thirteen hours earlier
+        // — giving the account activity before it existed, and, worse, making that
+        // stray session the person's first recorded touch. Every seeded customer then
+        // looked like it arrived Direct, which is the one thing the attribution report
+        // is there to disprove.
+        const sessionStart = Math.max(signup + 60_000, now - day * DAY - rand(0, 12) * 3_600_000 - rand(0, 3_600_000));
         const n = rand(2, 9);
         let t = sessionStart;
         for (let i = 0; i < n; i++) {
@@ -138,14 +170,104 @@ async function main() {
     }
   }
 
-  // a few anonymous visitors who never signed up
-  for (let i = 0; i < 25; i++) {
-    const anonymousId = crypto.randomUUID();
-    const t = now - rand(0, 30) * DAY - rand(0, DAY);
+  // Marketing traffic: people who came to the website and mostly left again. This is what
+  // the Web Analytics section reports on, so these visits carry everything it reads —
+  // a session, an arrival, a landing page, and measured time on each page.
+  // Sixty days, not thirty: the default report compares the last thirty against the
+  // thirty before them, and a seed that stops at the boundary makes every change column
+  // read "+21050%" against the two visits that happened to fall the other side of it.
+  // Mildly growing — roughly 40% more traffic in the recent half than the earlier one,
+  // which is what a site that is going well actually looks like. A steeper curve makes
+  // every change column read in the thousands and teaches nobody anything.
+  const visitTimes = Array.from({ length: 800 }, () => now - Math.floor(59 * Math.pow(Math.random(), 1.3)) * DAY - rand(0, DAY)).sort((a, b) => a - b);
+  // About a third of visits are somebody coming back. Emitted oldest-first and reusing
+  // an id only from a visit already generated, so a returning visitor's first sighting
+  // genuinely precedes their return — otherwise the new/returning split would depend on
+  // the order the seed happened to write rows in.
+  const seenVisitors: string[] = [];
+  for (const start of visitTimes) {
+    const returning = seenVisitors.length > 20 && Math.random() < 0.32;
+    const anonymousId = returning ? pick(seenVisitors) : crypto.randomUUID();
+    if (!returning) seenVisitors.push(anonymousId);
     const w = pick(LOCATIONS);
+    const ua = pick(UAS);
     const geo = { country: w.country, region: w.region, city: w.city, latitude: w.latitude, longitude: w.longitude };
-    messages.push({ type: "page", anonymousId, timestamp: new Date(t).toISOString(), properties: { path: "/", url: "https://app.example.com/", title: "Example App" }, context: { library: { name: "fourier", version: "0.1.0" }, userAgent: pick(UAS), locale: w.locale, timezone: w.timezone, geo, page: { referrer: pick(["https://google.com/", "", "https://producthunt.com/"]) } } });
-    if (Math.random() > 0.5) messages.push({ type: "page", anonymousId, timestamp: new Date(t + 20_000).toISOString(), properties: { path: "/pricing", url: "https://app.example.com/pricing", title: "Pricing" }, context: { library: { name: "fourier", version: "0.1.0" }, userAgent: pick(UAS), locale: w.locale, timezone: w.timezone, geo } });
+    const sessionId = crypto.randomUUID();
+    const arrival = pickWeighted(ARRIVALS);
+    const landing = pickWeighted(LANDINGS);
+
+    // Most visits are one page; a few go deeper. Roughly the shape of a real site.
+    const depth = Math.random() < 0.55 ? 1 : Math.random() < 0.8 ? rand(2, 3) : rand(4, 7);
+    const path = [landing, ...Array.from({ length: depth - 1 }, () => pick(MARKETING_PAGES))];
+
+    let t = start;
+    path.forEach((p, idx) => {
+      const first = idx === 0;
+      const base = {
+        library: { name: "fourier", version: "0.1.0" },
+        userAgent: ua,
+        locale: w.locale,
+        timezone: w.timezone,
+        geo,
+        session: { id: sessionId, isNew: first },
+        page: { url: `https://example.com${p}`, path: p, title: p, referrer: first ? (arrival.referrer ?? "") : `https://example.com${path[idx - 1]}` },
+        ...(first && arrival.campaign ? { campaign: arrival.campaign } : {}),
+      };
+      messages.push({ type: "page", anonymousId, timestamp: new Date(t).toISOString(), properties: { path: p, url: `https://example.com${p}`, title: p }, context: base });
+
+      // What the SDK's engagement timer would have measured on this page. Not every
+      // view reports one — a visit closed abruptly never sends its beacon — so the
+      // reports have both measured and unmeasured pages to tell apart.
+      const engaged = Math.random() < 0.8 ? rand(2_000, 180_000) : 0;
+      if (engaged) {
+        messages.push({
+          type: "track",
+          event: "$page_leave",
+          anonymousId,
+          timestamp: new Date(t + engaged).toISOString(),
+          properties: { engaged_ms: engaged, path: p },
+          context: { ...base, session: { id: sessionId, isNew: false } },
+        });
+      }
+
+      // A CTA on the pages that have one.
+      if ((p === "/pricing" || p === "/" || p === "/demo") && Math.random() < 0.18) {
+        messages.push({
+          type: "track",
+          event: "CTA Clicked",
+          anonymousId,
+          timestamp: new Date(t + Math.max(engaged - 500, 1000)).toISOString(),
+          properties: { path: p, label: p === "/demo" ? "Book a demo" : "Start free" },
+          context: { ...base, session: { id: sessionId, isNew: false } },
+        });
+      }
+      t += engaged + rand(1_000, 20_000);
+    });
+
+    // A few of these visits go on to request a demo, which is the marketing site's goal.
+    if (path.includes("/demo") && Math.random() < 0.28) {
+      messages.push({ type: "track", event: "Form Started", anonymousId, timestamp: new Date(t).toISOString(), properties: { path: "/demo", form: "demo-request" }, context: { library: { name: "fourier", version: "0.1.0" }, userAgent: ua, locale: w.locale, timezone: w.timezone, geo, session: { id: sessionId, isNew: false }, page: { url: "https://example.com/demo", path: "/demo" } } });
+      if (Math.random() < 0.6) {
+        messages.push({ type: "track", event: "Demo Requested", anonymousId, timestamp: new Date(t + rand(20_000, 90_000)).toISOString(), properties: { path: "/demo", form: "demo-request" }, context: { library: { name: "fourier", version: "0.1.0" }, userAgent: ua, locale: w.locale, timezone: w.timezone, geo, session: { id: sessionId, isNew: false }, page: { url: "https://example.com/demo", path: "/demo" } } });
+      }
+    }
+  }
+
+  // Some crawler traffic, because a real site has it and the reports have to exclude it.
+  for (let i = 0; i < 80; i++) {
+    const t = now - rand(0, 59) * DAY - rand(0, DAY);
+    messages.push({
+      type: "page",
+      anonymousId: `bot-${i}`,
+      timestamp: new Date(t).toISOString(),
+      properties: { path: pick(MARKETING_PAGES), url: "https://example.com/", title: "Example" },
+      context: {
+        library: { name: "fourier", version: "0.1.0" },
+        userAgent: pick(["Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)", "Mozilla/5.0 (compatible; AhrefsBot/7.0)", "Mozilla/5.0 (compatible; bingbot/2.0)"]),
+        session: { id: crypto.randomUUID(), isNew: true },
+        page: { url: "https://example.com/", path: "/", referrer: "" },
+      },
+    });
   }
 
   messages.sort((a, b) => String(a.timestamp).localeCompare(String(b.timestamp)));
@@ -156,6 +278,20 @@ async function main() {
     const r = await ingest(project, messages.slice(i, i + 500), {}, environment);
     accepted += r.accepted;
   }
+  // Goals and page groups, so Web Analytics has something to measure against on the
+  // first load rather than four setup prompts. These are ordinary definitions — nothing
+  // about them is special to the seed except that they match the events above.
+  //
+  // Each carries a fixed id so running the seed twice updates them rather than filling
+  // the Conversions page with three copies of every goal.
+  await upsertDefinition(project.id, "goal", { id: "seed-demo-requested", name: "Demo requested", is_default: true, config: { type: "primary", match: "event", event: "Demo Requested", funnel: [{ name: "Demo page viewed", match: { match: "pageview", path: { op: "exact", value: "/demo" } } }, { name: "Form started", match: { match: "event", event: "Form Started" } }, { name: "Request confirmed", match: { match: "event", event: "Demo Requested" } }] } });
+  await upsertDefinition(project.id, "goal", { id: "seed-signed-up", name: "Signed up", config: { type: "primary", match: "event", event: "Signed Up" } });
+  await upsertDefinition(project.id, "goal", { id: "seed-cta-clicked", name: "CTA clicked", config: { type: "supporting", match: "event", event: "CTA Clicked" } });
+  await upsertDefinition(project.id, "goal", { id: "seed-form-started", name: "Form started", config: { type: "supporting", match: "event", event: "Form Started" } });
+  await upsertDefinition(project.id, "page_group", { id: "seed-group-blog", name: "Blog", position: 0, config: { rules: [{ op: "prefix", value: "/blog" }] } });
+  await upsertDefinition(project.id, "page_group", { id: "seed-group-product", name: "Product", position: 1, config: { rules: [{ op: "prefix", value: "/product" }, { op: "exact", value: "/pricing" }] } });
+  await upsertDefinition(project.id, "page_group", { id: "seed-group-docs", name: "Docs", position: 2, config: { rules: [{ op: "prefix", value: "/docs" }] } });
+
   console.log(`Seeded ${accepted} events into project "${project.name}" (${project.id})`);
   console.log(`Write key: ${project.write_key}`);
   process.exit(0);
