@@ -65,8 +65,18 @@ export const ENVIRONMENT_LABELS: Record<Environment, string> = {
 export interface Scope {
   projectId: string;
   environment: Environment;
+  /**
+   * Event names the operator has hidden, excluded from every count, ranking, chart
+   * and listing this scope produces. It travels with the scope rather than being a
+   * per-query option for the same reason the environment does: a report that forgot
+   * to pass it would quietly disagree with the one next to it.
+   *
+   * The rows are still stored, still ingested and still readable by raw SQL. Hiding
+   * is a reading decision, reversible at any time, exactly like a goal definition.
+   */
+  hiddenEvents: readonly string[];
 }
 
-export function scope(projectId: string, environment: Environment = DEFAULT_ENVIRONMENT): Scope {
-  return { projectId, environment };
+export function scope(projectId: string, environment: Environment = DEFAULT_ENVIRONMENT, hiddenEvents: readonly string[] = []): Scope {
+  return { projectId, environment, hiddenEvents };
 }

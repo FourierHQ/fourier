@@ -27,6 +27,60 @@ function parseJson(s: unknown): Record<string, unknown> {
   }
 }
 
+// ---------- hidden events ----------
+//
+// An operator can tell Fourier that certain events are instrumentation rather than
+// activity — $page_leave by default — and those names then leave every count, ranking,
+// chart and listing below. Two mechanisms, because the data arrives two ways:
+//
+//  - Anything read from `events` / `events_resolved` simply adds a predicate.
+//  - Anything read from a rollup (person_stats, group_stats, group_members,
+//    person_sources) cannot: those tables have already summed across event names. Their
+//    totals are corrected by subtracting the same rows out of `actor_event_stats`,
+//    which is the identical count split by event.
+//
+// When nothing is hidden every query below is exactly the query it was before: the
+// predicate is dropped and the subtraction join is never built.
+
+/** Whether this scope excludes anything at all. Guards every branch below. */
+function hasHidden(scope: Scope): boolean {
+  return scope.hiddenEvents.length > 0;
+}
+
+/**
+ * `AND event NOT IN (...)`, ready to append to a WHERE list, or null when nothing is
+ * hidden. The names travel as a query parameter — an event name is operator input and
+ * never reaches the SQL text.
+ */
+function hiddenFilter(scope: Scope, params: Record<string, unknown>, col = "event"): string | null {
+  if (!hasHidden(scope)) return null;
+  params.hidden = scope.hiddenEvents;
+  return `${col} NOT IN ({hidden:Array(String)})`;
+}
+
+/** Push the exclusion onto a WHERE list, if there is one. */
+function excludeHidden(scope: Scope, where: string[], params: Record<string, unknown>, col = "event"): void {
+  const sql = hiddenFilter(scope, params, col);
+  if (sql) where.push(sql);
+}
+
+/**
+ * Hidden-event counts per actor, pre-aggregated to exactly one row per key so that
+ * joining it to a rollup can never multiply the amount subtracted. `by` names the
+ * columns to group on; the total lands in `hidden`.
+ */
+function hiddenCountsSql(by: string, extraWhere = ""): string {
+  return `SELECT ${by}, sum(count) AS hidden
+          FROM actor_event_stats
+          WHERE project_id = {p:String} AND event IN ({hidden:Array(String)}) ${extraWhere}
+          GROUP BY ${by}`;
+}
+
+/** A count that has had its hidden events taken out, and can never read below zero. */
+function minusHidden(total: string, hidden: string): string {
+  return `if(${total} > ${hidden}, ${total} - ${hidden}, 0)`;
+}
+
 // ---------- identity resolution ----------
 //
 // Resolution lives in the schema (identity_map, events_resolved, person_stats,
@@ -59,23 +113,47 @@ export interface Overview {
 }
 
 export async function getOverview(scope: Scope): Promise<Overview> {
-  const [[totals], [recent], [groups]] = await Promise.all([
+  const recentWhere = ["project_id = {p:String}", "timestamp > now64(3) - INTERVAL 1 DAY"];
+  const recentParams: Record<string, unknown> = { p: scope.projectId };
+  excludeHidden(scope, recentWhere, recentParams);
+
+  // First and last are read per event name rather than per person, because "when did
+  // anything happen here" has to be answerable about the events that still count. A
+  // hidden event is the last thing most page views produce, so leaving it in would
+  // make "Last event" report instrumentation the rest of the page refuses to show.
+  const boundsWhere = ["project_id = {p:String}"];
+  const boundsParams: Record<string, unknown> = { p: scope.projectId };
+  excludeHidden(scope, boundsWhere, boundsParams);
+
+  const [[totals], [recent], [groups], [bounds], [hidden]] = await Promise.all([
     q<Row>(scope, `SELECT
         sum(event_count) AS total_events,
         count() AS total_users,
-        countIf(is_identified = 1) AS identified_users,
-        min(first_seen) AS first_event_at,
-        max(last_seen) AS last_event_at
+        countIf(is_identified = 1) AS identified_users
       FROM person_stats WHERE project_id = {p:String}`,
       { p: scope.projectId },
     ),
     q<Row>(scope, `SELECT count() AS events_24h, uniq(person_id) AS users_24h
-       FROM events_resolved WHERE project_id = {p:String} AND timestamp > now64(3) - INTERVAL 1 DAY`,
-      { p: scope.projectId },
+       FROM events_resolved WHERE ${recentWhere.join(" AND ")}`,
+      recentParams,
     ),
     q<Row>(scope, `SELECT uniq(group_id) AS total_groups FROM group_stats WHERE project_id = {p:String}`, { p: scope.projectId }),
+    q<Row>(scope, `SELECT min(first_seen) AS first_event_at, max(last_seen) AS last_event_at
+       FROM event_stats_daily WHERE ${boundsWhere.join(" AND ")}`,
+      boundsParams,
+    ),
+    // The total comes from person_stats, which only ever counted messages carrying a
+    // distinct_id — so the subtraction is restricted the same way, or a hidden event
+    // from a server-side call with no distinct_id would be taken off a total it was
+    // never added to.
+    hasHidden(scope)
+      ? q<Row>(scope, `SELECT sum(count) AS hidden FROM actor_event_stats
+           WHERE project_id = {p:String} AND event IN ({hidden:Array(String)}) AND distinct_id != ''`,
+          { p: scope.projectId, hidden: scope.hiddenEvents },
+        )
+      : Promise.resolve([] as Row[]),
   ]);
-  const totalEvents = Number(totals?.total_events ?? 0);
+  const totalEvents = Math.max(Number(totals?.total_events ?? 0) - Number(hidden?.hidden ?? 0), 0);
   return {
     total_events: totalEvents,
     total_users: Number(totals?.total_users ?? 0),
@@ -83,8 +161,8 @@ export async function getOverview(scope: Scope): Promise<Overview> {
     total_groups: Number(groups?.total_groups ?? 0),
     events_24h: Number(recent?.events_24h ?? 0),
     users_24h: Number(recent?.users_24h ?? 0),
-    first_event_at: totalEvents ? (totals?.first_event_at as string) : null,
-    last_event_at: totalEvents ? (totals?.last_event_at as string) : null,
+    first_event_at: totalEvents ? ((bounds?.first_event_at as string) ?? null) : null,
+    last_event_at: totalEvents ? ((bounds?.last_event_at as string) ?? null) : null,
   };
 }
 
@@ -139,6 +217,10 @@ export interface EventsFilter {
 export async function listEvents(scope: Scope, f: EventsFilter = {}): Promise<EventRecord[]> {
   const where = ["project_id = {p:String}"];
   const params: Record<string, unknown> = { p: scope.projectId, limit: Math.min(Math.max(f.limit ?? 50, 1), 1000) };
+  // Asking for a hidden event by name still returns nothing: the feed, the chart and
+  // the totals have to agree, and a deep link to an event that is hidden is a link to
+  // something this project has said it does not count.
+  excludeHidden(scope, where, params);
   if (f.event) {
     where.push("event = {event:String}");
     params.event = f.event;
@@ -204,9 +286,15 @@ export interface EventName {
   last_seen: string;
 }
 
-export async function listEventNames(scope: Scope, opts: { days?: number; sourceId?: string } = {}): Promise<EventName[]> {
+/**
+ * Every event name, newest counts first. `includeHidden` is for the settings screen
+ * alone — it is how an operator picks something to hide, and how they find their way
+ * back to something they have already hidden. Nothing that reports numbers uses it.
+ */
+export async function listEventNames(scope: Scope, opts: { days?: number; sourceId?: string; includeHidden?: boolean } = {}): Promise<EventName[]> {
   const where = ["project_id = {p:String}"];
   const params: Record<string, unknown> = { p: scope.projectId };
+  if (!opts.includeHidden) excludeHidden(scope, where, params);
   if (opts.sourceId) {
     where.push("source_id = {src:String}");
     params.src = opts.sourceId;
@@ -237,6 +325,7 @@ export async function eventTimeseries(
   const fn = { hour: "toStartOfHour", day: "toStartOfDay", week: "toStartOfWeek", month: "toStartOfMonth" }[interval];
   const where = ["project_id = {p:String}", "type NOT IN ('identify','group','alias')"];
   const params: Record<string, unknown> = { p: scope.projectId };
+  excludeHidden(scope, where, params);
   if (opts.event) {
     where.push("event = {event:String}");
     params.event = opts.event;
@@ -268,6 +357,9 @@ export async function eventTimeseries(
 }
 
 export async function propertyKeys(scope: Scope, event: string): Promise<{ key: string; count: number }[]> {
+  // A hidden event has no properties to offer: it is not selectable anywhere that
+  // would lead here, and answering would be the one place its rows leaked back out.
+  if (scope.hiddenEvents.includes(event)) return [];
   const rows = await q<Row>(scope, `SELECT key, count() AS count
      FROM events ARRAY JOIN JSONExtractKeys(properties) AS key
      WHERE project_id = {p:String} AND event = {e:String} AND timestamp > now64(3) - INTERVAL 30 DAY
@@ -326,11 +418,32 @@ export async function listUsers(scope: Scope, f: UsersFilter = {}): Promise<User
       WHERE ps.project_id = {p:String} AND ps.source_id = {src:String})`);
     params.src = f.sourceId;
   }
-  const order = { last_seen: "last_seen DESC", first_seen: "first_seen DESC", event_count: "event_count DESC" }[f.orderBy ?? "last_seen"];
+  // Hidden events come off each person's total before the sort, not after it, or the
+  // busiest-looking person on page one would be whoever fired the most of them.
+  // person_stats is already one row per person, so the join cannot duplicate anything;
+  // the hidden side is resolved through the same identity map so both agree on who is
+  // who after a sign-in.
+  let count = "r.event_count";
+  let hiddenJoin = "";
+  if (hasHidden(scope)) {
+    params.hidden = scope.hiddenEvents;
+    hiddenJoin = `LEFT JOIN (
+       SELECT if(i.to_id != '', i.to_id, a.distinct_id) AS person_id, sum(a.count) AS hidden
+       FROM actor_event_stats AS a
+       LEFT JOIN identity_map AS i ON i.project_id = a.project_id AND i.from_id = a.distinct_id
+       WHERE a.project_id = {p:String} AND a.event IN ({hidden:Array(String)})
+       GROUP BY person_id
+     ) AS h ON h.person_id = r.person_id`;
+    count = minusHidden("r.event_count", "ifNull(h.hidden, 0)");
+  }
+  // Ordered by the expression rather than by its alias, so the sort is over the
+  // corrected count without depending on how aliases and column names resolve.
+  const order = { last_seen: "last_seen DESC", first_seen: "first_seen DESC", event_count: `${count} DESC` }[f.orderBy ?? "last_seen"];
   const rows = await q<Row>(scope, `SELECT r.person_id AS distinct_id, r.is_identified AS is_identified, r.first_seen AS first_seen, r.last_seen AS last_seen,
-            r.event_count AS event_count, r.group_id AS group_id, r.country AS country, r.city AS city, t.traits AS traits
+            ${count} AS event_count, r.group_id AS group_id, r.country AS country, r.city AS city, t.traits AS traits
      FROM (SELECT * FROM person_stats WHERE project_id = {p:String}) AS r
      LEFT JOIN (SELECT user_id, traits FROM user_traits FINAL WHERE project_id = {p:String}) AS t ON t.user_id = r.person_id
+     ${hiddenJoin}
      ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
      ORDER BY ${order}
      LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
@@ -372,8 +485,10 @@ export interface UserDetail extends UserRecord {
 export async function getUser(scope: Scope, distinctId: string): Promise<UserDetail | null> {
   const personId = await resolvePersonId(scope, distinctId);
   const ids = await personIds(scope, personId);
-  const params = { p: scope.projectId, d: personId, ids };
-  const [users, groups, top, sources] = await Promise.all([
+  const params: Record<string, unknown> = { p: scope.projectId, d: personId, ids };
+  const topWhere = ["project_id = {p:String}", "distinct_id IN ({ids:Array(String)})", "type IN ('track','page','screen')"];
+  excludeHidden(scope, topWhere, params);
+  const [users, groups, top, sources, hidden] = await Promise.all([
     q<Row>(scope, `SELECT {d:String} AS distinct_id, max(s.is_identified) AS is_identified, min(s.first_seen) AS first_seen, max(s.last_seen) AS last_seen,
               sum(s.event_count) AS event_count, argMaxMerge(s.last_group_id) AS group_id,
               argMaxMerge(s.last_country) AS country, argMaxMerge(s.last_city) AS city, any(t.traits) AS traits
@@ -390,7 +505,7 @@ export async function getUser(scope: Scope, distinctId: string): Promise<UserDet
       params,
     ),
     q<Row>(scope, `SELECT event, count() AS count FROM events
-       WHERE project_id = {p:String} AND distinct_id IN ({ids:Array(String)}) AND type IN ('track','page','screen')
+       WHERE ${topWhere.join(" AND ")}
        GROUP BY event ORDER BY count DESC LIMIT 10`,
       params,
     ),
@@ -399,15 +514,30 @@ export async function getUser(scope: Scope, distinctId: string): Promise<UserDet
        GROUP BY source_id ORDER BY first_seen`,
       params,
     ),
+    // This person's hidden events, per source, so both their total and the per-source
+    // breakdown below it come down by the same amount and still add up.
+    hasHidden(scope)
+      ? q<Row>(scope, hiddenCountsSql("source_id", "AND distinct_id IN ({ids:Array(String)})"), { p: scope.projectId, ids, hidden: scope.hiddenEvents })
+      : Promise.resolve([] as Row[]),
   ]);
+  // Existence is judged on the raw total: someone whose every event is hidden is still
+  // a person Fourier has seen, and their page should open and say zero rather than 404.
   if (!users[0] || Number(users[0].event_count) === 0) return null;
+  const hiddenBySource = new Map(hidden.map((r) => [String(r.source_id), Number(r.hidden ?? 0)]));
+  const hiddenTotal = [...hiddenBySource.values()].reduce((a, b) => a + b, 0);
   const user = mapUser(users[0]);
+  user.event_count = Math.max(user.event_count - hiddenTotal, 0);
   // A person with a linked user id counts as identified even if only anonymous rows exist yet.
   if (ids.length > 1) user.is_identified = true;
   return {
     ...user,
     anonymous_ids: ids.slice(1),
-    sources: sources.map((r) => ({ source_id: String(r.source_id), first_seen: String(r.first_seen), last_seen: String(r.last_seen), event_count: Number(r.event_count) })),
+    sources: sources.map((r) => ({
+      source_id: String(r.source_id),
+      first_seen: String(r.first_seen),
+      last_seen: String(r.last_seen),
+      event_count: Math.max(Number(r.event_count) - (hiddenBySource.get(String(r.source_id)) ?? 0), 0),
+    })),
     groups: groups.map((r) => ({ group_id: String(r.group_id), traits: parseJson(r.traits) })),
     top_events: top.map((r) => ({ event: String(r.event), count: Number(r.count) })),
   };
@@ -435,12 +565,24 @@ export async function listGroups(scope: Scope, f: { search?: string; limit?: num
     having.push("(positionCaseInsensitive(group_id, {s:String}) > 0 OR positionCaseInsensitive(traits, {s:String}) > 0)");
     params.s = f.search;
   }
-  const order = { last_seen: "last_seen DESC", event_count: "event_count DESC", user_count: "user_count DESC" }[f.orderBy ?? "last_seen"];
+  // group_stats is an aggregating table, so a company can still be several unmerged
+  // rows and `sum` is what adds them up. The hidden side is already one row per
+  // company and repeats across those rows, so it is taken with `max`, not summed —
+  // summing it would subtract the same events once per part.
+  let count = "sum(s.event_count)";
+  let hiddenJoin = "";
+  if (hasHidden(scope)) {
+    params.hidden = scope.hiddenEvents;
+    hiddenJoin = `LEFT JOIN (${hiddenCountsSql("group_id", "AND group_id != ''")}) AS h ON h.group_id = g.group_id`;
+    count = minusHidden("sum(s.event_count)", "max(ifNull(h.hidden, 0))");
+  }
+  const order = { last_seen: "last_seen DESC", event_count: `${count} DESC`, user_count: "user_count DESC" }[f.orderBy ?? "last_seen"];
   const rows = await q<Row>(scope, `SELECT g.group_id AS group_id, any(g.traits) AS traits,
             min(s.first_seen) AS first_seen, max(s.last_seen) AS last_seen,
-            sum(s.event_count) AS event_count, uniqMerge(s.users) AS user_count
+            ${count} AS event_count, uniqMerge(s.users) AS user_count
      FROM (SELECT group_id, traits FROM group_traits FINAL WHERE project_id = {p:String}) AS g
      LEFT JOIN group_stats AS s ON s.group_id = g.group_id AND s.project_id = {p:String}
+     ${hiddenJoin}
      GROUP BY g.group_id
      ${having.length ? `HAVING ${having.join(" AND ")}` : ""}
      ORDER BY ${order}
@@ -469,7 +611,14 @@ export interface GroupDetail extends GroupRecord {
 }
 
 export async function getGroup(scope: Scope, groupId: string): Promise<GroupDetail | null> {
-  const [groups, members, top, sources] = await Promise.all([
+  const topWhere = ["project_id = {p:String}", "group_id = {g:String}", "type IN ('track','page','screen')"];
+  const topParams: Record<string, unknown> = { p: scope.projectId, g: groupId };
+  excludeHidden(scope, topWhere, topParams);
+  const srcWhere = ["project_id = {p:String}", "group_id = {g:String}"];
+  const srcParams: Record<string, unknown> = { p: scope.projectId, g: groupId };
+  excludeHidden(scope, srcWhere, srcParams);
+  const hiddenParams = { p: scope.projectId, g: groupId, hidden: scope.hiddenEvents };
+  const [groups, members, top, sources, hiddenTotals, hiddenMembers] = await Promise.all([
     q<Row>(scope, `SELECT g.group_id AS group_id, any(g.traits) AS traits,
               min(s.first_seen) AS first_seen, max(s.last_seen) AS last_seen,
               sum(s.event_count) AS event_count, uniqMerge(s.users) AS user_count
@@ -491,21 +640,45 @@ export async function getGroup(scope: Scope, groupId: string): Promise<GroupDeta
        GROUP BY distinct_id ORDER BY last_seen DESC LIMIT 500`,
       { p: scope.projectId, g: groupId },
     ),
-    q<Row>(scope, `SELECT event, count() AS count, uniq(distinct_id) AS users FROM events
-       WHERE project_id = {p:String} AND group_id = {g:String} AND type IN ('track','page','screen')
-       GROUP BY event ORDER BY count DESC LIMIT 20`.replace("uniq(distinct_id)", "uniq(person_id)").replace("FROM events", "FROM events_resolved"),
-      { p: scope.projectId, g: groupId },
+    q<Row>(scope, `SELECT event, count() AS count, uniq(person_id) AS users FROM events_resolved
+       WHERE ${topWhere.join(" AND ")}
+       GROUP BY event ORDER BY count DESC LIMIT 20`,
+      topParams,
     ),
     q<Row>(scope, `SELECT source_id, min(timestamp) AS first_seen, max(timestamp) AS last_seen, count() AS event_count, uniq(person_id) AS user_count
-       FROM events_resolved WHERE project_id = {p:String} AND group_id = {g:String}
+       FROM events_resolved WHERE ${srcWhere.join(" AND ")}
        GROUP BY source_id ORDER BY first_seen`,
-      { p: scope.projectId, g: groupId },
+      srcParams,
     ),
+    // The company's hidden events, and the same split per member. Two questions rather
+    // than one sum of the other: the company total counts every event carrying this
+    // group id, and a member total only counts those that also carried a distinct id.
+    hasHidden(scope)
+      ? q<Row>(scope, `SELECT sum(count) AS hidden FROM actor_event_stats
+           WHERE project_id = {p:String} AND event IN ({hidden:Array(String)}) AND group_id = {g:String}`, hiddenParams)
+      : Promise.resolve([] as Row[]),
+    hasHidden(scope)
+      ? q<Row>(scope, `SELECT if(i.to_id != '', i.to_id, a.distinct_id) AS distinct_id, sum(a.count) AS hidden
+           FROM actor_event_stats AS a
+           LEFT JOIN identity_map AS i ON i.project_id = a.project_id AND i.from_id = a.distinct_id
+           WHERE a.project_id = {p:String} AND a.event IN ({hidden:Array(String)}) AND a.group_id = {g:String} AND a.distinct_id != ''
+           GROUP BY distinct_id`, hiddenParams)
+      : Promise.resolve([] as Row[]),
   ]);
   if (!groups[0]) return null;
+  // Members are keyed by the person they resolve to, which is what the hidden counts
+  // above were grouped by too, so a sign-in mid-visit cannot leave the subtraction
+  // attached to the anonymous half of someone who is listed under their user id.
+  const hiddenByMember = new Map(hiddenMembers.map((r) => [String(r.distinct_id), Number(r.hidden ?? 0)]));
+  const group = mapGroup(groups[0]);
+  group.event_count = Math.max(group.event_count - Number(hiddenTotals[0]?.hidden ?? 0), 0);
   return {
-    ...mapGroup(groups[0]),
-    members: members.map(mapUser),
+    ...group,
+    members: members.map((r) => {
+      const member = mapUser(r);
+      member.event_count = Math.max(member.event_count - (hiddenByMember.get(member.distinct_id) ?? 0), 0);
+      return member;
+    }),
     sources: sources.map((r) => ({ source_id: String(r.source_id), first_seen: String(r.first_seen), last_seen: String(r.last_seen), event_count: Number(r.event_count), user_count: Number(r.user_count) })),
     top_events: top.map((r) => ({ event: String(r.event), count: Number(r.count), users: Number(r.users) })),
   };
