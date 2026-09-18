@@ -8,3 +8,7 @@ export * from "./geo";
 export * from "./ingest";
 export * from "./queries";
 export * from "./sql-guard";
+export * from "./classify";
+export * from "./periods";
+export * from "./definitions";
+export * from "./web-analytics";

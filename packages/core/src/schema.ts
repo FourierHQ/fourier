@@ -12,7 +12,9 @@
  * - Materialised views maintain per-user, per-group and per-event rollups.
  */
 
-export const SCHEMA_VERSION = 7;
+import { botSql, channelSql } from "./classify";
+
+export const SCHEMA_VERSION = 8;
 
 /**
  * A migration statement. Plain strings are idempotent `CREATE ... IF NOT EXISTS` and run on
@@ -22,6 +24,35 @@ export const SCHEMA_VERSION = 7;
  * statements (CREATE OR REPLACE VIEW) run on fresh installs and upgrades, never on a no-op boot.
  */
 export type Statement = string | { sql: string; when: "upgrade" | "change" };
+
+/**
+ * Track event the browser SDK sends when a page goes away, carrying the foreground
+ * milliseconds it measured while that page was on screen. It is instrumentation, not
+ * activity: it is summed into a session's engaged_ms and then excluded from every
+ * event count, ranking and timeline, the same way identify and group are.
+ */
+export const PAGE_LEAVE = "$page_leave";
+
+/** A message that records someone looking at something: what a landing page is read off. */
+const IS_VIEW = `type IN ('page', 'screen')`;
+
+/**
+ * A session's entry attributes all describe one thing — the page view it started on —
+ * so each is read with argMin over page views only. Anything else is blanked and sorted
+ * to the far end of time, which means it can only win when the session has no page view
+ * at all; and then the session correctly has no landing page and no origin to read.
+ * That is what makes 'Unattributed' distinguishable from 'Direct' downstream.
+ */
+const entryOf = (col: string, as = col) =>
+  `argMinState(if(${IS_VIEW}, ${col}, ''), if(${IS_VIEW}, timestamp, toDateTime64('2106-01-01 00:00:00', 3))) AS ${as}`;
+
+/**
+ * Location, taken from the first message that carried any. A server-side call or an
+ * import resolves to nothing, and must not blank out where the visit came from — the
+ * same argMin-against-epoch trick user_stats_mv uses, inverted for a minimum.
+ */
+const firstNonEmpty = (col: string) =>
+  `argMinState(${col}, if(${col} != '', timestamp, toDateTime64('2106-01-01 00:00:00', 3))) AS ${col}`;
 
 /**
  * Tables that exist once for the whole install: who can sign in, what projects and
@@ -111,6 +142,38 @@ export const controlStatements: Statement[] = [
   ) ENGINE = ReplacingMergeTree(updated_at)
   ORDER BY id`,
 
+  // What the operator has told us to look for: conversion goals, supporting actions,
+  // and page groups. One table rather than three because they are the same kind of
+  // thing — a name, a rule, and an opinion about how to read the data — and because a
+  // fourth kind will want the same shape.
+  //
+  // In the control database, not per environment, for the reason sources are: a goal
+  // is defined once and means the same thing everywhere. Defining it per environment
+  // would mean you could not check that a goal fires in preview before shipping it,
+  // which is the only reason preview exists.
+  //
+  // Nothing here is applied at ingest. A definition is compiled into SQL when a report
+  // runs, so naming a goal a week after installing tracking reports the whole week —
+  // and correcting a rule corrects the history it was always describing.
+  `CREATE TABLE IF NOT EXISTS definitions (
+    project_id  LowCardinality(String),
+    kind        LowCardinality(String),
+    id          String,
+    name        String,
+    -- JSON. Shape depends on kind; see definitions.ts, which owns the parsing.
+    config      String CODEC(ZSTD(3)),
+    -- Ordering the operator chose. Page groups are matched in this order and the
+    -- first match wins, so it is a rule, not a display preference.
+    position    UInt32 DEFAULT 0,
+    -- The goal a report selects when the reader has not chosen one. At most one per
+    -- project is expected; readers take the lowest position among those flagged.
+    is_default  UInt8 DEFAULT 0,
+    deleted     UInt8 DEFAULT 0,
+    created_at  DateTime64(3, 'UTC') DEFAULT now64(3),
+    updated_at  DateTime64(3, 'UTC') DEFAULT now64(3)
+  ) ENGINE = ReplacingMergeTree(updated_at)
+  ORDER BY (project_id, kind, id)`,
+
   // Instance-wide key/value. Holds the generated signing secret so a fresh
   // install needs no environment variable to have working sessions.
   `CREATE TABLE IF NOT EXISTS settings (
@@ -120,6 +183,42 @@ export const controlStatements: Statement[] = [
   ) ENGINE = ReplacingMergeTree(updated_at)
   ORDER BY key`,
 ];
+
+/**
+ * The rollup itself, shared by the materialised view that maintains it going forward
+ * and the one-time backfill that gives an existing install its history. Written once
+ * so the two can never drift into computing different sessions.
+ */
+const sessionRollup = (extra = "") => `SELECT
+    project_id,
+    session_id,
+    any(source_id) AS source_id,
+    min(timestamp) AS started_at,
+    max(timestamp) AS ended_at,
+    countIf(event != '${PAGE_LEAVE}') AS events,
+    countIf(type = 'page') AS pageviews,
+    sum(if(event = '${PAGE_LEAVE}', JSONExtractUInt(properties, 'engaged_ms'), 0)) AS engaged_ms,
+    max(user_id != '') AS identified,
+    argMinState(distinct_id, timestamp) AS distinct_id,
+    ${entryOf("path", "entry_path")},
+    ${entryOf("url", "entry_url")},
+    ${entryOf("host", "entry_host")},
+    ${entryOf("title", "entry_title")},
+    argMaxState(if(${IS_VIEW}, path, ''), if(${IS_VIEW}, timestamp, toDateTime64(0, 3))) AS exit_path,
+    ${entryOf("utm_source")},
+    ${entryOf("utm_medium")},
+    ${entryOf("utm_campaign")},
+    ${entryOf("utm_content")},
+    ${entryOf("utm_term")},
+    ${entryOf("referrer")},
+    ${entryOf("referrer_host")},
+    argMinState(user_agent, timestamp) AS user_agent,
+    ${firstNonEmpty("country")},
+    ${firstNonEmpty("region")},
+    ${firstNonEmpty("city")}
+  FROM events
+  WHERE session_id != '' ${extra}
+  GROUP BY project_id, session_id`;
 
 /**
  * Event data. Created once per environment database, so production, preview and
@@ -323,6 +422,68 @@ export const dataStatements: Statement[] = [
   FROM events
   GROUP BY project_id, day, type, event`,
 
+  // ---- sessions ----
+  //
+  // One row per visit, which is the unit almost every web-analytics number is counted
+  // in: sessions, landing sessions, engaged sessions, converting sessions, and every
+  // rate built from them. Without this the same GROUP BY over raw events would run
+  // several times per page load, twice over once a comparison period is in play.
+  //
+  // Keyed on session_id alone, not on the visitor. distinct_id changes mid-session the
+  // moment someone signs in — anonymous id before, user id after — and keying on it
+  // would split one visit into two rows and count it twice. The visitor is carried as
+  // the id seen at the start and resolved to a person on read, exactly as person_stats
+  // does, so the sign-in is a property of the session rather than a fork in it.
+  //
+  // Sessions come from the browser SDK. A server-side message carries no session and is
+  // excluded here rather than pooled into one enormous sessionless visit.
+  `CREATE TABLE IF NOT EXISTS sessions (
+    project_id      LowCardinality(String),
+    session_id      String,
+    source_id       SimpleAggregateFunction(any, String),
+    started_at      SimpleAggregateFunction(min, DateTime64(3, 'UTC')),
+    ended_at        SimpleAggregateFunction(max, DateTime64(3, 'UTC')),
+    events          SimpleAggregateFunction(sum, UInt64),
+    pageviews       SimpleAggregateFunction(sum, UInt64),
+    -- Foreground milliseconds actually measured by the SDK, summed over the visit.
+    -- 0 means not measured, which is not the same as not engaged: see engaged_base
+    -- in sessions_resolved, and the SDK's page-leave beacon.
+    engaged_ms      SimpleAggregateFunction(sum, UInt64),
+    identified      SimpleAggregateFunction(max, UInt8),
+    distinct_id     AggregateFunction(argMin, String, DateTime64(3, 'UTC')),
+    entry_path      AggregateFunction(argMin, String, DateTime64(3, 'UTC')),
+    entry_url       AggregateFunction(argMin, String, DateTime64(3, 'UTC')),
+    entry_host      AggregateFunction(argMin, String, DateTime64(3, 'UTC')),
+    entry_title     AggregateFunction(argMin, String, DateTime64(3, 'UTC')),
+    exit_path       AggregateFunction(argMax, String, DateTime64(3, 'UTC')),
+    utm_source      AggregateFunction(argMin, String, DateTime64(3, 'UTC')),
+    utm_medium      AggregateFunction(argMin, String, DateTime64(3, 'UTC')),
+    utm_campaign    AggregateFunction(argMin, String, DateTime64(3, 'UTC')),
+    utm_content     AggregateFunction(argMin, String, DateTime64(3, 'UTC')),
+    utm_term        AggregateFunction(argMin, String, DateTime64(3, 'UTC')),
+    referrer        AggregateFunction(argMin, String, DateTime64(3, 'UTC')),
+    referrer_host   AggregateFunction(argMin, String, DateTime64(3, 'UTC')),
+    user_agent      AggregateFunction(argMin, String, DateTime64(3, 'UTC')),
+    country         AggregateFunction(argMin, String, DateTime64(3, 'UTC')),
+    region          AggregateFunction(argMin, String, DateTime64(3, 'UTC')),
+    city            AggregateFunction(argMin, String, DateTime64(3, 'UTC'))
+  ) ENGINE = AggregatingMergeTree
+  ORDER BY (project_id, session_id)`,
+
+  `CREATE MATERIALIZED VIEW IF NOT EXISTS sessions_mv TO sessions AS ${sessionRollup()}`,
+
+  // History for an install that predates this table. A materialised view only ever sees
+  // rows inserted after it exists, so without this an upgrade would show an empty Web
+  // Analytics section until new traffic arrived — the reports would be wrong rather than
+  // merely sparse. Runs once, on the boot that crosses into v8.
+  //
+  // Sessions the view has already written are skipped outright rather than merged into:
+  // these are summed columns, so covering one twice would double its page views. A visit
+  // straddling the upgrade therefore keeps only the part the view saw, which is a bounded
+  // undercount of a handful of sessions, and never an overcount of any.
+  { when: "upgrade", sql: `INSERT INTO sessions ${sessionRollup("AND session_id NOT IN (SELECT session_id FROM sessions)")}` },
+
+
   // ---- identity resolution ----
   //
   // identity_map: one row per id that belongs to a user. Conflicts (one anonymous id linked to
@@ -362,6 +523,62 @@ export const dataStatements: Statement[] = [
   FROM user_stats AS s
   LEFT JOIN identity_map AS i ON i.project_id = s.project_id AND i.from_id = s.distinct_id
   GROUP BY project_id, person_id` },
+
+  // Sessions as anything reads them: aggregate states merged, the visitor resolved to a
+  // person, and the two judgements that must never be frozen at write time — is this a
+  // bot, and which channel brought it — evaluated here. Both come from ./classify, so
+  // revising either is a view replacement that re-reports every session ever recorded.
+  { when: "change", sql: `CREATE OR REPLACE VIEW sessions_resolved AS
+  SELECT
+    s.*,
+    if(i.to_id != '', i.to_id, s.distinct_id) AS person_id,
+    ${botSql("s.user_agent")} AS is_bot,
+    ${channelSql({
+      pageviews: "s.pageviews",
+      utm_source: "s.utm_source",
+      utm_medium: "s.utm_medium",
+      utm_campaign: "s.utm_campaign",
+      referrer_host: "s.referrer_host",
+      entry_host: "s.entry_host",
+    })} AS channel,
+    -- Engagement minus its goal leg. A session is engaged if it saw more than one page,
+    -- or held someone's attention for ten measured seconds, or completed a primary goal
+    -- — and that last part is a query-time join, because goals are configuration. The
+    -- caller ORs it in. It ORs in EVERY primary goal, never the selected one, so which
+    -- goal a reader is looking at cannot move the engagement rate underneath them.
+    toUInt8(s.pageviews >= 2 OR s.engaged_ms >= 10000) AS engaged_base
+  FROM (
+    SELECT
+      project_id,
+      session_id,
+      any(source_id) AS source_id,
+      min(started_at) AS started_at,
+      max(ended_at) AS ended_at,
+      sum(events) AS events,
+      sum(pageviews) AS pageviews,
+      sum(engaged_ms) AS engaged_ms,
+      max(identified) AS identified,
+      argMinMerge(distinct_id) AS distinct_id,
+      argMinMerge(entry_path) AS entry_path,
+      argMinMerge(entry_url) AS entry_url,
+      argMinMerge(entry_host) AS entry_host,
+      argMinMerge(entry_title) AS entry_title,
+      argMaxMerge(exit_path) AS exit_path,
+      argMinMerge(utm_source) AS utm_source,
+      argMinMerge(utm_medium) AS utm_medium,
+      argMinMerge(utm_campaign) AS utm_campaign,
+      argMinMerge(utm_content) AS utm_content,
+      argMinMerge(utm_term) AS utm_term,
+      argMinMerge(referrer) AS referrer,
+      argMinMerge(referrer_host) AS referrer_host,
+      argMinMerge(user_agent) AS user_agent,
+      argMinMerge(country) AS country,
+      argMinMerge(region) AS region,
+      argMinMerge(city) AS city
+    FROM sessions
+    GROUP BY project_id, session_id
+  ) AS s
+  LEFT JOIN identity_map AS i ON i.project_id = s.project_id AND i.from_id = s.distinct_id` },
   // Which sources (products / sites) each person has been seen on.
   `CREATE TABLE IF NOT EXISTS person_sources (
     project_id   LowCardinality(String),

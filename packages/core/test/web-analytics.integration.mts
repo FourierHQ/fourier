@@ -1,0 +1,451 @@
+/**
+ * Web Analytics, against a real ClickHouse.
+ *
+ * These are the acceptance criteria written as assertions: conversion deduplication,
+ * shared metric consistency, session attribution, landing-page eligibility, funnel
+ * ordering, page-group aggregation, and the difference between "nobody converted" and
+ * "nothing is configured". Every one of them is a mistake that produces a plausible
+ * number rather than an error, which is exactly the kind a type system cannot catch.
+ *
+ * Runs against whatever CLICKHOUSE_URL points at, under a throwaway database name,
+ * and drops everything it created on the way out.
+ */
+import assert from "node:assert/strict";
+import { test, before, after } from "node:test";
+
+const BASE = `fourier_webtest_${Math.random().toString(36).slice(2, 8)}`;
+process.env.CLICKHOUSE_DATABASE = BASE;
+process.env.CLICKHOUSE_URL ??= "http://localhost:8123";
+
+import {
+  ENVIRONMENTS,
+  classifyBrowser,
+  classifyChannel,
+  classifyDevice,
+  configFromEnv,
+  databaseFor,
+  ensureDefaultProject,
+  getAdminClient,
+  getDataClient,
+  ingest,
+  migrateAll,
+  resolveRange,
+  scope,
+  upsertDefinition,
+  listGoals,
+  listPageGroups,
+  headline,
+  breakdown,
+  landingPages,
+  allPages,
+  visitorMix,
+  funnel,
+  goalSummary,
+  supportingActions,
+  availability,
+  conversionTrend,
+  pageDetail,
+  type Goal,
+  type PageGroup,
+  type Project,
+  type WebScope,
+} from "../src/index";
+
+const cfg = () => ({ ...configFromEnv(), database: BASE });
+
+let project: Project;
+const prod = () => scope(project.id, "production");
+
+const UA_DESKTOP = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36";
+const UA_MOBILE = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1";
+const UA_BOT = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)";
+
+const HOST = "example.com";
+const DAY = 86_400_000;
+
+/** Fixed clock so the periods under test never straddle a real midnight. */
+const NOW = new Date("2026-06-15T12:00:00.000Z");
+const ago = (ms: number) => new Date(NOW.getTime() - ms);
+
+interface Visit {
+  anonymousId: string;
+  sessionId: string;
+  at: Date;
+  pages: { path: string; afterMs?: number; engagedMs?: number }[];
+  tracks?: { event: string; properties?: Record<string, unknown>; afterMs?: number; path?: string }[];
+  referrer?: string;
+  utm?: Record<string, string>;
+  userAgent?: string;
+  userId?: string;
+}
+
+/** Turn a described visit into the messages a browser would actually have sent. */
+function messagesFor(v: Visit) {
+  const msgs: Record<string, unknown>[] = [];
+  const ua = v.userAgent ?? UA_DESKTOP;
+  let first = true;
+  const ctx = (path: string, at: Date) => ({
+    page: { url: `https://${HOST}${path}`, path, search: "", title: path, referrer: first ? (v.referrer ?? "") : `https://${HOST}/` },
+    userAgent: ua,
+    session: { id: v.sessionId, isNew: first },
+    ...(v.utm && first ? { campaign: v.utm } : {}),
+  });
+  for (const p of v.pages) {
+    const at = new Date(v.at.getTime() + (p.afterMs ?? 0));
+    msgs.push({ type: "page", anonymousId: v.anonymousId, userId: v.userId, timestamp: at.toISOString(), properties: { path: p.path, url: `https://${HOST}${p.path}` }, context: ctx(p.path, at) });
+    first = false;
+    if (p.engagedMs) {
+      const leaveAt = new Date(at.getTime() + p.engagedMs);
+      msgs.push({
+        type: "track",
+        event: "$page_leave",
+        anonymousId: v.anonymousId,
+        userId: v.userId,
+        timestamp: leaveAt.toISOString(),
+        properties: { engaged_ms: p.engagedMs, path: p.path },
+        context: { ...ctx(p.path, leaveAt), session: { id: v.sessionId, isNew: false } },
+      });
+    }
+  }
+  for (const t of v.tracks ?? []) {
+    const at = new Date(v.at.getTime() + (t.afterMs ?? 0));
+    const path = t.path ?? v.pages[v.pages.length - 1]?.path ?? "/";
+    msgs.push({
+      type: "track",
+      event: t.event,
+      anonymousId: v.anonymousId,
+      userId: v.userId,
+      timestamp: at.toISOString(),
+      properties: { ...(t.properties ?? {}), path },
+      context: { ...ctx(path, at), session: { id: v.sessionId, isNew: false } },
+    });
+  }
+  return msgs;
+}
+
+async function send(visits: Visit[]) {
+  const msgs = visits.flatMap(messagesFor);
+  // Sent in one batch with an explicit receivedAt so the clock-skew correction in
+  // normalize() does not shift the timestamps these assertions depend on.
+  await ingest(project, msgs as never, { receivedAt: NOW, userAgent: UA_DESKTOP }, "production");
+  await getDataClient("production").command({ query: `OPTIMIZE TABLE sessions FINAL` });
+}
+
+let SIGNUP: Goal;
+let DEMO: Goal;
+let CTA: Goal;
+
+async function web(overrides: Partial<WebScope> = {}): Promise<WebScope> {
+  const goals = await listGoals(project.id);
+  const pageGroups = await listPageGroups(project.id);
+  return {
+    scope: prod(),
+    range: resolveRange({ preset: "7d", now: NOW }),
+    filters: {},
+    goal: goals.find((g) => g.id === SIGNUP?.id) ?? null,
+    goals,
+    pageGroups,
+    ...overrides,
+  };
+}
+
+before(async () => {
+  await migrateAll();
+  project = await ensureDefaultProject();
+
+  SIGNUP = (await upsertDefinition(project.id, "goal", {
+    name: "Signup completed",
+    is_default: true,
+    config: { type: "primary", match: "event", event: "Signup Completed" },
+  })) as Goal;
+  DEMO = (await upsertDefinition(project.id, "goal", {
+    name: "Demo booked",
+    config: {
+      type: "primary",
+      match: "event",
+      event: "Demo Booked",
+      funnel: [
+        { name: "Demo page viewed", match: { match: "pageview", path: { op: "exact", value: "/demo" } } },
+        { name: "Form started", match: { match: "event", event: "Form Started" } },
+        { name: "Booking confirmed", match: { match: "event", event: "Demo Booked" } },
+      ],
+    },
+  })) as Goal;
+  CTA = (await upsertDefinition(project.id, "goal", {
+    name: "CTA clicked",
+    config: { type: "supporting", match: "event", event: "CTA Clicked" },
+  })) as Goal;
+
+  await upsertDefinition(project.id, "page_group", { name: "Blog", position: 0, config: { rules: [{ op: "prefix", value: "/blog" }] } });
+  await upsertDefinition(project.id, "page_group", { name: "Product", position: 1, config: { rules: [{ op: "prefix", value: "/product" }, { op: "exact", value: "/pricing" }] } });
+
+  await send([
+    // A visit that completes the signup goal THREE times. One converting session.
+    {
+      anonymousId: "a1",
+      sessionId: "s1",
+      at: ago(2 * DAY),
+      referrer: "https://www.google.com/",
+      pages: [{ path: "/", engagedMs: 15_000 }, { path: "/pricing", afterMs: 20_000 }],
+      tracks: [
+        { event: "Signup Completed", afterMs: 30_000 },
+        { event: "Signup Completed", afterMs: 40_000 },
+        { event: "Signup Completed", afterMs: 50_000 },
+      ],
+    },
+    // Paid social, lands on /blog/post-a, does not convert, single page, 3s — not engaged.
+    {
+      anonymousId: "a2",
+      sessionId: "s2",
+      at: ago(2 * DAY),
+      referrer: "https://www.linkedin.com/feed/",
+      utm: { source: "linkedin", medium: "paid_social", name: "september-launch" },
+      pages: [{ path: "/blog/post-a", engagedMs: 3_000 }],
+    },
+    // Direct, two pages -> engaged by pageview count, no goal.
+    { anonymousId: "a3", sessionId: "s3", at: ago(DAY), pages: [{ path: "/" }, { path: "/product/api", afterMs: 5_000 }] },
+    // The full demo funnel, in order.
+    {
+      anonymousId: "a4",
+      sessionId: "s4",
+      at: ago(DAY),
+      pages: [{ path: "/demo" }],
+      tracks: [
+        { event: "CTA Clicked", afterMs: 1_000 },
+        { event: "Form Started", afterMs: 2_000 },
+        { event: "Demo Booked", afterMs: 3_000 },
+      ],
+    },
+    // Reaches the demo goal WITHOUT the funnel path — booked from a different page.
+    { anonymousId: "a5", sessionId: "s5", at: ago(DAY), pages: [{ path: "/pricing" }], tracks: [{ event: "Demo Booked", afterMs: 1_000 }] },
+    // Out-of-order: form started BEFORE the demo page was seen. Must not reach step 2.
+    {
+      anonymousId: "a6",
+      sessionId: "s6",
+      at: ago(DAY),
+      pages: [{ path: "/demo", afterMs: 5_000 }],
+      tracks: [{ event: "Form Started", afterMs: 1_000, path: "/" }],
+    },
+    // A bot. Must be absent from every count.
+    { anonymousId: "bot1", sessionId: "sbot", at: ago(DAY), userAgent: UA_BOT, pages: [{ path: "/" }, { path: "/pricing", afterMs: 1_000 }] },
+    // Mobile, trailing-slash variant of a page seen elsewhere without one.
+    { anonymousId: "a7", sessionId: "s7", at: ago(DAY), userAgent: UA_MOBILE, pages: [{ path: "/pricing/" }] },
+    // A returning visitor: first seen well before the 7-day window, active inside it.
+    { anonymousId: "old1", sessionId: "s-old", at: ago(40 * DAY), pages: [{ path: "/" }] },
+    { anonymousId: "old1", sessionId: "s-new", at: ago(DAY), pages: [{ path: "/" }] },
+  ]);
+});
+
+after(async () => {
+  const admin = getAdminClient(cfg());
+  for (const e of ENVIRONMENTS) await admin.command({ query: `DROP DATABASE IF EXISTS \`${databaseFor(BASE, e)}\`` });
+  await admin.close();
+});
+
+test("a session that completes the goal three times converts once", async () => {
+  const w = await web();
+  const h = await headline(w);
+  assert.equal(h.converting_sessions.current, 1, "three Signup Completed events in one visit is one converting session");
+  assert.equal(h.goal_name, "Signup completed");
+  // The rate's numerator and denominator must be the same numbers shown elsewhere.
+  assert.equal(h.conversion_rate.numerator, 1);
+  assert.equal(h.conversion_rate.denominator, h.sessions.current);
+});
+
+test("bots are excluded everywhere, and included only when asked", async () => {
+  const clean = await headline(await web());
+  const dirty = await headline(await web({ filters: { includeBots: true } }));
+  assert.equal(dirty.sessions.current - clean.sessions.current, 1, "exactly the one bot visit");
+  const paths = (await allPages(await web())).map((p) => p.path);
+  assert.ok(paths.length > 0);
+});
+
+test("channel comes from the session's entry, and the SQL agrees with the TypeScript", async () => {
+  const rows = await breakdown(await web(), "channel", { limit: 20 });
+  const byKey = Object.fromEntries(rows.map((r) => [r.key, r.sessions.current]));
+  assert.equal(byKey["Paid Social"], 1, "utm_medium=paid_social from linkedin");
+  assert.equal(byKey["Organic Search"], 1, "referrer google.com, no campaign");
+  assert.ok((byKey["Direct"] ?? 0) >= 3, "no referrer, no campaign");
+
+  // The same inputs through the TypeScript classifier must give the same answers.
+  assert.equal(classifyChannel({ pageviews: 1, utm_source: "linkedin", utm_medium: "paid_social", referrer_host: "www.linkedin.com", entry_host: HOST }), "Paid Social");
+  assert.equal(classifyChannel({ pageviews: 1, referrer_host: "www.google.com", entry_host: HOST }), "Organic Search");
+  assert.equal(classifyChannel({ pageviews: 1, entry_host: HOST }), "Direct");
+  assert.equal(classifyChannel({ pageviews: 0, entry_host: HOST }), "Unattributed", "no page view is unattributed, not direct");
+});
+
+test("landing sessions count the page a visit started on, not every page it saw", async () => {
+  const rows = await landingPages(await web(), { limit: 50 });
+  const byPath = Object.fromEntries(rows.map((r) => [r.path, r]));
+  // /pricing was VIEWED in s1 but that visit landed on "/". It is a landing page only
+  // for the visits that actually started there.
+  assert.equal(byPath["/pricing"]?.landing_sessions.current, 2, "s5 and s7 (trailing slash) — s1 viewed it but did not land on it");
+  assert.equal(byPath["/"]?.landing_sessions.current, 3, "s1, s3 and the returning visitor");
+  assert.ok(!("/pricing/" in byPath), "a trailing slash is the same page");
+
+  // Landing conversion is conversion within sessions that STARTED there.
+  assert.equal(byPath["/"]?.conversion_rate.numerator, 1, "only s1 signed up");
+  assert.equal(byPath["/"]?.conversion_rate.denominator, 3);
+});
+
+test("all-pages counts every view of a page and carries no conversion rate", async () => {
+  const rows = await allPages(await web(), { limit: 50 });
+  const byPath = Object.fromEntries(rows.map((r) => [r.path, r]));
+  assert.equal(byPath["/pricing"]?.pageviews.current, 3, "viewed in s1, s5 and s7 — including the one that did not land there");
+  assert.ok(!("conversion_rate" in (byPath["/pricing"] ?? {})), "viewing a page is not evidence it caused anything");
+});
+
+test("engagement is measured, not inferred, and averages only over measured views", async () => {
+  const rows = await allPages(await web(), { limit: 50 });
+  const home = rows.find((r) => r.path === "/");
+  assert.equal(home?.measured_views, 1, "only s1's home view reported a page-leave");
+  assert.equal(home?.avg_engagement_ms, 15_000, "averaged over the view that was measured, not over all three");
+
+  const api = rows.find((r) => r.path === "/product/api");
+  assert.equal(api?.measured_views, 0);
+  assert.equal(api?.avg_engagement_ms, null, "unmeasured is null, never zero");
+});
+
+test("engaged sessions: two pages, or ten measured seconds, or a primary goal", async () => {
+  const rows = await breakdown(await web(), "channel", { limit: 20 });
+  const paidSocial = rows.find((r) => r.key === "Paid Social");
+  // s2 saw one page for three seconds and completed nothing.
+  assert.equal(paidSocial?.engagement_rate.numerator, 0);
+  assert.equal(paidSocial?.engagement_rate.denominator, 1);
+
+  const organic = rows.find((r) => r.key === "Organic Search");
+  assert.equal(organic?.engagement_rate.numerator, 1, "s1: two pages, fifteen seconds and a signup");
+});
+
+test("changing the selected goal does not move the engagement rate", async () => {
+  const onSignup = await breakdown(await web(), "channel", { limit: 20 });
+  const onDemo = await breakdown(await web({ goal: DEMO }), "channel", { limit: 20 });
+  const eng = (rows: typeof onSignup) => rows.map((r) => `${r.key}:${r.engagement_rate.numerator}/${r.engagement_rate.denominator}`).sort().join("|");
+  assert.equal(eng(onSignup), eng(onDemo), "engagement reads every primary goal, never the selected one");
+});
+
+test("the same goal gives the same converting count on every report", async () => {
+  const w = await web();
+  const [h, summary, ch, fn] = await Promise.all([headline(w), goalSummary(w), breakdown(w, "channel", { limit: 50 }), funnel(w)]);
+  const fromSummary = summary.find((g) => g.id === SIGNUP.id)?.converting_sessions.current;
+  const fromChannels = ch.reduce((n, r) => n + r.converting_sessions, 0);
+  assert.equal(h.converting_sessions.current, fromSummary, "headline and goal table agree");
+  assert.equal(h.converting_sessions.current, fromChannels, "channel rows sum to the headline");
+  assert.equal(h.converting_sessions.current, fn.steps[1]?.sessions, "the default funnel's last step is the conversion count");
+});
+
+test("funnel steps are ordered, deduplicated, and honest about other routes", async () => {
+  const f = await funnel(await web({ goal: DEMO }));
+  assert.equal(f.is_path_specific, true);
+  assert.deepEqual(f.steps.map((s) => s.sessions), [2, 1, 1], "s4 and s6 saw /demo; only s4 started the form after seeing it");
+  assert.equal(f.total_conversions, 2, "s4 and s5 both booked");
+  assert.ok(f.total_conversions > f.steps[2].sessions, "one booking arrived by another route, and the funnel says so");
+  assert.equal(f.steps[1].dropped, 1);
+});
+
+test("supporting actions are reported separately and never added to conversions", async () => {
+  const w = await web();
+  const actions = await supportingActions(w);
+  const cta = actions.find((a) => a.id === CTA.id);
+  assert.equal(cta?.sessions.current, 1);
+  const summary = await goalSummary(w);
+  assert.ok(!summary.some((g) => g.id === CTA.id), "a supporting action is not a goal in the summary table");
+});
+
+test("page groups aggregate from sessions, not by summing page rows", async () => {
+  const w = await web();
+  const grouped = await landingPages(w, { groupBy: "group", limit: 50 });
+  const byKey = Object.fromEntries(grouped.map((r) => [r.path, r]));
+  assert.equal(byKey["Blog"]?.landing_sessions.current, 1, "/blog/post-a");
+  assert.equal(byKey["Product"]?.landing_sessions.current, 2, "the two /pricing arrivals; nothing landed under /product");
+  assert.ok(byKey["Ungrouped"], "pages matching no rule are named, not dropped");
+
+  // A visitor who saw two pages in the same group is one visitor for the group, not two.
+  const pages = await allPages(w, { groupBy: "group", limit: 50 });
+  const product = pages.find((p) => p.path === "Product");
+  assert.equal(product?.unique_viewers.current, 4, "a1 and a5 and a7 on /pricing, a3 on /product/api — counted once each");
+});
+
+test("new and returning are exclusive, sum to the total, and come from full history", async () => {
+  const mix = await visitorMix(await web());
+  assert.equal(mix.new_visitors + mix.returning_visitors, mix.total, "the two groups partition the visitors");
+  assert.equal(mix.returning_visitors, 1, "old1 was first seen 40 days ago, outside the 7-day window");
+  assert.ok(mix.returning_share !== null);
+  assert.equal(Math.round(mix.returning_share!), Math.round((1 / mix.total) * 100));
+});
+
+test("the new/returning filter uses the same classification as the mix", async () => {
+  const mix = await visitorMix(await web());
+  const returning = await headline(await web({ filters: { visitor: "returning" } }));
+  const fresh = await headline(await web({ filters: { visitor: "new" } }));
+  assert.equal(returning.visitors.current, mix.returning_visitors);
+  assert.equal(fresh.visitors.current, mix.new_visitors);
+});
+
+test("filters narrow the report without changing what a visitor is", async () => {
+  const mobile = await headline(await web({ filters: { device: "Mobile" } }));
+  assert.equal(mobile.sessions.current, 1, "only s7");
+  assert.equal(classifyDevice(UA_MOBILE), "Mobile");
+  assert.equal(classifyDevice(UA_DESKTOP), "Desktop");
+  assert.equal(classifyBrowser(UA_MOBILE), "Safari");
+  assert.equal(classifyBrowser(UA_DESKTOP), "Chrome");
+
+  const campaign = await headline(await web({ filters: { utmCampaign: "september-launch" } }));
+  assert.equal(campaign.sessions.current, 1);
+});
+
+test("rates are unavailable rather than zero when nothing could have converted", async () => {
+  // A window with no traffic at all.
+  const empty = await web({ range: resolveRange({ preset: "custom", from: "2020-01-01", to: "2020-01-07", now: NOW }) });
+  const h = await headline(empty);
+  assert.equal(h.sessions.current, 0);
+  assert.equal(h.conversion_rate.rate, null, "0/0 is not 0%");
+  assert.equal(h.conversion_rate.denominator, 0);
+
+  const state = await availability(empty);
+  assert.equal(state.has_traffic, false);
+  assert.equal(state.has_primary_goal, true, "a goal is configured — this is 'no traffic', not 'no goal'");
+});
+
+test("no goal configured is distinguishable from nobody converting", async () => {
+  const w = await web({ goal: null, goals: [] });
+  const state = await availability(w);
+  assert.equal(state.has_traffic, true);
+  assert.equal(state.has_primary_goal, false);
+  assert.deepEqual(await conversionTrend(w), [], "no goal means no conversion series to draw");
+  assert.deepEqual(await goalSummary(w), []);
+
+  const configured = await availability(await web());
+  assert.equal(configured.has_primary_goal, true);
+  assert.equal(configured.engagement_tracked, true);
+});
+
+test("no filter matches is distinguishable from no traffic", async () => {
+  const state = await availability(await web({ filters: { country: "ZZ" } }));
+  assert.equal(state.has_traffic, true, "the site has traffic");
+  assert.equal(state.has_matches, false, "this filter does not");
+});
+
+test("comparison is against the same elapsed distance, and absent when switched off", async () => {
+  const off = await headline(await web({ range: resolveRange({ preset: "7d", now: NOW, compare: false }) }));
+  assert.equal(off.sessions.previous, null);
+  assert.equal(off.sessions.change, null);
+
+  const on = await headline(await web());
+  assert.notEqual(on.sessions.previous, null);
+  // Nothing was seeded in the preceding week except the 40-day-old visit, which is
+  // further back still — so the previous period is empty and the change is "New".
+  assert.equal(on.sessions.previous, 0);
+  assert.equal(on.sessions.change, null, "dividing by zero is not +∞%");
+  assert.equal(on.sessions.is_new, true);
+});
+
+test("page detail describes observed navigation and does not invent exits", async () => {
+  const detail = await pageDetail(await web(), "/");
+  assert.equal(detail.landing_sessions.current, 3);
+  assert.ok(detail.sources.length > 0, "where the sessions that landed here came from");
+  const next = Object.fromEntries(detail.next_pages.map((n) => [n.is_exit ? "(exit)" : n.path, n.sessions]));
+  assert.equal(next["/pricing"], 1, "s1 went home -> pricing");
+  assert.equal(next["/product/api"], 1, "s3 went home -> product");
+  assert.equal(detail.click_rate_basis, "page_viewers", "CTA exposure is not tracked and must not be implied");
+});

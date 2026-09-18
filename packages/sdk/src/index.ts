@@ -34,6 +34,21 @@ const GROUP_TRAITS_KEY = "ajs_group_properties";
 const SESSION_KEY = "fourier_session";
 const DEFAULT_SESSION_TIMEOUT = 30 * 60 * 1000;
 
+/**
+ * Engagement measurement. The event name matches the one Fourier's schema sums into a
+ * session and then excludes from every report — see PAGE_LEAVE in @fourierhq/core.
+ */
+const PAGE_LEAVE_EVENT = "$page_leave";
+const ENGAGEMENT_TICK_MS = 1000;
+/**
+ * Visible but untouched for this long and the clock stops. Long enough not to punish
+ * someone reading a screenful without scrolling; short enough that a tab abandoned on a
+ * second monitor does not report an afternoon of rapt attention.
+ */
+const DEFAULT_ENGAGEMENT_IDLE = 5 * 60 * 1000;
+/** Below this, a page view is a bounce off the wrong link and not worth a beacon. */
+const ENGAGEMENT_MIN_MS = 1000;
+
 const isBrowser = typeof window !== "undefined" && typeof document !== "undefined";
 
 export function uuid(): string {
@@ -418,6 +433,94 @@ export class Fourier extends Emitter {
     this.store.remove(SESSION_KEY);
   }
 
+  // ---- engagement ----
+
+  /**
+   * Time a page actually held someone's attention.
+   *
+   * Only foreground time counts, and only while there has been recent interaction: the
+   * clock runs when the tab is visible and stops when it is hidden or when nobody has
+   * touched anything for `engagementIdleTimeout`. That restraint is the point. Elapsed
+   * wall-clock between two events is trivial to compute and describes a tab left open
+   * over lunch as fifty minutes of reading, and a report that says so is worse than a
+   * report with no engagement column at all.
+   *
+   * The total is sent as `$page_leave` when the page goes away — a route change, a tab
+   * close, a navigation — carrying the page context of the page being left. Fourier
+   * sums it into the session and then excludes the event from every other report.
+   */
+  private engagement: { ms: number; lastTick: number; lastActivity: number; page: NonNullable<Context["page"]> } | null = null;
+  private engagementTimer: ReturnType<typeof setInterval> | null = null;
+  private engagementBound = false;
+
+  private startEngagement(): void {
+    if (!isBrowser || this.options.engagement === false) return;
+    const now = Date.now();
+    this.engagement = { ms: 0, lastTick: now, lastActivity: now, page: pageContext() };
+    this.bindEngagement();
+    if (!this.engagementTimer) this.engagementTimer = setInterval(() => this.tickEngagement(), ENGAGEMENT_TICK_MS);
+  }
+
+  private tickEngagement(): void {
+    const e = this.engagement;
+    if (!e) return;
+    const now = Date.now();
+    const since = now - e.lastTick;
+    e.lastTick = now;
+    const idleAfter = this.options.engagementIdleTimeout ?? DEFAULT_ENGAGEMENT_IDLE;
+    const active = document.visibilityState === "visible" && now - e.lastActivity < idleAfter;
+    // Background tabs have their timers throttled to once a minute or worse, so a tick
+    // can arrive long after the one before it. Crediting the whole gap would hand a
+    // buried tab minutes of "engagement" on the strength of one late callback, so a
+    // tick can only ever add a little more than its own interval.
+    if (active) e.ms += Math.min(since, ENGAGEMENT_TICK_MS * 2);
+  }
+
+  private bindEngagement(): void {
+    if (this.engagementBound) return;
+    this.engagementBound = true;
+    const seen = () => {
+      if (this.engagement) this.engagement.lastActivity = Date.now();
+    };
+    for (const type of ["pointerdown", "keydown", "scroll", "wheel", "touchstart", "mousemove"]) {
+      window.addEventListener(type, seen, { passive: true, capture: true });
+    }
+    // A tab coming back to the front is attention, and it also resets the tick clock so
+    // the hidden stretch is never credited retroactively.
+    document.addEventListener("visibilitychange", () => {
+      if (!this.engagement) return;
+      this.engagement.lastTick = Date.now();
+      if (document.visibilityState === "visible") seen();
+      else this.endEngagement({ keepOpen: true });
+    });
+  }
+
+  /**
+   * Close out the current page's measurement and report it. `keepOpen` is for the tab
+   * being hidden, where the page has not been left — the time so far is banked and a
+   * fresh measurement starts if the reader comes back.
+   */
+  private endEngagement(opts: { keepOpen?: boolean } = {}): void {
+    const e = this.engagement;
+    if (!e) return;
+    this.tickEngagement();
+    const ms = Math.round(e.ms);
+    this.engagement = opts.keepOpen ? { ...e, ms: 0, lastTick: Date.now() } : null;
+    if (!opts.keepOpen && this.engagementTimer) {
+      clearInterval(this.engagementTimer);
+      this.engagementTimer = null;
+    }
+    // Nothing measured is nothing to report. An empty beacon would still cost a request
+    // and would land in the table as a page view that engaged nobody for zero seconds,
+    // which is indistinguishable from one the SDK never measured.
+    if (ms < ENGAGEMENT_MIN_MS) return;
+    void this.dispatch(
+      { type: "track", event: PAGE_LEAVE_EVENT, properties: { engaged_ms: ms, path: e.page.path ?? "", url: e.page.url ?? "" } },
+      // The page being left, not wherever the router has already moved to.
+      { context: { page: e.page } },
+    );
+  }
+
   sessionId(): string | null {
     try {
       const raw = this.store.get(SESSION_KEY);
@@ -582,7 +685,11 @@ export class Fourier extends Emitter {
     const props: Properties = { ...pageContext(), ...((properties as Properties) ?? {}) };
     if (name) props.name = name;
     if (category) props.category = category;
-    return this.dispatch(
+    // The page being left is closed out before the new one opens, so a single-page app's
+    // route change reports the time spent on the route it is leaving rather than rolling
+    // it into the next one.
+    this.endEngagement();
+    const sent = this.dispatch(
       {
         type: "page",
         name: (name as string) ?? undefined,
@@ -592,6 +699,8 @@ export class Fourier extends Emitter {
       options as Options,
       callback,
     );
+    this.startEngagement();
+    return sent;
   }
 
   screen(
@@ -828,9 +937,18 @@ export class Fourier extends Emitter {
   private bindUnload() {
     if (!isBrowser) return;
     document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "hidden") void this.flush(true);
+      // endEngagement() enqueues before flush(true) sends, so the last page of a visit
+      // reports its time. Without this the page someone actually left on — usually the
+      // most interesting one — would be the only page never measured.
+      if (document.visibilityState === "hidden") {
+        this.endEngagement({ keepOpen: true });
+        void this.flush(true);
+      }
     });
-    window.addEventListener("pagehide", () => void this.flush(true));
+    window.addEventListener("pagehide", () => {
+      this.endEngagement();
+      void this.flush(true);
+    });
   }
 
   private log(...args: unknown[]) {
