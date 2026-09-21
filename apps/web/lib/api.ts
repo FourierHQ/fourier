@@ -275,6 +275,39 @@ export function useEventNames(days?: number, source?: string, includeHidden = fa
   });
 }
 
+/**
+ * The properties a named event carries, and the values one of them takes — the two
+ * halves of "signup completed, where plan is free".
+ *
+ * Both are suggestions rather than a closed set: they describe the last 30 days of the
+ * environment on screen, while a goal is a rule about all of history. So neither is
+ * allowed to be the only way to name a property, and both stay disabled until there is
+ * an event to ask about.
+ */
+export function useEventPropertyKeys(event: string | null | undefined) {
+  const environment = useEnvironmentValue();
+  const name = event?.trim() ?? "";
+  return useQuery({
+    queryKey: ["property-keys", environment, name],
+    queryFn: () => api<{ keys: { key: string; count: number }[] }>(`/api/projects/${PROJECT}/properties${qs({ event: name, environment })}`).then((r) => r.keys),
+    enabled: Boolean(name),
+    staleTime: 60_000,
+  });
+}
+
+export function useEventPropertyValues(event: string | null | undefined, key: string | null | undefined) {
+  const environment = useEnvironmentValue();
+  const name = event?.trim() ?? "";
+  const prop = key?.trim() ?? "";
+  return useQuery({
+    queryKey: ["property-values", environment, name, prop],
+    queryFn: () =>
+      api<{ values: { value: string; count: number }[] }>(`/api/projects/${PROJECT}/properties${qs({ event: name, key: prop, environment })}`).then((r) => r.values),
+    enabled: Boolean(name && prop),
+    staleTime: 60_000,
+  });
+}
+
 // ---------- hidden events ----------
 
 export interface HiddenEvents {

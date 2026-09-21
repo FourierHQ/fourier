@@ -369,6 +369,31 @@ export async function propertyKeys(scope: Scope, event: string): Promise<{ key: 
   return rows.map((r) => ({ key: String(r.key), count: Number(r.count) }));
 }
 
+/**
+ * The values a property actually takes, so narrowing a goal to `plan = free` is a
+ * choice from the data rather than a guess at the spelling.
+ *
+ * Read as strings whatever the property's JSON type is, because that is how
+ * `propertyFilterSql` compares them — a number written as `2` in the payload has to
+ * offer itself here as "2" or the filter it produces would match nothing. Empty values
+ * are dropped: an event that carries the key with an empty string is indistinguishable
+ * here from one that does not carry it at all, and `exists` is the operator for that
+ * question.
+ */
+export async function propertyValues(scope: Scope, event: string, key: string, limit = 200): Promise<{ value: string; count: number }[]> {
+  // Hidden for the same reason its keys are: an event left out of the reports does not
+  // get to hand back its rows one property at a time.
+  if (scope.hiddenEvents.includes(event)) return [];
+  const rows = await q<Row>(scope, `SELECT JSONExtractString(properties, {k:String}) AS value, count() AS count
+     FROM events
+     WHERE project_id = {p:String} AND event = {e:String} AND timestamp > now64(3) - INTERVAL 30 DAY
+       AND JSONHas(properties, {k:String}) AND JSONExtractString(properties, {k:String}) != ''
+     GROUP BY value ORDER BY count DESC LIMIT {lim:UInt32}`,
+    { p: scope.projectId, e: event, k: key, lim: Math.min(Math.max(limit, 1), 1000) },
+  );
+  return rows.map((r) => ({ value: String(r.value), count: Number(r.count) }));
+}
+
 // ---------- users ----------
 
 export interface UserRecord {
