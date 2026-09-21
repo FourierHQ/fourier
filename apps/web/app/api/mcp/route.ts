@@ -18,6 +18,11 @@ const handler = createMcpHandler((server) => registerFourierTools(server), {
  * have no cookie jar, so the credential here is a read key
  * (`Authorization: Bearer fr_…`) minted on the API & MCP page.
  *
+ * The goal tools write, and a read key is allowed to use them — the same rule the
+ * definitions endpoint already follows. A goal is a reading of events that have already
+ * arrived, applied when a report runs and reversible; it is not the data, and no key of
+ * any kind can change that.
+ *
  * The 401 carries a WWW-Authenticate header because MCP clients use it to tell
  * "needs a token" apart from "the server is broken".
  */

@@ -82,7 +82,7 @@ export default function AgentsPage() {
           <CardHeader>
             <CardTitle>MCP server</CardTitle>
             <CardDescription>
-              Streamable HTTP at <code className="font-mono text-xs">{host}/api/mcp</code>, authenticated with a read key from above. Tools: list_sources, list_event_names, list_events, event_timeseries, list_users, get_user, list_groups, get_group, list_touches, attribution_report, describe_schema, run_sql and more. Read-only.
+              Streamable HTTP at <code className="font-mono text-xs">{host}/api/mcp</code>, authenticated with a read key from above. Tools: list_sources, list_event_names, list_events, event_timeseries, list_users, get_user, list_groups, get_group, list_touches, attribution_report, list_goals, goal_report, describe_schema, run_sql and more. Reading is all they do, with one exception: create_goal, update_goal and delete_goal edit the goals on the Conversions page, so an agent can define what counts as a conversion and then report on it.
             </CardDescription>
           </CardHeader>
           <CardContent>
