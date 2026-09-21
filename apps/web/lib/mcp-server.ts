@@ -321,7 +321,7 @@ export function registerFourierTools(server: McpServer) {
     {
       title: "Run read-only SQL",
       description:
-        "Run a read-only ClickHouse SELECT against the analytics database. Always filter with project_id = {project_id} (the placeholder is bound server-side). Use windowFunnel for funnels, JSONExtractString(properties, 'key') for properties. Max 10k rows.",
+        "Run a read-only ClickHouse SELECT against the analytics database. Always filter with project_id = {project_id} (the placeholder is bound server-side). Use sessions_resolved for anything per visit (sessions, visitors, channel, engagement, entry and exit pages), windowFunnel for funnels, JSONExtractString(properties, 'key') for properties. Max 10k rows.",
       inputSchema: z.object({
         project_id: projectArg, environment: environmentArg,
         sql: z.string().describe("A single SELECT statement. Use {project_id} as the project filter placeholder."),
