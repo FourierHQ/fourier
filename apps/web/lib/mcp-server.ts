@@ -16,6 +16,7 @@ import {
   listSources,
   listUsers,
   propertyKeys,
+  propertyValues,
   runSql,
   schemaDoc,
   ENVIRONMENTS,
@@ -152,6 +153,17 @@ export function registerFourierTools(server: McpServer) {
       annotations: readOnly,
     },
     async ({ project_id, environment, event }) => text(await propertyKeys(await scopeFor(project_id, environment), event)),
+  );
+
+  server.registerTool(
+    "event_property_values",
+    {
+      title: "Event property values",
+      description: "The values one property of an event takes (last 30 days), with how often each occurs. Use it to name a value exactly — in a filter, or when defining a goal narrowed to one of them.",
+      inputSchema: z.object({ project_id: projectArg, environment: environmentArg, event: z.string(), key: z.string(), limit: z.number().int().min(1).max(1000).optional() }),
+      annotations: readOnly,
+    },
+    async ({ project_id, environment, event, key, limit }) => text(await propertyValues(await scopeFor(project_id, environment), event, key, limit)),
   );
 
   server.registerTool(
