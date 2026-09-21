@@ -226,7 +226,7 @@ Two kinds of credential, because sending data and reading it are different jobs.
 
 **Write keys** (`fk_…`) send data in. They ship in your website's JavaScript, they are public by design, and they never need an account — a browser or a backend job must never have to log in to report an event. Nothing about accounts changes ingest.
 
-**Sessions and read keys** (`fr_…`) read data back. The dashboard API, the SQL endpoint and the MCP server all require one. A read key reads and nothing more: it is pasted into agent configs and MCP clients, so it cannot add, remove or reset accounts even when the account that minted it is an admin.
+**Sessions and read keys** (`fr_…`) read data back. The dashboard API, the SQL endpoint and the MCP server all require one. A read key never touches accounts: it is pasted into agent configs and MCP clients, so it cannot add, remove or reset one even when the account that minted it is an admin. What it can write is a definition — a goal, a page group, an event hidden from the reports — because a definition is a reading of the data rather than the data itself, it is applied at query time, and it can be taken back. No key of any kind can change or delete an event that has arrived.
 
 Getting there is a ladder, so nothing is in your way until it needs to be:
 
@@ -259,7 +259,9 @@ claude mcp add --transport http fourier http://localhost:5050/api/mcp \
 
 The header is only needed once the instance has accounts — in development, MCP works without it.
 
-Tools: `list_projects`, `list_sources`, `get_overview`, `list_event_names`, `list_events`, `event_timeseries`, `event_property_keys`, `list_users`, `get_user`, `list_groups`, `get_group`, `list_touches`, `attribution_report`, `describe_schema`, `run_sql`. All read-only. `run_sql` runs arbitrary ClickHouse SELECTs with `readonly=1`, a keyword guard, and the project bound server-side via the `{project_id}` placeholder.
+Tools: `list_projects`, `list_sources`, `get_overview`, `list_event_names`, `list_events`, `event_timeseries`, `event_property_keys`, `event_property_values`, `list_users`, `get_user`, `list_groups`, `get_group`, `list_touches`, `attribution_report`, `list_goals`, `goal_report`, `describe_schema`, `run_sql` read. `create_goal`, `update_goal` and `delete_goal` write, and are the only tools that do — they edit goals, the same rows the **Conversions** page edits, and nothing else. `run_sql` runs arbitrary ClickHouse SELECTs with `readonly=1`, a keyword guard, and the project bound server-side via the `{project_id}` placeholder.
+
+Goals are worth calling out: an agent can read what counts as a conversion, define a new one — an event narrowed by its properties, or a page view, with an optional funnel to it — and then ask `goal_report` how it is doing. Because goals are matched when a report runs rather than at ingest, one an agent defines today reports the history you already have, and deleting it leaves the events untouched.
 
 ## Data model
 
