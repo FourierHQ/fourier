@@ -639,6 +639,23 @@ export async function channelStack(w: WebScope): Promise<{ channels: string[]; p
 
 // ---------- pages ----------
 
+/**
+ * How long after a visit's LAST event we are willing to call it finished. Sessions end
+ * by inactivity, so a visit whose last event was four minutes ago has not exited the
+ * page — it is still being read. Counting it as an exit would inflate the exit row for
+ * the pages people are on right now, which are the ones you are usually looking at.
+ *
+ * Measured from ended_at, never from started_at: a visit that began two hours ago and
+ * was still moving a minute ago is not finished, and asking when it started answers a
+ * different question that happens to look like the right one.
+ *
+ * Shared by the exit rate in the pages table and the "left the site" row in page
+ * detail, which are the same claim at two altitudes and must not disagree about which
+ * visits have ended.
+ */
+const SESSION_SETTLED_MS = 30 * 60 * 1000;
+
+
 export interface LandingPageRow {
   path: string;
   title: string;
@@ -718,6 +735,19 @@ export interface PageRow {
   avg_engagement_ms: number | null;
   /** Page views that reported any engagement measurement at all, the denominator above. */
   measured_views: number;
+  /**
+   * Views of this page that turned out to be the visit's last page, over all views of
+   * it. Not bounce rate: a visit that read three pages and stopped here exits here and
+   * did not bounce. A session is counted once however often it saw the page, so the
+   * numerator is sessions and the denominator is views — which is the conventional
+   * definition, and the reason this can read low on a page people revisit mid-visit.
+   *
+   * Both sides count only visits that have gone quiet for SESSION_SETTLED_MS. Someone
+   * reading the page right now has not left it, and the denominator drops their view
+   * with the numerator rather than holding it against the page. On a live range that
+   * makes this denominator smaller than `pageviews`; the UI shows it, so say so.
+   */
+  exit_rate: RateValue;
   cta_clickers: number;
 }
 
@@ -734,6 +764,10 @@ export async function allPages(w: WebScope, opts: { limit?: number; groupBy?: "p
   const { cte, params, project, scanFrom, scanTo } = sessionBase(w);
   const p = new Params("ap");
   const key = opts.groupBy === "group" ? pageGroupSql(w.pageGroups, "e.path", p) : normalizedPath("e.path");
+  // The same key, applied to where the visit stopped. `exit_path` arrives from `base`
+  // already normalised, so it is compared against the page key on equal terms; the group
+  // expression normalises its own operand and is safe to apply a second time.
+  const exitKey = opts.groupBy === "group" ? pageGroupSql(w.pageGroups, "exit_path", p) : "exit_path";
   const limit = Math.min(Math.max(opts.limit ?? 20, 1), 200);
 
   // "CTA clickers" counts configured supporting actions. Nothing is auto-captured, so
@@ -745,6 +779,10 @@ export async function allPages(w: WebScope, opts: { limit?: number; groupBy?: "p
   const rows = await q<Row>(
     w.scope,
     `${cte},
+     settled AS (
+       SELECT session_id FROM scoped WHERE period = 'current'
+       GROUP BY session_id HAVING max(ended_at) < now64(3) - toIntervalMillisecond({settled:Int64})
+     ),
      page_events AS (
        SELECT
          ${key} AS key,
@@ -754,28 +792,41 @@ export async function allPages(w: WebScope, opts: { limit?: number; groupBy?: "p
          e.title AS title,
          toUInt8(e.event = {leave:String}) AS is_leave,
          if(e.event = {leave:String}, JSONExtractUInt(e.properties, 'engaged_ms'), 0) AS eng_ms,
-         toUInt8(${ctaMatch}) AS is_cta
+         toUInt8(${ctaMatch}) AS is_cta,
+         toUInt8(b.session_id IN (SELECT session_id FROM settled)) AS is_settled
        FROM events AS e
        INNER JOIN scoped AS b ON b.session_id = e.session_id
        WHERE e.project_id = ${project} AND e.session_id != ''
          AND e.timestamp >= ${scanFrom} AND e.timestamp < ${scanTo}
+     ),
+     exits AS (
+       SELECT ${exitKey} AS key, uniqExactIf(session_id, period = 'current') AS exits
+       FROM scoped
+       WHERE exit_path != '' AND session_id IN (SELECT session_id FROM settled)
+       GROUP BY key
+     ),
+     totals AS (
+       SELECT
+         key,
+         anyIf(title, type = 'page' AND title != '') AS title,
+         uniqExactIf(person_id, period = 'current' AND type = 'page') AS viewers,
+         uniqExactIf(person_id, period = 'previous' AND type = 'page') AS prev_viewers,
+         countIf(period = 'current' AND type = 'page') AS pageviews,
+         countIf(period = 'previous' AND type = 'page') AS prev_pageviews,
+         sumIf(eng_ms, period = 'current') AS eng_total,
+         countIf(period = 'current' AND is_leave = 1 AND eng_ms > 0) AS measured,
+         countIf(period = 'current' AND type = 'page' AND is_settled = 1) AS settled_views,
+         uniqExactIf(person_id, period = 'current' AND is_cta = 1) AS cta_clickers
+       FROM page_events
+       GROUP BY key
+       HAVING pageviews > 0 OR prev_pageviews > 0
      )
-     SELECT
-       key,
-       anyIf(title, type = 'page' AND title != '') AS title,
-       uniqExactIf(person_id, period = 'current' AND type = 'page') AS viewers,
-       uniqExactIf(person_id, period = 'previous' AND type = 'page') AS prev_viewers,
-       countIf(period = 'current' AND type = 'page') AS pageviews,
-       countIf(period = 'previous' AND type = 'page') AS prev_pageviews,
-       sumIf(eng_ms, period = 'current') AS eng_total,
-       countIf(period = 'current' AND is_leave = 1 AND eng_ms > 0) AS measured,
-       uniqExactIf(person_id, period = 'current' AND is_cta = 1) AS cta_clickers
-     FROM page_events
-     GROUP BY key
-     HAVING pageviews > 0 OR prev_pageviews > 0
-     ORDER BY pageviews DESC
+     SELECT t.*, ifNull(x.exits, 0) AS exits
+     FROM totals AS t
+     LEFT JOIN exits AS x ON x.key = t.key
+     ORDER BY t.pageviews DESC
      LIMIT ${limit}`,
-    { ...params, ...p.values, leave: PAGE_LEAVE },
+    { ...params, ...p.values, leave: PAGE_LEAVE, settled: SESSION_SETTLED_MS },
   );
 
   return rows.map((r) => {
@@ -790,6 +841,10 @@ export async function allPages(w: WebScope, opts: { limit?: number; groupBy?: "p
       // falls as instrumentation coverage falls, which is the opposite of the truth.
       avg_engagement_ms: measured > 0 ? num(r.eng_total) / measured : null,
       measured_views: measured,
+      // Denominated in views, not sessions: "of everyone who saw this page, this many
+      // went no further". Over views the page never had, the rate is unavailable rather
+      // than 0%, which `rate` already handles.
+      exit_rate: rate(num(r.exits), num(r.settled_views)),
       cta_clickers: num(r.cta_clickers),
     };
   });
@@ -828,18 +883,6 @@ export interface PageDetail {
   landing_sessions: Delta;
   unique_viewers: Delta;
 }
-
-/**
- * How long after a visit's LAST event we are willing to call it finished. Sessions end
- * by inactivity, so a visit whose last event was four minutes ago has not exited the
- * page — it is still being read. Counting it as an exit would inflate the exit row for
- * the pages people are on right now, which are the ones you are usually looking at.
- *
- * Measured from ended_at, never from started_at: a visit that began two hours ago and
- * was still moving a minute ago is not finished, and asking when it started answers a
- * different question that happens to look like the right one.
- */
-const SESSION_SETTLED_MS = 30 * 60 * 1000;
 
 export async function pageDetail(w: WebScope, path: string, opts: { basis?: "landing" | "viewers" } = {}): Promise<PageDetail> {
   const basis = opts.basis ?? "landing";

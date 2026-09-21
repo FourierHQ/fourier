@@ -1,14 +1,14 @@
 "use client";
 
 import { useState } from "react";
-import { Plus, Star, Trash2 } from "lucide-react";
+import { Plus, Star, Trash2, Undo2 } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { useEventNames } from "@/lib/api";
+import { Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { useEventNames, useEventPropertyKeys, useEventPropertyValues } from "@/lib/api";
 import { useDeleteDefinition, useSaveDefinition, useWebDefinitions, type Goal } from "@/lib/web-api";
 
 /**
@@ -20,9 +20,11 @@ import { useDeleteDefinition, useSaveDefinition, useWebDefinitions, type Goal } 
  * the site's performance by however many people abandoned the booking form.
  */
 
+type PropertyFilter = { key: string; op: "eq" | "neq" | "contains" | "exists"; value?: string };
+
 type Match =
   | { match: "pageview"; path: { op: "exact" | "prefix" | "contains"; value: string } }
-  | { match: "event"; event: string };
+  | { match: "event"; event: string; properties?: PropertyFilter[] };
 
 interface Step {
   name: string;
@@ -31,58 +33,252 @@ interface Step {
 
 const PATH_OPS = { exact: "is exactly", prefix: "starts with", contains: "contains" } as const;
 
-function MatchEditor({ value, onChange, events }: { value: Match; onChange: (m: Match) => void; events: string[] }) {
+/**
+ * `exists` deliberately reads as "is set" rather than "exists": the question an operator
+ * is asking is whether the event carried the property at all, which is the one filter
+ * that takes no value.
+ */
+const PROP_OPS = { eq: "is", neq: "is not", contains: "contains", exists: "is set" } as const;
+
+/** Sentinel for "the value I want is not in this list", which switches the field to free text. */
+const CUSTOM = "__custom__";
+
+/**
+ * A dropdown of what the data actually contains, which can always be overridden by hand.
+ *
+ * Both halves matter. The list is what makes `plan = free` a choice rather than a guess
+ * at the spelling — a filter with a typo in it matches nothing and reports a goal that
+ * simply never happens. But the list only describes the last 30 days of one environment,
+ * while a goal is a rule about all of history, so a property you are about to start
+ * sending, or one that went quiet last month, has to remain typeable.
+ */
+function Suggest({
+  value,
+  onChange,
+  options,
+  loading,
+  placeholder,
+  label,
+  className = "w-[170px]",
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: string[];
+  loading?: boolean;
+  placeholder: string;
+  label: string;
+  className?: string;
+}) {
+  const [free, setFree] = useState(false);
+  // Nothing to choose from is not a dead end — it is the same field without the list.
+  const listed = options.length > 0;
+
+  if (free || !listed) {
+    return (
+      <div className="flex items-center gap-1">
+        <Input
+          className={`h-8 font-mono text-xs ${className}`}
+          aria-label={label}
+          placeholder={loading && !listed ? "Loading…" : placeholder}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+        />
+        {listed && (
+          <Button variant="ghost" size="icon" className="size-8" onClick={() => setFree(false)} aria-label={`Choose ${label} from the list`}>
+            <Undo2 className="size-3.5" />
+          </Button>
+        )}
+      </div>
+    );
+  }
+
+  // A value typed earlier, or one that has not been seen in 30 days, still has to be
+  // displayable — a Select shows nothing for a value that is not one of its items.
+  const items = options.includes(value) || !value ? options : [value, ...options];
+  return (
+    <Select
+      value={value || undefined}
+      onValueChange={(v) => {
+        if (v === CUSTOM) return setFree(true);
+        onChange(v);
+      }}
+    >
+      <SelectTrigger size="sm" className={className} aria-label={label}>
+        <SelectValue placeholder={placeholder} />
+      </SelectTrigger>
+      <SelectContent className="max-h-[300px]">
+        {items.map((o) => (
+          <SelectItem key={o} value={o} className="font-mono text-xs">
+            {o}
+          </SelectItem>
+        ))}
+        <SelectSeparator />
+        <SelectItem value={CUSTOM}>Type a {label.toLowerCase()}…</SelectItem>
+      </SelectContent>
+    </Select>
+  );
+}
+
+function PropertyRow({
+  event,
+  filter,
+  onChange,
+  onRemove,
+  keys,
+  keysLoading,
+}: {
+  event: string;
+  filter: PropertyFilter;
+  onChange: (f: PropertyFilter) => void;
+  onRemove: () => void;
+  keys: string[];
+  keysLoading: boolean;
+}) {
+  const values = useEventPropertyValues(event, filter.key);
   return (
     <div className="flex flex-wrap items-center gap-2">
-      <Select
-        value={value.match}
-        onValueChange={(v) => onChange(v === "pageview" ? { match: "pageview", path: { op: "exact", value: "/" } } : { match: "event", event: "" })}
-      >
-        <SelectTrigger size="sm" className="w-[150px]">
+      <Suggest
+        label="Property"
+        placeholder="Property"
+        value={filter.key}
+        // Values belong to the property that was asked for, so changing the property
+        // drops a value chosen for the previous one rather than carrying it across.
+        onChange={(key) => onChange({ ...filter, key, value: "" })}
+        options={keys}
+        loading={keysLoading}
+      />
+      <Select value={filter.op} onValueChange={(v) => onChange({ ...filter, op: v as PropertyFilter["op"] })}>
+        <SelectTrigger size="sm" className="w-[110px]" aria-label="Condition">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
-          <SelectItem value="event">An event fires</SelectItem>
-          <SelectItem value="pageview">A page is viewed</SelectItem>
+          {(Object.keys(PROP_OPS) as (keyof typeof PROP_OPS)[]).map((op) => (
+            <SelectItem key={op} value={op}>
+              {PROP_OPS[op]}
+            </SelectItem>
+          ))}
         </SelectContent>
       </Select>
+      {filter.op !== "exists" && (
+        <Suggest
+          label="Value"
+          placeholder={filter.key ? "Value" : "Pick a property first"}
+          value={filter.value ?? ""}
+          onChange={(value) => onChange({ ...filter, value })}
+          // `contains` asks for a fragment of a value, which is by definition not one of
+          // the whole values on offer, so that list would only be in the way.
+          options={filter.op === "contains" ? [] : (values.data ?? []).map((v) => v.value)}
+          loading={values.isLoading}
+          className="w-[190px]"
+        />
+      )}
+      <Button variant="ghost" size="icon" className="size-8" onClick={onRemove} aria-label="Remove property filter">
+        <Trash2 className="size-3.5" />
+      </Button>
+    </div>
+  );
+}
 
-      {value.match === "event" ? (
-        <>
-          <Input
-            className="h-8 w-[220px] text-xs"
-            list="fourier-event-names"
-            placeholder="Signup Completed"
-            value={value.event}
-            onChange={(e) => onChange({ match: "event", event: e.target.value })}
-          />
-          <datalist id="fourier-event-names">
-            {events.map((e) => (
-              <option key={e} value={e} />
-            ))}
-          </datalist>
-        </>
-      ) : (
-        <>
-          <Select value={value.path.op} onValueChange={(v) => onChange({ match: "pageview", path: { ...value.path, op: v as keyof typeof PATH_OPS } })}>
-            <SelectTrigger size="sm" className="w-[130px]">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {(Object.keys(PATH_OPS) as (keyof typeof PATH_OPS)[]).map((op) => (
-                <SelectItem key={op} value={op}>
-                  {PATH_OPS[op]}
-                </SelectItem>
+/**
+ * Narrowing an event to some of the times it fired.
+ *
+ * This is what keeps "Signup completed" and "Signup completed on a paid plan" as two
+ * separate goals off one event, instead of asking whoever installed the tracking to
+ * emit a second event name for every distinction the business later cares about.
+ */
+function PropertyFilters({ event, filters, onChange }: { event: string; filters: PropertyFilter[]; onChange: (f: PropertyFilter[]) => void }) {
+  const keys = useEventPropertyKeys(event);
+  const options = (keys.data ?? []).map((k) => k.key);
+
+  if (!filters.length) {
+    return (
+      <Button variant="ghost" size="sm" className="h-7 px-2 text-xs text-muted-foreground" onClick={() => onChange([{ key: "", op: "eq", value: "" }])}>
+        <Plus className="size-3.5" /> Filter by property
+      </Button>
+    );
+  }
+
+  return (
+    <div className="space-y-2 rounded-md border border-dashed p-2">
+      <p className="text-xs text-muted-foreground">Only when the event carries all of:</p>
+      {filters.map((f, i) => (
+        <PropertyRow
+          key={i}
+          event={event}
+          filter={f}
+          keys={options}
+          keysLoading={keys.isLoading}
+          onChange={(next) => onChange(filters.map((x, j) => (j === i ? next : x)))}
+          onRemove={() => onChange(filters.filter((_, j) => j !== i))}
+        />
+      ))}
+      {filters.length < 10 && (
+        <Button variant="ghost" size="sm" className="h-7 px-2 text-xs text-muted-foreground" onClick={() => onChange([...filters, { key: "", op: "eq", value: "" }])}>
+          <Plus className="size-3.5" /> Add property filter
+        </Button>
+      )}
+    </div>
+  );
+}
+
+function MatchEditor({ value, onChange, events }: { value: Match; onChange: (m: Match) => void; events: string[] }) {
+  return (
+    <div className="min-w-0 flex-1 space-y-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <Select
+          value={value.match}
+          onValueChange={(v) => onChange(v === "pageview" ? { match: "pageview", path: { op: "exact", value: "/" } } : { match: "event", event: "" })}
+        >
+          <SelectTrigger size="sm" className="w-[150px]">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="event">An event fires</SelectItem>
+            <SelectItem value="pageview">A page is viewed</SelectItem>
+          </SelectContent>
+        </Select>
+
+        {value.match === "event" ? (
+          <>
+            <Input
+              className="h-8 w-[220px] text-xs"
+              list="fourier-event-names"
+              placeholder="Signup Completed"
+              value={value.event}
+              onChange={(e) => onChange({ ...value, event: e.target.value })}
+            />
+            <datalist id="fourier-event-names">
+              {events.map((e) => (
+                <option key={e} value={e} />
               ))}
-            </SelectContent>
-          </Select>
-          <Input
-            className="h-8 w-[200px] font-mono text-xs"
-            placeholder="/thank-you"
-            value={value.path.value}
-            onChange={(e) => onChange({ match: "pageview", path: { ...value.path, value: e.target.value } })}
-          />
-        </>
+            </datalist>
+          </>
+        ) : (
+          <>
+            <Select value={value.path.op} onValueChange={(v) => onChange({ match: "pageview", path: { ...value.path, op: v as keyof typeof PATH_OPS } })}>
+              <SelectTrigger size="sm" className="w-[130px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {(Object.keys(PATH_OPS) as (keyof typeof PATH_OPS)[]).map((op) => (
+                  <SelectItem key={op} value={op}>
+                    {PATH_OPS[op]}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Input
+              className="h-8 w-[200px] font-mono text-xs"
+              placeholder="/thank-you"
+              value={value.path.value}
+              onChange={(e) => onChange({ match: "pageview", path: { ...value.path, value: e.target.value } })}
+            />
+          </>
+        )}
+      </div>
+
+      {value.match === "event" && (
+        <PropertyFilters event={value.event} filters={value.properties ?? []} onChange={(properties) => onChange({ ...value, properties })} />
       )}
     </div>
   );
@@ -96,7 +292,9 @@ function GoalEditor({ goal, onDone }: { goal?: Goal; onDone: () => void }) {
   const [name, setName] = useState(goal?.name ?? "");
   const [type, setType] = useState<"primary" | "supporting">(cfg?.type ?? "primary");
   const [match, setMatch] = useState<Match>(
-    cfg?.match === "pageview" ? { match: "pageview", path: cfg.path } : { match: "event", event: cfg?.match === "event" ? cfg.event : "" },
+    cfg?.match === "pageview"
+      ? { match: "pageview", path: cfg.path }
+      : { match: "event", event: cfg?.match === "event" ? cfg.event : "", properties: cfg?.match === "event" ? cfg.properties : undefined },
   );
   const [steps, setSteps] = useState<Step[]>((cfg?.funnel as Step[] | undefined) ?? []);
   const [isDefault, setIsDefault] = useState(goal?.is_default ?? false);
@@ -104,17 +302,31 @@ function GoalEditor({ goal, onDone }: { goal?: Goal; onDone: () => void }) {
 
   const valid = (m: Match) => (m.match === "event" ? Boolean(m.event.trim()) : Boolean(m.path.value.trim()));
 
+  /**
+   * A half-written filter is dropped rather than saved. `key` is empty in a row the
+   * author has only just added, and an empty `value` on `eq` would compile to "the
+   * property is the empty string" — a rule that quietly matches nothing, which is the
+   * worst way for a goal to be wrong.
+   */
+  const clean = (m: Match): Match => {
+    if (m.match !== "event") return { ...m, path: { ...m.path, value: m.path.value.trim() } };
+    const properties = (m.properties ?? [])
+      .map((f) => ({ ...f, key: f.key.trim(), value: f.op === "exists" ? undefined : (f.value ?? "").trim() }))
+      .filter((f) => f.key && (f.op === "exists" || f.value));
+    return { match: "event", event: m.event.trim(), ...(properties.length ? { properties } : {}) };
+  };
+
   const submit = () => {
     if (!name.trim()) return toast.error("Give the goal a name");
     if (!valid(match)) return toast.error("Say what completes this goal");
-    const funnel = steps.filter((s) => s.name.trim() && valid(s.match));
+    const funnel = steps.filter((s) => s.name.trim() && valid(s.match)).map((s) => ({ name: s.name.trim(), match: clean(s.match) }));
     save.mutate(
       {
         kind: "goal",
         id: goal?.id,
         name: name.trim(),
         is_default: type === "primary" ? isDefault : false,
-        config: { type, ...match, ...(type === "primary" && funnel.length ? { funnel } : {}) },
+        config: { type, ...clean(match), ...(type === "primary" && funnel.length ? { funnel } : {}) },
       },
       {
         onSuccess: () => {
@@ -215,7 +427,10 @@ function GoalEditor({ goal, onDone }: { goal?: Goal; onDone: () => void }) {
 function describe(g: Goal): string {
   const c = g.config;
   if (c.match === "pageview") return `page ${PATH_OPS[c.path.op]} ${c.path.value}`;
-  return `event "${c.event}"`;
+  // The filters are part of what the goal counts, so a goal narrowed to one plan does
+  // not read identically to the unnarrowed goal on the same event.
+  const props = (c.properties ?? []).map((f) => `${f.key} ${PROP_OPS[f.op]}${f.op === "exists" ? "" : ` ${f.value ?? ""}`}`);
+  return `event "${c.event}"${props.length ? ` where ${props.join(" and ")}` : ""}`;
 }
 
 export function ManageGoalsDialog({ trigger }: { trigger?: React.ReactNode }) {

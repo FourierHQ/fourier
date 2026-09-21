@@ -14,7 +14,7 @@
 
 import { botSql, channelSql } from "./classify";
 
-export const SCHEMA_VERSION = 8;
+export const SCHEMA_VERSION = 9;
 
 /**
  * A migration statement. Plain strings are idempotent `CREATE ... IF NOT EXISTS` and run on
@@ -32,6 +32,23 @@ export type Statement = string | { sql: string; when: "upgrade" | "change" };
  * event count, ranking and timeline, the same way identify and group are.
  */
 export const PAGE_LEAVE = "$page_leave";
+
+/**
+ * System events: messages Fourier's own SDK sends to make the product work, rather
+ * than things a person did. They are kept out of the activity views by default.
+ *
+ * Kept out, not ignored. $page_leave carries the foreground time its page held, and
+ * that measurement is read in two places the hidden set deliberately does not reach:
+ * the sessions rollup above, which sums it into engaged_ms at write time, and the
+ * per-page engagement report, which reads the raw rows. Engagement time, engaged
+ * sessions and the engagement rate are all computed from these events whether or not
+ * they are shown. What hiding removes is only their appearance as activity — one row
+ * per page view in the feed, and a second copy of every page view in the totals.
+ *
+ * It is a default rather than a hard-coded exclusion so that an operator debugging
+ * their instrumentation can switch it back on and see the rows.
+ */
+export const SYSTEM_HIDDEN_EVENTS: readonly string[] = [PAGE_LEAVE];
 
 /** A message that records someone looking at something: what a landing page is read off. */
 const IS_VIEW = `type IN ('page', 'screen')`;
@@ -189,6 +206,10 @@ export const controlStatements: Statement[] = [
  * and the one-time backfill that gives an existing install its history. Written once
  * so the two can never drift into computing different sessions.
  */
+// The one place $page_leave is excluded at write time rather than at read time. A
+// session's engagement is computed from it here, so the rollup has to know about it
+// either way, and its `events` column feeds no report — Web Analytics counts sessions
+// and page views. Hiding an event therefore has nothing to correct in this table.
 const sessionRollup = (extra = "") => `SELECT
     project_id,
     session_id,
@@ -421,6 +442,44 @@ export const dataStatements: Statement[] = [
     max(timestamp) AS last_seen
   FROM events
   GROUP BY project_id, day, type, event`,
+
+  // Every event count that is not read straight off `events` comes from one of the
+  // rollups above, and none of them carry the event name — so once an operator hides
+  // an event there is no way to take it back out of a person's or a company's total.
+  // This is that way: the same counts, split by event name, so a report subtracts what
+  // is hidden instead of rebuilding the rollup from raw rows on every page load.
+  //
+  // Keyed on the event first because that is what every read filters on: a hidden set
+  // is a handful of names out of a low-cardinality column, so the subtraction touches
+  // only the granules holding those names.
+  `CREATE TABLE IF NOT EXISTS actor_event_stats (
+    project_id   LowCardinality(String),
+    event        LowCardinality(String),
+    distinct_id  String,
+    group_id     String,
+    source_id    LowCardinality(String),
+    count        SimpleAggregateFunction(sum, UInt64)
+  ) ENGINE = AggregatingMergeTree
+  ORDER BY (project_id, event, distinct_id, group_id, source_id)`,
+
+  `CREATE MATERIALIZED VIEW IF NOT EXISTS actor_event_stats_mv TO actor_event_stats AS
+  SELECT project_id, event, distinct_id, group_id, source_id, count() AS count
+  FROM events
+  GROUP BY project_id, event, distinct_id, group_id, source_id`,
+
+  // History for an install that predates the table, on the same terms as the sessions
+  // backfill below: a materialised view only sees rows inserted after it exists, and a
+  // key the view has already written is skipped rather than added to, because these are
+  // summed counts and covering one twice would over-subtract it. The result is a bounded
+  // under-subtraction for keys that were active during the upgrade boot, never an
+  // over-subtraction that could push a total below zero.
+  { when: "upgrade", sql: `INSERT INTO actor_event_stats
+  SELECT project_id, event, distinct_id, group_id, source_id, count() AS count
+  FROM events
+  WHERE (project_id, event, distinct_id, group_id, source_id) NOT IN (
+    SELECT project_id, event, distinct_id, group_id, source_id FROM actor_event_stats
+  )
+  GROUP BY project_id, event, distinct_id, group_id, source_id` },
 
   // ---- sessions ----
   //
@@ -717,6 +776,46 @@ person_stats — view: per person_id: is_identified, first_seen, last_seen, even
 person_sources (AggregatingMergeTree, GROUP BY project_id, distinct_id, source_id)
   first_seen (min), last_seen (max), event_count (sum). Join via identity_map to get per-person product usage.
 
+sessions (AggregatingMergeTree, GROUP BY project_id, session_id) — one row per visit
+  Holds aggregate states, not values: do NOT read this table directly, read sessions_resolved,
+  which merges them. Browser sessions only — a server-side message carries no session_id and
+  is not pooled into one enormous sessionless visit.
+  source_id (any), started_at (min), ended_at (max), events (sum, excluding $page_leave),
+  pageviews (sum), engaged_ms (sum), identified (max)
+  argMin over the visit's FIRST page view: entry_path, entry_url, entry_host, entry_title,
+  utm_source, utm_medium, utm_campaign, utm_content, utm_term, referrer, referrer_host;
+  exit_path is the argMax of the same. distinct_id, user_agent, country, region and city are
+  argMin over the whole visit. A session that recorded no page view has no entry attributes.
+
+sessions_resolved — view: THE table to query for anything per visit. This is what Web Analytics
+  counts: sessions, visitors, converting sessions, conversion rate, engagement, channel mix, new
+  vs returning. Every column of sessions with the states merged into plain values, plus:
+  person_id — the visitor resolved through identity_map, exactly as events_resolved does. Count
+    visitors with uniqExact(person_id). The session is keyed on session_id alone, so signing in
+    mid-visit is a property of the visit and not a fork in it.
+  is_bot (UInt8) — derived from user_agent at read time, never stamped at ingest. The reports
+    filter is_bot = 0 unless the reader asks for bots; raw SQL does not, so add it yourself.
+  channel — one of 'Paid Search', 'Paid Social', 'Display', 'Paid Other', 'Organic Search',
+    'Organic Social', 'Email', 'Affiliate', 'Referral', 'Other Campaign', 'Direct',
+    'Unattributed'. Derived at read time from utm_medium / utm_source, the referrer host and the
+    entry host: an explicitly paid medium beats the network it ran on, and an explicit campaign
+    beats a bare referrer. 'Direct' means the entry page view carried neither referrer nor
+    campaign; 'Unattributed' means the visit recorded no page view to read an origin from. They
+    are different answers — do not merge them.
+  engaged_base (UInt8) — pageviews >= 2 OR engaged_ms >= 10000. Engagement minus its goal leg:
+    the full definition also counts a visit that completed a primary goal, and that is a
+    query-time join the caller ORs in, because goals are configuration rather than schema. OR in
+    every primary goal, not the one a reader selected, or the engagement rate moves under them.
+  engaged_ms is foreground time the SDK measured, summed out of the visit's $page_leave events at
+  write time. 0 means not measured, which is not the same as not engaged. $page_leave being
+  hidden from the reports subtracts nothing here: the measurement was banked before it was hidden.
+  A bounce is pageviews = 1. A visit's duration is ended_at - started_at, which is wall clock and
+  not engaged_ms. Device and browser are read off user_agent at query time; there is no column.
+  New vs returning is not a column either: a visit is new when its person_id was first seen inside
+  the period, read off person_sources.first_seen joined through identity_map over ALL history.
+  Sessions belong to a period by started_at, so a goal completed twenty minutes after midnight
+  still counts for the visit that began the evening before.
+
 touches — arrivals for attribution: session starts, anything carrying UTMs, and page views with an
   external referrer. Close to one row per arrival but not guaranteed to be one — a landing page with
   UTMs writes a row per message on it — so reads collapse rows sharing a person, a session and the
@@ -749,7 +848,36 @@ group_members (AggregatingMergeTree, GROUP BY project_id, group_id, distinct_id)
 event_stats_daily (AggregatingMergeTree, GROUP BY project_id, event, day)
   type, count (sum), users (uniqMerge), first_seen (min), last_seen (max)
 
+actor_event_stats (AggregatingMergeTree, GROUP BY project_id, event, distinct_id, group_id, source_id)
+  count (sum). The same counts the rollups above hold, split by event name, so a total can
+  have specific events taken back out of it.
+
+definitions — what the operator has told Fourier to look for: conversion goals, page groups, and
+  events hidden from the reports. Lives in the CONTROL database (the base database, like sources
+  and projects), not per environment: a goal is defined once and means the same thing everywhere.
+  project_id, kind ('goal' | 'page_group' | 'hidden_event'), id, name, config (JSON string),
+  position (page groups are matched in this order and the first match wins — a rule, not a display
+  preference), is_default (the goal a report picks when the reader names none), deleted,
+  created_at, updated_at. ReplacingMergeTree: use FINAL and filter deleted = 0.
+  config by kind — definitions.ts owns the parsing, and is the authority on the shape:
+    goal — {type: 'primary' | 'supporting'} merged with either {match: 'pageview', path: {op:
+      'exact' | 'prefix' | 'contains', value}} or {match: 'event', event, properties?: [{key, op:
+      'eq' | 'neq' | 'contains' | 'exists', value?}]}, plus an optional funnel: [{name, match}] of
+      ordered steps. Only primary goals may be counted in a conversion rate; supporting actions
+      are reported and never added to a conversion total.
+    page_group — {rules: [{op, value}]}, same path rule shape.
+    hidden_event — {hidden: bool}, and the row id IS the event name. Absence means the default.
+  Nothing here is applied at ingest. A definition is compiled into SQL when a report runs, so
+  naming a goal today reports the whole history you already have.
+
+HIDDEN EVENTS. The operator can mark event names as instrumentation rather than activity —
+$page_leave is hidden by default — and the dashboard and every Fourier tool leave those names out
+of every count, chart, ranking and listing. Raw SQL does not: these tables hold every row that ever
+arrived. To agree with what the operator sees, exclude the hidden names (get_schema lists them) with
+event NOT IN (...), and subtract them from any rollup total using actor_event_stats.
+
 Tips: always filter by project_id. Use the rollup tables for counts; query events for
 timelines and property breakdowns; use events_resolved + person_id for funnels (windowFunnel)
-and retention so anonymous pre-signup steps join up with the identified user.
+and retention so anonymous pre-signup steps join up with the identified user; use
+sessions_resolved for anything counted per visit rather than re-deriving sessions from events.
 `.trim();

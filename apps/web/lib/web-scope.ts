@@ -9,7 +9,7 @@
  */
 
 import { listGoals, listPageGroups, resolveGoal, resolveRange, type Project, type WebFilters, type WebScope } from "@fourierhq/core";
-import { environmentFromRequest, scope as makeScope } from "./db";
+import { readScope } from "./db";
 
 /** Query-string names, exported so the client builds the same URLs the server reads. */
 export const PARAM = {
@@ -59,9 +59,9 @@ export function filtersFromParams(s: URLSearchParams): WebFilters {
  */
 export async function webScopeFromRequest(req: Request, project: Project): Promise<WebScope> {
   const s = new URL(req.url).searchParams;
-  const [goals, pageGroups] = await Promise.all([listGoals(project.id), listPageGroups(project.id)]);
+  const [goals, pageGroups, scope] = await Promise.all([listGoals(project.id), listPageGroups(project.id), readScope(project.id, req)]);
   return {
-    scope: makeScope(project.id, environmentFromRequest(req)),
+    scope,
     range: resolveRange({
       preset: str(s, PARAM.preset),
       from: str(s, PARAM.from),

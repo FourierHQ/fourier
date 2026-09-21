@@ -265,12 +265,77 @@ export function useOverview(opts?: Opts<{ project: Project; overview: Overview }
   });
 }
 
-export function useEventNames(days?: number, source?: string) {
+export function useEventNames(days?: number, source?: string, includeHidden = false) {
   const environment = useEnvironmentValue();
   return useQuery({
-    queryKey: ["event-names", environment, days, source],
-    queryFn: () => api<{ events: EventName[] }>(`/api/projects/${PROJECT}/events/names${qs({ days, source, environment })}`).then((r) => r.events),
+    queryKey: ["event-names", environment, days, source, includeHidden],
+    queryFn: () =>
+      api<{ events: EventName[] }>(`/api/projects/${PROJECT}/events/names${qs({ days, source, environment, include_hidden: includeHidden ? 1 : undefined })}`).then((r) => r.events),
     refetchInterval: LIVE_INTERVAL * 2,
+  });
+}
+
+/**
+ * The properties a named event carries, and the values one of them takes — the two
+ * halves of "signup completed, where plan is free".
+ *
+ * Both are suggestions rather than a closed set: they describe the last 30 days of the
+ * environment on screen, while a goal is a rule about all of history. So neither is
+ * allowed to be the only way to name a property, and both stay disabled until there is
+ * an event to ask about.
+ */
+export function useEventPropertyKeys(event: string | null | undefined) {
+  const environment = useEnvironmentValue();
+  const name = event?.trim() ?? "";
+  return useQuery({
+    queryKey: ["property-keys", environment, name],
+    queryFn: () => api<{ keys: { key: string; count: number }[] }>(`/api/projects/${PROJECT}/properties${qs({ event: name, environment })}`).then((r) => r.keys),
+    enabled: Boolean(name),
+    staleTime: 60_000,
+  });
+}
+
+export function useEventPropertyValues(event: string | null | undefined, key: string | null | undefined) {
+  const environment = useEnvironmentValue();
+  const name = event?.trim() ?? "";
+  const prop = key?.trim() ?? "";
+  return useQuery({
+    queryKey: ["property-values", environment, name, prop],
+    queryFn: () =>
+      api<{ values: { value: string; count: number }[] }>(`/api/projects/${PROJECT}/properties${qs({ event: name, key: prop, environment })}`).then((r) => r.values),
+    enabled: Boolean(name && prop),
+    staleTime: 60_000,
+  });
+}
+
+// ---------- hidden events ----------
+
+export interface HiddenEvents {
+  /** Every name currently left out of the reports: defaults plus choices. */
+  hidden: string[];
+  /** The names Fourier hides out of the box, so the UI can label them. */
+  system: string[];
+  /** Stored departures from those defaults. */
+  rules: { event: string; hidden: boolean; updated_at: string }[];
+}
+
+/**
+ * Hidden events are stored once for the project, not per environment, so this query
+ * deliberately carries no environment key: switching to preview must not look like a
+ * different set of decisions.
+ */
+export function useHiddenEvents() {
+  return useQuery({ queryKey: ["hidden-events"], queryFn: () => api<HiddenEvents>(`/api/projects/${PROJECT}/events/hidden`) });
+}
+
+export function useSetEventHidden() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { event: string; hidden: boolean }) =>
+      api<{ hidden: string[] }>(`/api/projects/${PROJECT}/events/hidden`, { method: "POST", body: JSON.stringify(input) }),
+    // Hiding an event changes almost every number on every other screen, so the whole
+    // cache goes rather than a list of the queries that happen to be affected today.
+    onSuccess: () => qc.invalidateQueries(),
   });
 }
 
