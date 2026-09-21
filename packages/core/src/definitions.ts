@@ -1,12 +1,14 @@
 /**
  * Definitions: the things an operator tells Fourier to look for.
  *
- * A conversion goal, a supporting action, a page group. All three are a name plus a
- * rule, all three live in the `definitions` control table, and all three are compiled
- * into SQL when a report runs rather than evaluated at ingest. That last part is the
- * design: you install tracking, and a week later you decide what counts as a signup.
- * Query-time evaluation means that decision reports the week you already have, and
- * that fixing a rule you got wrong fixes the history it was always meant to describe.
+ * A conversion goal, a supporting action, a page group, an event hidden from the
+ * reports. Each is a name plus a rule, each lives in the `definitions` control table,
+ * and each is applied when a report runs rather than evaluated at ingest. That last
+ * part is the design: you install tracking, and a week later you decide what counts as
+ * a signup — or that a piece of instrumentation was never activity worth counting.
+ * Query-time evaluation means that decision reports the week you already have, that
+ * fixing a rule you got wrong fixes the history it was always meant to describe, and
+ * that hiding an event is a reading decision you can take back, not a deletion.
  *
  * Compilation never concatenates a user's string into SQL. Every value travels as a
  * ClickHouse query parameter, and the only thing a definition chooses about the SQL
@@ -15,6 +17,7 @@
 
 import { z } from "zod";
 import { getControlClient } from "./client";
+import { SYSTEM_HIDDEN_EVENTS } from "./schema";
 
 // ---------- shapes ----------
 
@@ -78,7 +81,17 @@ export type GoalConfig = z.infer<typeof goalConfigSchema>;
 export const pageGroupConfigSchema = z.object({ rules: z.array(pathRuleSchema).min(1).max(20) });
 export type PageGroupConfig = z.infer<typeof pageGroupConfigSchema>;
 
-export const DEFINITION_KINDS = ["goal", "page_group"] as const;
+/**
+ * Whether one named event is kept out of the reports. Stored per event rather than as
+ * one list, so that the decision about `$page_leave` — which has a default — is a row
+ * that says what the operator chose, and its absence means "still the default". A
+ * single stored list could not tell "I unhid the system event" apart from "I have
+ * never touched this", and the first must survive a later change to the defaults.
+ */
+export const hiddenEventConfigSchema = z.object({ hidden: z.boolean() });
+export type HiddenEventConfig = z.infer<typeof hiddenEventConfigSchema>;
+
+export const DEFINITION_KINDS = ["goal", "page_group", "hidden_event"] as const;
 export type DefinitionKind = (typeof DEFINITION_KINDS)[number];
 
 export interface Definition {
@@ -100,6 +113,11 @@ export interface Goal extends Definition {
 export interface PageGroup extends Definition {
   kind: "page_group";
   config: PageGroupConfig;
+}
+
+export interface HiddenEventRule extends Definition {
+  kind: "hidden_event";
+  config: HiddenEventConfig;
 }
 
 // ---------- storage ----------
@@ -166,6 +184,64 @@ export async function listPageGroups(projectId: string): Promise<PageGroup[]> {
     .map((g) => ({ ...g, kind: "page_group" as const }));
 }
 
+// ---------- hidden events ----------
+
+/**
+ * One row per event the operator has had an opinion about, hidden or shown. The id is
+ * the event name itself: there is exactly one decision per name, so a second "hide
+ * $page_leave" replaces the first rather than stacking up.
+ */
+export async function listHiddenEventRules(projectId: string): Promise<HiddenEventRule[]> {
+  const rows = await selectRows(projectId, "hidden_event");
+  return rows
+    .map((r) => parse(r, hiddenEventConfigSchema))
+    .filter((h): h is HiddenEventRule => h !== null)
+    .map((h) => ({ ...h, kind: "hidden_event" as const }));
+}
+
+/**
+ * The event names a report must leave out: the system defaults, plus whatever the
+ * operator has hidden, minus whatever they have explicitly shown.
+ *
+ * Order matters only in that an explicit decision always wins over a default, which is
+ * what makes "show me $page_leave again" work without hard-coding an exception.
+ */
+export function resolveHiddenEvents(rules: HiddenEventRule[]): string[] {
+  const hidden = new Set(SYSTEM_HIDDEN_EVENTS);
+  for (const rule of rules) {
+    if (rule.config.hidden) hidden.add(rule.id);
+    else hidden.delete(rule.id);
+  }
+  return [...hidden].sort();
+}
+
+/** The hidden set for a project, as every read scope carries it. */
+export async function hiddenEventsFor(projectId: string): Promise<string[]> {
+  return resolveHiddenEvents(await listHiddenEventRules(projectId));
+}
+
+/**
+ * Hide or show one event, storing the operator's choice against that name. Callers
+ * that are merely restating a default should use `clearEventHidden` instead, so the
+ * stored rows stay a list of departures from the defaults rather than a log.
+ */
+export async function setEventHidden(projectId: string, event: string, hidden: boolean): Promise<HiddenEventRule> {
+  const name = event.trim();
+  if (!name) throw new Error("Event name is required");
+  const saved = await upsertDefinition(projectId, "hidden_event", { id: name, name, config: { hidden } });
+  return { ...saved, kind: "hidden_event", config: { hidden } };
+}
+
+/** Forget an explicit decision, returning the event to whatever the defaults say. */
+export async function clearEventHidden(projectId: string, event: string): Promise<boolean> {
+  return deleteDefinition(projectId, "hidden_event", event);
+}
+
+/** Whether an event is hidden only because it is a system default — nothing was chosen. */
+export function isSystemHidden(event: string): boolean {
+  return SYSTEM_HIDDEN_EVENTS.includes(event);
+}
+
 /** Primary goals only, in the operator's order. These are what a conversion rate may count. */
 export function primaryGoals(goals: Goal[]): Goal[] {
   return goals.filter((g) => g.config.type === "primary");
@@ -215,8 +291,8 @@ export async function upsertDefinition(
   projectId: string,
   kind: DefinitionKind,
   input: UpsertInput,
-): Promise<Definition & { config: GoalConfig | PageGroupConfig }> {
-  const schema = kind === "goal" ? goalConfigSchema : pageGroupConfigSchema;
+): Promise<Definition & { config: GoalConfig | PageGroupConfig | HiddenEventConfig }> {
+  const schema = kind === "goal" ? goalConfigSchema : kind === "page_group" ? pageGroupConfigSchema : hiddenEventConfigSchema;
   const config = schema.parse(input.config);
   const name = input.name.trim();
   if (!name) throw new Error("Name is required");

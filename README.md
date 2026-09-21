@@ -162,6 +162,18 @@ The dashboard's environment switcher is in the sidebar and opens on Production; 
 
 `group(groupId, traits)` registers a company and links the current user to it. Every later event carries `group_id`. The **Companies** view shows members, top events, activity, and attribution per company, and every API endpoint and MCP tool accepts a `group_id` filter.
 
+### System and hidden events
+
+Not everything that arrives is something a person did. **Settings → Events** has two lists.
+
+**System events** are messages the SDK sends to make the product work. `$page_leave` is one: it fires once per page view carrying the foreground time that page held, so left in the activity views it would roughly double the event count of a site that only has page views. It is kept out of them by default — and **kept out is not ignored**. That measurement is read from the stored row either way: the `sessions` rollup sums it into `engaged_ms` when the event arrives, and the per-page engagement report reads the raw rows when you open it. Engagement time, engaged sessions and the engagement rate are computed from these events whether or not they are shown. Showing one changes what you see, never what is measured — which is what makes it a safe thing to switch on while debugging instrumentation.
+
+**Hidden events** are your own events that you have decided are not activity.
+
+Either way the exclusion is the same, and it reaches **every** count, chart, ranking and feed: the overview totals and activity chart, the events list and its filter, top events, and each person's and each company's event count. Nothing is deleted and nothing is dropped at ingest — the rows are still stored, still counted by raw SQL, and showing an event again brings back its entire history, including the part recorded while it was hidden. Like goals and page groups, the setting is stored once for the whole install rather than per environment.
+
+Raw SQL is the one exception, because it is your SQL: `describe_schema` names the excluded events so an agent can leave them out and get the same numbers the dashboard shows.
+
 ### Location
 
 Every event carries the country, region, city and coordinates it arrived from. It is a property of the arrival, not of the person — someone who travels has events in several countries, and each keeps its own — so the Users list and profile show where that person was **last** seen, ignoring events that carry no location.
@@ -251,7 +263,7 @@ Tools: `list_projects`, `list_sources`, `get_overview`, `list_event_names`, `lis
 
 ## Data model
 
-ClickHouse, all times UTC. `events` is the source of truth, one row per message, tagged with the `source_id` it arrived on. `distinct_id` is `user_id` when identified, otherwise `anonymous_id`; `person_id` is the resolved person. Query `events_resolved` rather than `events` for anything per person. `user_traits`, `group_traits`, and `identities` hold merged traits and id links. Location lives on the event (`country`, `region`, `city`, `latitude`, `longitude`) and is rolled up to "last seen in" per person. Materialised views keep `user_stats`, `group_stats`, `group_members`, `event_stats_daily`, `sessions` and `touches` current on insert. `sessions` is one row per visit and is what Web Analytics counts; read it through `sessions_resolved`, which merges the aggregate states, resolves the visitor to a person, and classifies the visit's channel and whether it was a bot. `definitions` holds the goals and page groups, in the control database alongside sources. Full description: `GET /api/projects/default/schema` or the `describe_schema` MCP tool.
+ClickHouse, all times UTC. `events` is the source of truth, one row per message, tagged with the `source_id` it arrived on. `distinct_id` is `user_id` when identified, otherwise `anonymous_id`; `person_id` is the resolved person. Query `events_resolved` rather than `events` for anything per person. `user_traits`, `group_traits`, and `identities` hold merged traits and id links. Location lives on the event (`country`, `region`, `city`, `latitude`, `longitude`) and is rolled up to "last seen in" per person. Materialised views keep `user_stats`, `group_stats`, `group_members`, `event_stats_daily`, `actor_event_stats`, `sessions` and `touches` current on insert. `actor_event_stats` is those same counts split by event name, which is what lets a hidden event be subtracted from a total that was rolled up across all of them. `sessions.engaged_ms` is deliberately not one of those totals: it is summed from `$page_leave` at write time and is unaffected by what is hidden. `sessions` is one row per visit and is what Web Analytics counts; read it through `sessions_resolved`, which merges the aggregate states, resolves the visitor to a person, and classifies the visit's channel and whether it was a bot. `definitions` holds the goals, page groups and hidden events, in the control database alongside sources. Full description: `GET /api/projects/default/schema` or the `describe_schema` MCP tool.
 
 ## Repository
 

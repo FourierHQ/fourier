@@ -4,6 +4,7 @@ import {
   ensureDefaultProject,
   ensureDefaultSource,
   getProject,
+  hiddenEventsFor,
   listProjects,
   migrateAll,
   parseEnvironment,
@@ -45,11 +46,24 @@ export function environmentFromRequest(req: Request): Environment {
   return parseEnvironment(new URL(req.url).searchParams.get("environment"));
 }
 
-/** Project + environment for a read. Every query in core requires one of these. */
+/**
+ * Project, environment and hidden events for a read. Every query in core requires one
+ * of these, and it is built here rather than at each route so that no report can be
+ * added that silently counts events the operator has hidden.
+ *
+ * Hidden events live in the control database and so are shared by every environment,
+ * like goals and page groups: an event that is instrumentation in production is
+ * instrumentation in preview too.
+ */
+export async function readScope(projectId: string, req: Request): Promise<Scope> {
+  return makeScope(projectId, environmentFromRequest(req), await hiddenEventsFor(projectId));
+}
+
+/** The same, from a project id or alias, or null when there is no such project. */
 export async function resolveScope(idOrAlias: string, req: Request): Promise<Scope | null> {
   const project = await resolveProject(idOrAlias);
   if (!project) return null;
-  return makeScope(project.id, environmentFromRequest(req));
+  return readScope(project.id, req);
 }
 
 /** Forget the migrated state so the next request re-runs migrations (e.g. after the database was dropped). */

@@ -9,6 +9,7 @@ import {
   getGroup,
   getOverview,
   getUser,
+  hiddenEventsFor,
   listEventNames,
   listEvents,
   listGroups,
@@ -45,9 +46,14 @@ async function project(id?: string) {
   return p;
 }
 
-/** Project + environment for a read. Defaults to production, like the dashboard. */
+/**
+ * Project, environment and hidden events for a read. Defaults to production, like the
+ * dashboard — and, like the dashboard, leaves out the events the operator has hidden,
+ * so an agent's answer and the screen the operator is looking at are the same answer.
+ */
 async function scopeFor(projectId: string | undefined, environment: string | undefined): Promise<Scope> {
-  return makeScope((await project(projectId)).id, parseEnvironment(environment));
+  const id = (await project(projectId)).id;
+  return makeScope(id, parseEnvironment(environment), await hiddenEventsFor(id));
 }
 
 function text(data: unknown) {
@@ -283,10 +289,19 @@ export function registerFourierTools(server: McpServer) {
     {
       title: "Describe schema",
       description: "The ClickHouse schema and query tips. Read this before using run_sql.",
-      inputSchema: z.object({}),
+      inputSchema: z.object({ project_id: projectArg }),
       annotations: readOnly,
     },
-    async () => ({ content: [{ type: "text" as const, text: schemaDoc }] }),
+    // The hidden set is named here rather than only described, because run_sql is the
+    // one route that cannot apply it: an agent writing its own SQL has to be told
+    // which names to leave out if its numbers are to match the dashboard's.
+    async ({ project_id }) => {
+      const hidden = await hiddenEventsFor((await project(project_id)).id);
+      const suffix = hidden.length
+        ? `\n\nHidden in this project right now: ${hidden.join(", ")}. Every tool above already excludes these; run_sql does not.`
+        : `\n\nNothing is hidden in this project right now.`;
+      return { content: [{ type: "text" as const, text: schemaDoc + suffix }] };
+    },
   );
 
   server.registerTool(
