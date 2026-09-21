@@ -300,6 +300,24 @@ test("all-pages counts every view of a page and carries no conversion rate", asy
   assert.ok(!("conversion_rate" in (byPath["/pricing"] ?? {})), "viewing a page is not evidence it caused anything");
 });
 
+test("exit rate counts the visits that ended on a page, not the visits that only saw it", async () => {
+  const rows = await allPages(await web(), { limit: 50 });
+  const byPath = Object.fromEntries(rows.map((r) => [r.path, r]));
+
+  // "/" was viewed three times and ended the visit once: s1 went on to /pricing and
+  // s3 to /product/api, so only the returning visitor's single-page visit exits here.
+  // Reading this as a bounce rate would say the home page fails two visitors in three.
+  assert.equal(byPath["/"]?.exit_rate.numerator, 1, "only s-new stopped on the home page");
+  assert.equal(byPath["/"]?.exit_rate.denominator, 3, "denominated in views of the page, not visits that landed on it");
+  assert.equal(byPath["/"]?.exit_rate.rate, (1 / 3) * 100, "one view in three, divided the way `rate` divides it");
+
+  // Every visit that saw /pricing ended there — including s1, which landed on "/",
+  // read two pages and signed up. A page can be the last one seen and still be the
+  // one that worked, which is exactly why this is not bounce rate.
+  assert.equal(byPath["/pricing"]?.exit_rate.numerator, 3, "s1, s5 and the trailing-slash s7");
+  assert.equal(byPath["/pricing"]?.exit_rate.rate, 100);
+});
+
 test("engagement is measured, not inferred, and averages only over measured views", async () => {
   const rows = await allPages(await web(), { limit: 50 });
   const home = rows.find((r) => r.path === "/");
@@ -447,6 +465,11 @@ test("page groups aggregate from sessions, not by summing page rows", async () =
   const pages = await allPages(w, { groupBy: "group", limit: 50 });
   const product = pages.find((p) => p.path === "Product");
   assert.equal(product?.unique_viewers.current, 4, "a1 and a5 and a7 on /pricing, a3 on /product/api — counted once each");
+
+  // Exits are grouped by where the visit stopped, through the same rules as the pages
+  // themselves: s1, s3, s5 and s7 all ended somewhere inside Product.
+  assert.equal(product?.exit_rate.numerator, 4);
+  assert.equal(product?.exit_rate.denominator, 4, "the three /pricing views and the one /product/api view");
 });
 
 test("with no goal named, conversions are every primary goal, counted once", async () => {

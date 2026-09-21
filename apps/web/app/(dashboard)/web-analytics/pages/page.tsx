@@ -156,6 +156,15 @@ export default function PagesPage() {
       ),
     },
     {
+      key: "exit",
+      header: (
+        <MetricLabel hint="Views of this page that were the last page of the visit, as a share of its views. Exit rate, not bounce rate: a visit that read three pages and stopped here exits here but did not bounce, so high is only a problem on pages that are not meant to end a visit. Visits still in progress count on neither side, which is why this denominator can be below the page views beside it.">
+          Exit rate
+        </MetricLabel>
+      ),
+      cell: (r: PageRow) => <RateCell value={r.exit_rate} unit="views" />,
+    },
+    {
       key: "cta",
       header: (
         <MetricLabel hint="Distinct people who triggered one of your configured supporting actions on this page. Nothing is captured automatically — define the actions on the Conversions page.">
