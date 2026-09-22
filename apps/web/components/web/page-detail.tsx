@@ -1,12 +1,12 @@
 "use client";
 
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { Sheet, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
 import { HorizontalBars, TrendChart } from "@/components/web/charts";
 import { MetricLabel, RateCell } from "@/components/web/metric";
 import { Panel, QueryError } from "@/components/web/states";
-import { DETAIL_SHEET } from "@/components/web/detail-sheet";
+import { DetailSheetContent } from "@/components/web/detail-sheet";
 import { formatNumber, formatRate } from "@/lib/format";
 import { errorOf, unwrap, useWebPageDetail } from "@/lib/web-api";
 
@@ -34,7 +34,7 @@ export function PageDetailSheet({
 
   return (
     <Sheet open={Boolean(path)} onOpenChange={(open) => !open && onClose()}>
-      <SheetContent side="right" className={DETAIL_SHEET}>
+      <DetailSheetContent>
         <SheetHeader>
           <SheetTitle className="truncate font-mono text-sm">{path}</SheetTitle>
           <SheetDescription>{detail?.title || "Page detail"}</SheetDescription>
@@ -151,7 +151,7 @@ export function PageDetailSheet({
             </>
           )}
         </div>
-      </SheetContent>
+      </DetailSheetContent>
     </Sheet>
   );
 }

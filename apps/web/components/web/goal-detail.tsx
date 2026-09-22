@@ -4,7 +4,7 @@ import Link from "next/link";
 import { ArrowUpRight, Building2, ChevronLeft } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { Sheet, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { EventsTable } from "@/components/events-table";
@@ -14,7 +14,7 @@ import { TouchBadge } from "@/components/attribution";
 import { PersonLabel, UserAvatar } from "@/components/users-table";
 import { CopyButton } from "@/components/copy-button";
 import { CountChart } from "@/components/web/charts";
-import { DETAIL_SHEET, DetailStat } from "@/components/web/detail-sheet";
+import { DetailSheetContent, DetailStat } from "@/components/web/detail-sheet";
 import { GoalMark } from "@/components/web/goal-mark";
 import { MetricLabel } from "@/components/web/metric";
 import { QueryError } from "@/components/web/states";
@@ -66,7 +66,7 @@ export function GoalDetailSheet({
 
   return (
     <Sheet open={Boolean(definition)} onOpenChange={(open) => !open && onClose()}>
-      <SheetContent side="right" className={DETAIL_SHEET}>
+      <DetailSheetContent>
         {person ? (
           <PersonPage personId={person} onBack={onBack} backLabel={detail?.name} />
         ) : (
@@ -148,7 +148,7 @@ export function GoalDetailSheet({
             </div>
           </>
         )}
-      </SheetContent>
+      </DetailSheetContent>
     </Sheet>
   );
 }
