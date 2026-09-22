@@ -6,6 +6,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { HorizontalBars, TrendChart } from "@/components/web/charts";
 import { MetricLabel, RateCell } from "@/components/web/metric";
 import { Panel, QueryError } from "@/components/web/states";
+import { DETAIL_SHEET } from "@/components/web/detail-sheet";
 import { formatNumber, formatRate } from "@/lib/format";
 import { errorOf, unwrap, useWebPageDetail } from "@/lib/web-api";
 
@@ -33,7 +34,7 @@ export function PageDetailSheet({
 
   return (
     <Sheet open={Boolean(path)} onOpenChange={(open) => !open && onClose()}>
-      <SheetContent side="right" className="w-full gap-0 overflow-y-auto sm:max-w-xl">
+      <SheetContent side="right" className={DETAIL_SHEET}>
         <SheetHeader>
           <SheetTitle className="truncate font-mono text-sm">{path}</SheetTitle>
           <SheetDescription>{detail?.title || "Page detail"}</SheetDescription>

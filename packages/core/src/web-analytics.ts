@@ -25,6 +25,7 @@ import { getDataClient } from "./client";
 import { browserSql, channelSql, deviceSql } from "./classify";
 import {
   type Goal,
+  type GoalType,
   type PageGroup,
   Params,
   matchSql,
@@ -1739,5 +1740,275 @@ export async function conversionPages(w: WebScope, opts: { limit?: number; group
     }),
     total: num(rows[0]?.total),
     on_arrival: num(rows[0]?.on_arrival),
+  };
+}
+
+// ---------- one goal, and the people behind the number ----------
+
+/**
+ * A goal's completions over time, as a count rather than a rate.
+ *
+ * The rate chart beside it answers "is this working"; this answers "how much of it is
+ * there", and the two move independently — a campaign that doubles traffic at a
+ * slightly worse rate raises this line and lowers that one, and a reader who only has
+ * the rate reads that as a failure.
+ *
+ * Counted as converting sessions, the same unit as the Goal performance table above it,
+ * so a point on this line and a row in that table are the same number over a narrower
+ * window. Not raw events: a visit that fires the goal twice is one conversion in both.
+ */
+export async function conversionVolume(w: WebScope): Promise<SeriesPoint[]> {
+  if (!hasGoal(w)) return [];
+  const { cte, params } = sessionBase(w);
+  const bucket = (col: string) => bucketSql(col, w.range.interval, w.range.timezone);
+  const shift = `started_at + toIntervalMillisecond({shift:Int64})`;
+  const rows = await q<Row>(
+    w.scope,
+    `${cte}
+     SELECT bucket, sumIf(v, series = 'current') AS value, sumIf(v, series = 'previous') AS previous FROM (
+       SELECT ${bucket("started_at")} AS bucket, 'current' AS series, uniqExactIf(session_id, converted = 1) AS v
+       FROM scoped WHERE period = 'current' GROUP BY bucket
+       UNION ALL
+       SELECT ${bucket(shift)} AS bucket, 'previous' AS series, uniqExactIf(session_id, converted = 1) AS v
+       FROM scoped WHERE period = 'previous' GROUP BY bucket
+     ) GROUP BY bucket ORDER BY bucket`,
+    { ...params, tz: w.range.timezone, shift: alignOffsetMs(w.range) },
+  );
+  return rows.map((r) => ({ bucket: String(r.bucket), value: num(r.value), previous: hasPrev(w) ? num(r.previous) : null }));
+}
+
+/**
+ * One person who completed a goal, as the drilldown lists them.
+ *
+ * `person_id` is the visitor resolved through identity_map — the same id the user page
+ * is keyed on — so anonymous browsing that later identified is one row here and not two.
+ */
+export interface GoalConverterRow {
+  person_id: string;
+  is_identified: boolean;
+  traits: Record<string, unknown>;
+  group_id: string;
+  country: string;
+  city: string;
+  /**
+   * Times they completed it. Deliberately not the same unit as the goal table's
+   * converting sessions: this is the drilldown, and "converted three times" is the
+   * fact a person-level list exists to carry.
+   */
+  completions: number;
+  /** Visits in which they completed it — which IS the table's unit, for reconciliation. */
+  sessions: number;
+  first_at: string;
+  last_at: string;
+  /** The page the most recent completion fired on. Blank for events sent without one. */
+  last_path: string;
+}
+
+export interface GoalDetail {
+  id: string;
+  name: string;
+  type: GoalType;
+  /** Distinct people who completed it, whatever the list below was truncated to. */
+  people: Delta;
+  /** Visits in which it was completed. The Goal performance table's number, exactly. */
+  sessions: Delta;
+  /** Every completion, counting repeats. Always at least `sessions`. */
+  completions: Delta;
+  /**
+   * Completing visits over all visits in scope. For a supporting action this is a
+   * participation rate and not a conversion rate, which the UI has to say.
+   */
+  rate: RateDelta;
+  trend: SeriesPoint[];
+  converters: GoalConverterRow[];
+  /** How many people there are in total, so a truncated list can say what it is missing. */
+  total_people: number;
+}
+
+const parseTraits = (v: unknown): Record<string, unknown> => {
+  if (typeof v !== "string" || v === "") return {};
+  try {
+    const parsed = JSON.parse(v);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+};
+
+/**
+ * Everything behind one row of the Goal performance table.
+ *
+ * The point of this existing at all: the Events view can list a goal's events, but it
+ * cannot apply the control bar. "Who signed up" and "who signed up from paid search on
+ * mobile in Germany" are different questions, and until now the second one had no
+ * answer — following the Events link silently widened the filters back out and handed
+ * back a longer list that looked like the same one.
+ *
+ * So this is counted off `sessionBase` like every other number in the section, which is
+ * what makes the totals here reconcile with the row that was clicked rather than merely
+ * resemble it.
+ *
+ * The goal is named explicitly rather than read from the scope: the drilldown is opened
+ * on a row, and which goal the reader happens to have *selected* must not change what
+ * the drawer over it is describing.
+ */
+export async function goalDetail(w: WebScope, goal: Goal, opts: { limit?: number } = {}): Promise<GoalDetail> {
+  const limit = Math.min(Math.max(opts.limit ?? 50, 1), 500);
+  const [totals, trend, converters] = await Promise.all([
+    goalTotals(w, goal),
+    goalTrend(w, goal),
+    goalConverters(w, goal, limit),
+  ]);
+  return {
+    id: goal.id,
+    name: goal.name,
+    type: goal.config.type,
+    ...totals,
+    trend,
+    converters: converters.rows,
+    total_people: converters.total,
+  };
+}
+
+/** The named goal's own flag per session, whatever the reader has selected. */
+function goalActs(goal: Goal, p: Params, project: string, scanFrom: string, scanTo: string): string {
+  // Compiled once and used twice: `matchSql` mints a fresh parameter per call, and two
+  // copies of the same rule would bind the same values under different names.
+  const hit = matchSql(goal.config, p);
+  return `acts AS (
+     SELECT
+       session_id,
+       max(${hit}) AS did,
+       countIf(${hit}) AS n
+     FROM events
+     WHERE project_id = ${project} AND session_id != ''
+       AND timestamp >= ${scanFrom} AND timestamp < ${scanTo}
+     GROUP BY session_id
+   )`;
+}
+
+async function goalTotals(w: WebScope, goal: Goal): Promise<Pick<GoalDetail, "people" | "sessions" | "completions" | "rate">> {
+  const { cte, params, project, scanFrom, scanTo } = sessionBase(w);
+  const p = new Params("gt");
+  const [r] = await q<Row>(
+    w.scope,
+    `${cte},
+     ${goalActs(goal, p, project, scanFrom, scanTo)}
+     SELECT
+       uniqExactIf(s.session_id, s.period = 'current' AND ifNull(h.did, 0) = 1) AS sessions,
+       uniqExactIf(s.session_id, s.period = 'previous' AND ifNull(h.did, 0) = 1) AS prev_sessions,
+       uniqExactIf(s.person_id, s.period = 'current' AND ifNull(h.did, 0) = 1) AS people,
+       uniqExactIf(s.person_id, s.period = 'previous' AND ifNull(h.did, 0) = 1) AS prev_people,
+       sumIf(ifNull(h.n, 0), s.period = 'current') AS completions,
+       sumIf(ifNull(h.n, 0), s.period = 'previous') AS prev_completions,
+       ${qualified(AGG.sessions)} AS all_sessions,
+       ${qualified(AGG.prevSessions)} AS prev_all_sessions
+     FROM scoped AS s LEFT JOIN acts AS h ON h.session_id = s.session_id`,
+    { ...params, ...p.values },
+  );
+  const cur = num(r?.sessions);
+  const prev = num(r?.prev_sessions);
+  return {
+    people: delta(num(r?.people), prevOr(w, num(r?.prev_people))),
+    sessions: delta(cur, prevOr(w, prev)),
+    completions: delta(num(r?.completions), prevOr(w, num(r?.prev_completions))),
+    rate: rateDelta([cur, num(r?.all_sessions)], prevOr(w, [prev, num(r?.prev_all_sessions)] as [number, number])),
+  };
+}
+
+/** This goal's completing visits per bucket, with the comparison period aligned onto it. */
+async function goalTrend(w: WebScope, goal: Goal): Promise<SeriesPoint[]> {
+  const { cte, params, project, scanFrom, scanTo } = sessionBase(w);
+  const p = new Params("gr");
+  const bucket = (col: string) => bucketSql(col, w.range.interval, w.range.timezone);
+  const rows = await q<Row>(
+    w.scope,
+    `${cte},
+     ${goalActs(goal, p, project, scanFrom, scanTo)}
+     SELECT bucket, sumIf(v, series = 'current') AS value, sumIf(v, series = 'previous') AS previous FROM (
+       SELECT ${bucket("s.started_at")} AS bucket, 'current' AS series, uniqExact(s.session_id) AS v
+       FROM scoped AS s INNER JOIN acts AS h ON h.session_id = s.session_id
+       WHERE s.period = 'current' AND h.did = 1 GROUP BY bucket
+       UNION ALL
+       SELECT ${bucket("s.started_at + toIntervalMillisecond({shift:Int64})")} AS bucket, 'previous' AS series, uniqExact(s.session_id) AS v
+       FROM scoped AS s INNER JOIN acts AS h ON h.session_id = s.session_id
+       WHERE s.period = 'previous' AND h.did = 1 GROUP BY bucket
+     ) GROUP BY bucket ORDER BY bucket`,
+    { ...params, ...p.values, tz: w.range.timezone, shift: alignOffsetMs(w.range) },
+  );
+  return rows.map((r) => ({ bucket: String(r.bucket), value: num(r.value), previous: hasPrev(w) ? num(r.previous) : null }));
+}
+
+/**
+ * The people themselves, most recent completion first.
+ *
+ * Ordered by recency rather than by volume because the question this answers is "who is
+ * doing this now" — a list topped by whoever has the biggest count is a leaderboard, and
+ * a leaderboard is stable for weeks while the thing a reader opened the drawer to see
+ * changes every day.
+ */
+async function goalConverters(w: WebScope, goal: Goal, limit: number): Promise<{ rows: GoalConverterRow[]; total: number }> {
+  const { cte, params, project, scanFrom, scanTo } = sessionBase(w);
+  const p = new Params("gc");
+  const rows = await q<Row>(
+    w.scope,
+    `${cte},
+     conv AS (
+       SELECT b.person_id AS person_id, b.session_id AS session_id, e.timestamp AS ts, ${normalizedPath("e.path")} AS path
+       FROM events AS e
+       INNER JOIN scoped AS b ON b.session_id = e.session_id
+       WHERE e.project_id = ${project} AND b.period = 'current'
+         AND e.timestamp >= ${scanFrom} AND e.timestamp < ${scanTo}
+         AND ${matchSql(goal.config, p)}
+     ),
+     people AS (
+       SELECT
+         person_id,
+         count() AS completions,
+         uniqExact(session_id) AS sessions,
+         min(ts) AS first_at,
+         max(ts) AS last_at,
+         argMax(path, ts) AS last_path
+       FROM conv GROUP BY person_id
+     )
+     SELECT
+       pe.person_id AS person_id,
+       pe.completions AS completions,
+       pe.sessions AS sessions,
+       pe.first_at AS first_at,
+       pe.last_at AS last_at,
+       pe.last_path AS last_path,
+       (SELECT uniqExact(person_id) FROM conv) AS total_people,
+       ifNull(st.is_identified, 0) AS is_identified,
+       ifNull(st.group_id, '') AS group_id,
+       ifNull(st.country, '') AS country,
+       ifNull(st.city, '') AS city,
+       ifNull(tr.traits, '') AS traits
+     FROM people AS pe
+     LEFT JOIN (
+       SELECT person_id, is_identified, group_id, country, city FROM person_stats WHERE project_id = ${project}
+     ) AS st ON st.person_id = pe.person_id
+     LEFT JOIN (
+       SELECT user_id, traits FROM user_traits FINAL WHERE project_id = ${project}
+     ) AS tr ON tr.user_id = pe.person_id
+     ORDER BY last_at DESC
+     LIMIT ${limit}`,
+    { ...params, ...p.values },
+  );
+  return {
+    rows: rows.map((r) => ({
+      person_id: String(r.person_id ?? ""),
+      is_identified: num(r.is_identified) === 1,
+      traits: parseTraits(r.traits),
+      group_id: String(r.group_id ?? ""),
+      country: String(r.country ?? ""),
+      city: String(r.city ?? ""),
+      completions: num(r.completions),
+      sessions: num(r.sessions),
+      first_at: String(r.first_at ?? ""),
+      last_at: String(r.last_at ?? ""),
+      last_path: String(r.last_path ?? ""),
+    })),
+    total: num(rows[0]?.total_people),
   };
 }

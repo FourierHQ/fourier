@@ -1,13 +1,15 @@
 "use client";
 
-import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { ConversionRateChart, FunnelSteps, SplitBars } from "@/components/web/charts";
+import { Button } from "@/components/ui/button";
+import { Check } from "lucide-react";
+import { ConversionRateChart, FunnelSteps, SplitBars, TrendChart } from "@/components/web/charts";
 import { WebControls } from "@/components/web/controls";
 import { ManageGoalsDialog } from "@/components/web/goals";
-import { ExploreLink } from "@/components/web/explore-link";
+import { GoalDetailSheet } from "@/components/web/goal-detail";
+import { GoalMark } from "@/components/web/goal-mark";
 import { DeltaBadge, MetricLabel, RateCell } from "@/components/web/metric";
 import { RankedTable } from "@/components/web/ranked-table";
 import { NeedsGoal, NoTraffic, Panel } from "@/components/web/states";
@@ -17,12 +19,12 @@ import {
   errorOf,
   unwrap,
   useWebConversions,
-  useWebDefinitions,
   type ConvertingPageRow,
   type GoalSummaryRow,
   type LandingPageRow,
   type ConversionPages,
   type ConversionPageRow,
+  type SeriesPoint,
 } from "@/lib/web-api";
 import { P, useWebState } from "@/lib/web-state";
 
@@ -106,6 +108,37 @@ function AssociatedPages({ rows, loading }: { rows: ConvertingPageRow[] | undefi
 }
 
 /**
+ * Narrowing the section to one goal, as a control of its own.
+ *
+ * It used to be the row click, which is now the drilldown — the more useful of the two
+ * and the one a reader reaches for. Selection stays available because it is what makes
+ * the funnel, the credited channels and the page tables describe a single goal, and it
+ * is a toggle: clicking the selected goal returns the section to counting all of them.
+ */
+function SelectGoalButton({ id, selected, onToggle }: { id: string; selected: boolean; onToggle: (id: string | null) => void }) {
+  return (
+    <Button
+      variant={selected ? "secondary" : "ghost"}
+      size="sm"
+      className="h-7 px-2 text-xs font-normal"
+      onClick={(e) => {
+        e.stopPropagation();
+        onToggle(selected ? null : id);
+      }}
+      title={selected ? "Stop narrowing to this goal" : "Narrow the funnel, channels and page tables below to this goal"}
+    >
+      {selected ? (
+        <>
+          <Check className="size-3" /> Selected
+        </>
+      ) : (
+        "Select"
+      )}
+    </Button>
+  );
+}
+
+/**
  * Conversions: are visitors completing the actions we care about, and where do they
  * drop off?
  *
@@ -116,13 +149,17 @@ function AssociatedPages({ rows, loading }: { rows: ConvertingPageRow[] | undefi
 export default function ConversionsPage() {
   const { get, set } = useWebState();
   const pagesMode = get("pages") === "anywhere" ? "anywhere" : "leading";
+  // The drilldown, in the URL for the reason every other selection here is: a drawer
+  // open on one goal's converters is a view worth sending to someone. `drill` is which
+  // goal the drawer is describing, `person` which of its people it has moved on to —
+  // and neither is a control-bar parameter, so neither follows you to another report.
+  const drill = get("drill");
+  const drillPerson = get("person");
   const report = useWebConversions(pagesMode);
-  const defs = useWebDefinitions();
-  const configOf = (id: string) => defs.data?.goals.find((g) => g.id === id);
-
   const scope = report.data?.scope;
   const goals = unwrap(report.data?.goals);
   const trend = unwrap(report.data?.trend);
+  const volume = unwrap(report.data?.volume) as SeriesPoint[] | undefined;
   const fn = unwrap(report.data?.funnel);
   const supporting = unwrap(report.data?.supporting);
   const credit = unwrap(report.data?.credit);
@@ -167,7 +204,10 @@ export default function ConversionsPage() {
               <div className="flex flex-wrap items-start justify-between gap-2">
                 <div>
                   <CardTitle>Goal performance</CardTitle>
-                  <CardDescription>Every primary goal, against the same sessions. Select one to narrow the whole section to it.</CardDescription>
+                  <CardDescription>
+                    Every primary goal, against the same sessions. Click a row for the people behind it; select one to
+                    narrow the whole section.
+                  </CardDescription>
                 </div>
                 <ManageGoalsDialog />
               </div>
@@ -178,9 +218,11 @@ export default function ConversionsPage() {
                   rows={goals}
                   loading={loading}
                   rowKey={(r) => r.id}
-                  // Selecting a goal here is what changes it everywhere else, since the
-                  // selection lives in the URL the whole section reads.
-                  onSelect={(r) => set({ [P.goal]: r.id })}
+                  // The row is the drilldown: clicking a number opens the people behind
+                  // it, which is what a reader reaches for. Narrowing the section is the
+                  // other thing you can do with a goal, and it has its own control on
+                  // the right rather than sharing the row click with this.
+                  onSelect={(r) => set({ drill: r.id, person: null })}
                   empty={<p className="px-6 py-6 text-sm text-muted-foreground">No primary goals configured.</p>}
                   columns={[
                     {
@@ -188,13 +230,8 @@ export default function ConversionsPage() {
                       header: "Goal",
                       cell: (r) => (
                         <span className="flex items-center gap-2">
+                          <GoalMark name={r.name} />
                           <span className="font-medium">{r.name}</span>
-                          {r.id === selectedGoal && (
-                            <Badge variant="secondary" className="font-normal">
-                              Selected
-                            </Badge>
-                          )}
-                          <ExploreLink goal={configOf(r.id)} scope={scope} />
                         </span>
                       ),
                     },
@@ -212,6 +249,12 @@ export default function ConversionsPage() {
                         </span>
                       ),
                     },
+                    {
+                      key: "select",
+                      header: <span className="sr-only">Narrow to this goal</span>,
+                      className: "w-[116px]",
+                      cell: (r) => <SelectGoalButton id={r.id} selected={r.id === selectedGoal} onToggle={(id) => set({ [P.goal]: id })} />,
+                    },
                   ]}
                 />
               </Panel>
@@ -219,10 +262,36 @@ export default function ConversionsPage() {
           </Card>
 
           <div className="grid gap-6 lg:grid-cols-2">
+            {/* Volume and rate, side by side and never on one pair of axes. They move
+                independently — a campaign that doubles traffic at a slightly worse rate
+                raises the left chart and lowers the right one — and a reader holding
+                only the rate reads that as a failure. Two axes on one chart can be
+                scaled to show any relationship you like, so: two charts. */}
             <Card>
               <CardHeader>
                 <CardTitle>{goalName ?? "Conversions"} over time</CardTitle>
-                <CardDescription>Conversion rate, with the sessions behind each point</CardDescription>
+                <CardDescription>
+                  Converting visits per {scope?.range.interval ?? "day"} — the same unit as the table above, over a
+                  narrower window
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <Panel error={errorOf(report.data?.volume)} onRetry={() => report.refetch()}>
+                  <TrendChart
+                    data={volume}
+                    label={goalName ? `${goalName} — converting visits` : "Converting visits"}
+                    interval={scope?.range.interval ?? "day"}
+                    loading={loading}
+                    className="h-[240px] w-full"
+                  />
+                </Panel>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle>Conversion rate over time</CardTitle>
+                <CardDescription>The same conversions as a share of visits, with the counts behind each point</CardDescription>
               </CardHeader>
               <CardContent>
                 <Panel error={errorOf(report.data?.trend)} onRetry={() => report.refetch()}>
@@ -230,39 +299,39 @@ export default function ConversionsPage() {
                 </Panel>
               </CardContent>
             </Card>
-
-            <Card>
-              <CardHeader>
-                <CardTitle>
-                  <MetricLabel hint="Every step counts distinct sessions, and a session has to satisfy the steps in order within one visit. Repeating a step does not count twice.">
-                    Conversion funnel
-                  </MetricLabel>
-                </CardTitle>
-                <CardDescription>
-                  {fn?.is_path_specific
-                    ? "One path to this goal"
-                    : selectedGoal
-                      ? "A visit, and then the goal"
-                      : "A visit, and then any conversion. Narrow to one goal to see a configured path."}
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="p-0">
-                <Panel error={errorOf(report.data?.funnel)} onRetry={() => report.refetch()}>
-                  <FunnelSteps steps={fn?.steps} loading={loading} />
-                  {/* A configured funnel describes one route. People who reached the goal
-                      another way are still conversions, and the difference is worth naming
-                      rather than leaving as an apparent contradiction between two numbers. */}
-                  {fn?.is_path_specific && fn.total_conversions > (fn.steps.at(-1)?.sessions ?? 0) && (
-                    <p className="border-t px-4 py-3 text-xs text-muted-foreground">
-                      {formatNumber(fn.total_conversions)} sessions completed this goal in total —{" "}
-                      {formatNumber(fn.total_conversions - (fn.steps.at(-1)?.sessions ?? 0))} of them reached it by a route other than
-                      this one. This funnel describes one path, not every path.
-                    </p>
-                  )}
-                </Panel>
-              </CardContent>
-            </Card>
           </div>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>
+                <MetricLabel hint="Every step counts distinct sessions, and a session has to satisfy the steps in order within one visit. Repeating a step does not count twice.">
+                  Conversion funnel
+                </MetricLabel>
+              </CardTitle>
+              <CardDescription>
+                {fn?.is_path_specific
+                  ? "One path to this goal"
+                  : selectedGoal
+                    ? "A visit, and then the goal"
+                    : "A visit, and then any conversion. Narrow to one goal to see a configured path."}
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="p-0">
+              <Panel error={errorOf(report.data?.funnel)} onRetry={() => report.refetch()}>
+                <FunnelSteps steps={fn?.steps} loading={loading} />
+                {/* A configured funnel describes one route. People who reached the goal
+                    another way are still conversions, and the difference is worth naming
+                    rather than leaving as an apparent contradiction between two numbers. */}
+                {fn?.is_path_specific && fn.total_conversions > (fn.steps.at(-1)?.sessions ?? 0) && (
+                  <p className="border-t px-4 py-3 text-xs text-muted-foreground">
+                    {formatNumber(fn.total_conversions)} sessions completed this goal in total —{" "}
+                    {formatNumber(fn.total_conversions - (fn.steps.at(-1)?.sessions ?? 0))} of them reached it by a route other than
+                    this one. This funnel describes one path, not every path.
+                  </p>
+                )}
+              </Panel>
+            </CardContent>
+          </Card>
 
           <Card>
             <CardHeader>
@@ -305,29 +374,29 @@ export default function ConversionsPage() {
             </CardContent>
           </Card>
 
-          <div className="grid gap-6 xl:grid-cols-2">
-            <Card>
-              <CardHeader>
-                <CardTitle>Top converting landing pages</CardTitle>
-                <CardDescription>Ranked by conversions, not by traffic — the busiest entry point is rarely the best one</CardDescription>
-              </CardHeader>
-              <CardContent className="p-0">
-                <Panel error={errorOf(report.data?.landing)} onRetry={() => report.refetch()}>
-                  <RankedTable<LandingPageRow>
-                    rows={landing}
-                    loading={loading}
-                    rowKey={(r) => r.path}
-                    barOf={(r) => r.converting_sessions / Math.max(...(landing ?? []).map((x) => x.converting_sessions), 1)}
-                    empty={<p className="px-6 py-6 text-sm text-muted-foreground">No landing pages converted in this period.</p>}
-                    columns={[
-                      { key: "path", header: "Landing page", cell: (r) => <span className="font-medium" title={r.path}>{shortPath(r.path, 26)}</span> },
-                      { key: "converting", header: "Converting", cell: (r) => formatNumber(r.converting_sessions) },
-                      { key: "rate", header: "Conv. rate", cell: (r) => <RateCell value={r.conversion_rate} /> },
-                    ]}
-                  />
-                </Panel>
-              </CardContent>
-            </Card>
+        <div className="grid gap-6 xl:grid-cols-2">
+          <Card>
+            <CardHeader>
+              <CardTitle>Top converting landing pages</CardTitle>
+              <CardDescription>Ranked by conversions, not by traffic — the busiest entry point is rarely the best one</CardDescription>
+            </CardHeader>
+            <CardContent className="p-0">
+              <Panel error={errorOf(report.data?.landing)} onRetry={() => report.refetch()}>
+                <RankedTable<LandingPageRow>
+                  rows={landing}
+                  loading={loading}
+                  rowKey={(r) => r.path}
+                  barOf={(r) => r.converting_sessions / Math.max(...(landing ?? []).map((x) => x.converting_sessions), 1)}
+                  empty={<p className="px-6 py-6 text-sm text-muted-foreground">No landing pages converted in this period.</p>}
+                  columns={[
+                    { key: "path", header: "Landing page", cell: (r) => <span className="font-medium" title={r.path}>{shortPath(r.path, 26)}</span> },
+                    { key: "converting", header: "Converting", cell: (r) => formatNumber(r.converting_sessions) },
+                    { key: "rate", header: "Conv. rate", cell: (r) => <RateCell value={r.conversion_rate} /> },
+                  ]}
+                />
+              </Panel>
+            </CardContent>
+          </Card>
 
             <Card>
               <CardHeader>
@@ -390,11 +459,20 @@ export default function ConversionsPage() {
                     </TableHeader>
                     <TableBody>
                       {supporting.map((a) => (
-                        <TableRow key={a.id}>
+                        // Same drilldown as a goal: "who clicked this" is the same
+                        // question as "who converted", asked of a rule that is
+                        // deliberately not counted as a conversion.
+                        <TableRow
+                          key={a.id}
+                          className="cursor-pointer"
+                          onClick={() => set({ drill: a.id, person: null })}
+                          tabIndex={0}
+                          onKeyDown={(e) => (e.key === "Enter" ? set({ drill: a.id, person: null }) : undefined)}
+                        >
                           <TableCell>
                             <span className="flex items-center gap-2">
+                              <GoalMark type="supporting" name={a.name} />
                               <span className="font-medium">{a.name}</span>
-                              <ExploreLink goal={configOf(a.id)} scope={scope} />
                             </span>
                           </TableCell>
                           <TableCell className="text-right tabular-nums">{formatNumber(a.sessions.current)}</TableCell>
@@ -412,6 +490,15 @@ export default function ConversionsPage() {
           </Card>
         </>
       )}
+
+      <GoalDetailSheet
+        definition={drill}
+        person={drillPerson}
+        scope={scope}
+        onSelectPerson={(id) => set({ person: id })}
+        onBack={() => set({ person: null })}
+        onClose={() => set({ drill: null, person: null })}
+      />
     </div>
   );
 }

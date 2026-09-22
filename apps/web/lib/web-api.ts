@@ -8,6 +8,8 @@ import type {
   FilterValues,
   Funnel,
   Goal,
+  GoalConverterRow,
+  GoalDetail,
   GoalSummaryRow,
   Headline,
   LandingPageRow,
@@ -36,6 +38,8 @@ export type {
   Funnel,
   FunnelStep,
   Goal,
+  GoalConverterRow,
+  GoalDetail,
   GoalSummaryRow,
   Headline,
   LandingPageRow,
@@ -148,10 +152,17 @@ export interface PageDetailReport {
   detail: Settled<PageDetail>;
 }
 
+export interface GoalDetailReport {
+  scope: ScopeEcho;
+  definition: string;
+  detail: Settled<GoalDetail>;
+}
+
 interface ConversionsReportBase extends Report {
   headline: Settled<Headline>;
   goals: Settled<GoalSummaryRow[]>;
   trend: Settled<RatePoint[]>;
+  volume: Settled<SeriesPoint[]>;
   funnel: Settled<Funnel>;
   supporting: Settled<SupportingActionRow[]>;
   credit: Settled<ConversionCredit>;
@@ -213,6 +224,24 @@ export function useWebPageDetail(path: string | null, basis: "landing" | "viewer
     queryKey: ["web", "page-detail", qs],
     queryFn: () => api<PageDetailReport>(`/api/projects/${PROJECT}/web/page-detail?${qs}`),
     enabled: Boolean(path),
+    placeholderData: (prev) => prev,
+  });
+}
+
+/**
+ * The people behind one goal, under the filters currently on screen.
+ *
+ * Keyed on the whole query string like every other report, so opening the drawer after
+ * changing a filter cannot serve the previous filter's people out of the cache.
+ */
+export function useWebGoalDetail(definition: string | null) {
+  const environment = useEnvironmentValue();
+  const { query } = useWebState();
+  const qs = query({ tz: readerTimezone(), definition, environment });
+  return useQuery({
+    queryKey: ["web", "goal-detail", qs],
+    queryFn: () => api<GoalDetailReport>(`/api/projects/${PROJECT}/web/goal-detail?${qs}`),
+    enabled: Boolean(definition),
     placeholderData: (prev) => prev,
   });
 }

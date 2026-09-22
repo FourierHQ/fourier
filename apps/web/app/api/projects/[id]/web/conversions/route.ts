@@ -2,6 +2,7 @@ import {
   availability,
   conversionCredit,
   conversionTrend,
+  conversionVolume,
   funnel,
   goalSummary,
   headline,
@@ -41,6 +42,10 @@ export const GET = handle(requireProjectAccess(async (req: Request, { params }: 
       // how a reader compares them, and how they change which one is selected.
       goals: goalSummary(w),
       trend: conversionTrend(w),
+      // The rate and the volume are two different questions and neither substitutes for
+      // the other: more traffic at a slightly worse rate raises one line and lowers the
+      // other, and a reader holding only the rate reads that as a failure.
+      volume: conversionVolume(w),
       funnel: funnel(w),
       supporting: supportingActions(w),
       credit: conversionCredit(w, { limit: 12 }),

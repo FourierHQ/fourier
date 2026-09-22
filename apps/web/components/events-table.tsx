@@ -11,6 +11,7 @@ import { RelativeTime } from "@/components/relative-time";
 import { EmptyState } from "@/components/empty-state";
 import { eventLabel, locationLabel } from "@/lib/format";
 import { useSourceName } from "@/components/source-badge";
+import { EventGoalMark, useGoalForEvent } from "@/components/web/goal-mark";
 import { Location } from "@/components/location";
 import type { EventRecord } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -61,6 +62,10 @@ export function EventsTable({
   emptyDescription?: React.ReactNode;
 }) {
   const sourceName = useSourceName();
+  // Which of these rows are things someone decided to count. A goal is configuration,
+  // not a property of the event, so without this nothing in a stream of events says
+  // which one is the number on the Conversions report.
+  const goalFor = useGoalForEvent();
   const [open, setOpen] = useState<Set<string>>(new Set());
   const toggle = (id: string) =>
     setOpen((s) => {
@@ -117,6 +122,7 @@ export function EventsTable({
                           shrink back to their own width. */}
                       <TypeBadge type={e.type} className="shrink-0 @xl:w-[82px]" />
                       <span className="truncate font-medium">{eventLabel(e)}</span>
+                      <EventGoalMark goal={goalFor(e)} />
                     </div>
                   </TableCell>
                   <TableCell className="hidden overflow-hidden md:table-cell">
