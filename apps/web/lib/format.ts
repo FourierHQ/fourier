@@ -25,6 +25,34 @@ export function relativeTime(v: string | Date | null | undefined, now = Date.now
   return rtf.format(Math.round(diff / (86400 * 30)), "month");
 }
 
+/**
+ * The short form: `now`, `5m`, `3h`, then a date.
+ *
+ * Every table in this product carries a timestamp in its last column, and "16 hours ago"
+ * is three words to say what "16h" says in three characters — so the column is sized for
+ * the prose rather than the data, and the row's actual content gets squeezed to pay for
+ * it. The full timestamp is one hover away on every one of them, which is what makes the
+ * short form safe: this is the glanceable label, not the record.
+ *
+ * The switch to a date happens at the day boundary rather than at 24 hours. "23h" and
+ * "25h" are the same thing to a reader, but "yesterday evening" and "this morning" are
+ * not, and a calendar date is the honest way to say the first. The year comes along only
+ * when it is not this one, because "Sep 1" two years later is not a date, it is a trap.
+ */
+export function compactTime(v: string | Date | null | undefined, now = Date.now()): string {
+  const d = parseDate(v);
+  if (!d) return "";
+  const diff = d.getTime() - now;
+  const abs = Math.abs(diff);
+  const ahead = diff > 0;
+  if (abs < 45_000) return "now";
+  const sameDay = new Date(now).toDateString() === d.toDateString();
+  if (abs < 3_600_000) return `${ahead ? "in " : ""}${Math.max(1, Math.round(abs / 60_000))}m`;
+  if (sameDay) return `${ahead ? "in " : ""}${Math.max(1, Math.round(abs / 3_600_000))}h`;
+  const sameYear = new Date(now).getFullYear() === d.getFullYear();
+  return d.toLocaleDateString(undefined, sameYear ? { month: "short", day: "numeric" } : { month: "short", day: "numeric", year: "numeric" });
+}
+
 export function formatDateTime(v: string | Date | null | undefined): string {
   const d = parseDate(v);
   if (!d) return "";

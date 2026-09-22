@@ -11,6 +11,8 @@ import { RelativeTime } from "@/components/relative-time";
 import { EmptyState } from "@/components/empty-state";
 import { eventLabel, locationLabel } from "@/lib/format";
 import { useSourceName } from "@/components/source-badge";
+import { PersonLabel } from "@/components/users-table";
+import { EventGoalMark, useGoalForEvent } from "@/components/web/goal-mark";
 import { Location } from "@/components/location";
 import type { EventRecord } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -61,6 +63,15 @@ export function EventsTable({
   emptyDescription?: React.ReactNode;
 }) {
   const sourceName = useSourceName();
+  // The event name is the thing being read; properties are the supporting detail. With
+  // the User and Company columns hidden — the drawer — all their width fell to
+  // properties, which pushed event names into "Form Submi…" beside a line of JSON with
+  // room to spare. The name takes the freed space instead.
+  const nameWidth = showUser && showCompany ? "w-[30%]" : "w-[44%]";
+  // Which of these rows are things someone decided to count. A goal is configuration,
+  // not a property of the event, so without this nothing in a stream of events says
+  // which one is the number on the Conversions report.
+  const goalFor = useGoalForEvent();
   const [open, setOpen] = useState<Set<string>>(new Set());
   const toggle = (id: string) =>
     setOpen((s) => {
@@ -89,11 +100,11 @@ export function EventsTable({
         <TableHeader>
           <TableRow>
             <TableHead className="w-8" />
-            <TableHead className="w-[30%] truncate">Event</TableHead>
+            <TableHead className={cn("truncate", nameWidth)}>Event</TableHead>
             <TableHead className="hidden truncate md:table-cell">Properties</TableHead>
             {showUser && <TableHead className="w-[20%] truncate">User</TableHead>}
             {showCompany && <TableHead className="w-[13%] truncate">Company</TableHead>}
-            <TableHead className="w-[96px] text-right">When</TableHead>
+            <TableHead className="w-[64px] text-right">When</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -101,8 +112,9 @@ export function EventsTable({
             const isOpen = open.has(e.message_id);
             const cols = 4 + (showUser ? 1 : 0) + (showCompany ? 1 : 0);
             // Where this person was, not a column of its own: a flag is one glyph wide and
-            // reads as part of who sent the event. It leads the User column, or the Company
-            // column on a page that already knows whose events these are.
+            // reads as part of who sent the event. PersonLabel carries it in the User
+            // column; this is the same flag for the Company column on a page that already
+            // knows whose events these are.
             const flag = <Location country={e.country} city={e.city} className="shrink-0" />;
             return (
               <Fragment key={e.message_id}>
@@ -117,6 +129,7 @@ export function EventsTable({
                           shrink back to their own width. */}
                       <TypeBadge type={e.type} className="shrink-0 @xl:w-[82px]" />
                       <span className="truncate font-medium">{eventLabel(e)}</span>
+                      <EventGoalMark goal={goalFor(e)} />
                     </div>
                   </TableCell>
                   <TableCell className="hidden overflow-hidden md:table-cell">
@@ -126,24 +139,20 @@ export function EventsTable({
                   </TableCell>
                   {showUser && (
                     <TableCell className="overflow-hidden">
-                      <div className="flex min-w-0 items-center gap-1.5">
-                        {flag}
-                        <Link
-                          href={`/users/${encodeURIComponent(e.person_id || e.distinct_id)}`}
-                          onClick={(ev) => ev.stopPropagation()}
-                          title={e.user_id || e.person_id || e.anonymous_id}
-                          className="flex min-w-0 items-baseline gap-1 text-xs hover:underline"
-                        >
-                          {e.user_id ? (
-                            <span className="truncate font-mono">{e.user_id}</span>
-                          ) : (
-                            <>
-                              <span className="text-muted-foreground">Anon</span>
-                              <span className="truncate font-mono text-[10px] text-muted-foreground/60">{(e.person_id || e.distinct_id).slice(0, 8)}</span>
-                            </>
-                          )}
-                        </Link>
-                      </div>
+                      <Link
+                        href={`/users/${encodeURIComponent(e.person_id || e.distinct_id)}`}
+                        onClick={(ev) => ev.stopPropagation()}
+                        title={e.user_id || e.person_id || e.anonymous_id}
+                        className="flex min-w-0 text-xs hover:underline"
+                      >
+                        <PersonLabel
+                          label={e.user_id}
+                          personId={e.person_id || e.distinct_id}
+                          identified={Boolean(e.user_id)}
+                          country={e.country}
+                          city={e.city}
+                        />
+                      </Link>
                     </TableCell>
                   )}
                   {showCompany && (

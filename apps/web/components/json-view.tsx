@@ -1,3 +1,6 @@
+"use client";
+
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
 function Value({ v }: { v: unknown }) {
@@ -52,6 +55,64 @@ export function JsonView({ data, className, nested }: { data: Record<string, unk
 /** Keys a preview leaves out: page context, shown in its own column or not at all. */
 const PAGE_KEYS = ["url", "path", "title", "referrer", "search"];
 
+/** One property as a preview renders it: no quoting, objects collapsed to JSON. */
+function preview(v: unknown): string {
+  return typeof v === "object" && v !== null ? JSON.stringify(v) : String(v);
+}
+
+/** How many rows a tooltip will show before it stops being readable at a glance. */
+const TOOLTIP_ROWS = 12;
+
+/**
+ * The `+3` pill, with the three behind it on hover.
+ *
+ * A count of hidden things is a strange thing to show someone and then make them click
+ * a row to see. Most of the time the question is "what else is on this event", and the
+ * answer is four short key/value pairs that fit in a tooltip — so the badge answers it
+ * where it is asked, and expanding the row stays for reading a payload properly.
+ *
+ * Exported on its own rather than living inside JsonPreview so anything showing a
+ * truncated set of properties uses the same pill with the same behaviour.
+ */
+export function MoreProperties({ entries, className }: { entries: [string, unknown][]; className?: string }) {
+  if (entries.length === 0) return null;
+  const shown = entries.slice(0, TOOLTIP_ROWS);
+  const hidden = entries.length - shown.length;
+  const label = `${entries.length} more ${entries.length === 1 ? "property" : "properties"}`;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        {/* A button, not a span: this reveals content, so it has to be reachable by
+            keyboard as well as by pointer. It deliberately does not stop the click from
+            reaching the row — hovering shows the properties, clicking opens the row for
+            a proper read, and both are what someone aiming at it means. */}
+        <button
+          type="button"
+          className={cn(
+            "shrink-0 cursor-default rounded-full bg-muted px-1.5 text-[10px] leading-4 text-muted-foreground/70 hover:bg-muted-foreground/20 hover:text-foreground",
+            className,
+          )}
+          aria-label={label}
+        >
+          +{entries.length}
+        </button>
+      </TooltipTrigger>
+      {/* One child: TooltipContent lays its children out in a row. */}
+      <TooltipContent className="max-w-sm">
+        <span className="block font-mono text-[11px] leading-relaxed">
+          {shown.map(([k, v]) => (
+            <span key={k} className="flex gap-1.5">
+              <span className="shrink-0 text-background/60">{k}:</span>
+              <span className="min-w-0 break-all">{preview(v)}</span>
+            </span>
+          ))}
+          {hidden > 0 && <span className="block text-background/60">…and {hidden} more</span>}
+        </span>
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
 /**
  * One property, plus a count of the rest — `plan: pro  +3`. Showing three at a time
  * meant each one truncated to nothing; one property that fits reads better than three
@@ -60,22 +121,17 @@ const PAGE_KEYS = ["url", "path", "title", "referrer", "search"];
 export function JsonPreview({ data, max = 1, omit = PAGE_KEYS, className }: { data: Record<string, unknown>; max?: number; omit?: string[]; className?: string }) {
   const entries = Object.entries(data ?? {}).filter(([k]) => !omit.includes(k));
   if (entries.length === 0) return null;
-  const rest = entries.length - max;
   return (
     <span className={cn("flex min-w-0 items-center gap-1.5 font-mono text-xs text-muted-foreground", className)}>
       <span className="truncate">
         {entries.slice(0, max).map(([k, v], i) => (
           <span key={k}>
             {i > 0 && <span className="mx-1.5 opacity-50">·</span>}
-            {k}: <span className="text-foreground/80">{typeof v === "object" ? JSON.stringify(v) : String(v)}</span>
+            {k}: <span className="text-foreground/80">{preview(v)}</span>
           </span>
         ))}
       </span>
-      {rest > 0 && (
-        <span className="shrink-0 rounded-full bg-muted px-1.5 text-[10px] leading-4 text-muted-foreground/70" title={`${rest} more ${rest === 1 ? "property" : "properties"}`}>
-          +{rest}
-        </span>
-      )}
+      <MoreProperties entries={entries.slice(max)} />
     </span>
   );
 }

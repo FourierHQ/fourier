@@ -21,4 +21,5 @@ export * from "./sql-guard";
 export * from "./classify";
 export * from "./periods";
 export * from "./definitions";
+export * from "./goal-match";
 export * from "./web-analytics";
