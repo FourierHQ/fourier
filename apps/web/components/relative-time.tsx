@@ -2,8 +2,14 @@
 
 import { useEffect, useState } from "react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { formatDateTime, relativeTime } from "@/lib/format";
+import { compactTime, formatDateTime } from "@/lib/format";
 
+/**
+ * A timestamp as "3h" or "Sep 1", with the exact moment on hover.
+ *
+ * Short by default everywhere it appears. The tooltip is not a nicety here — it is the
+ * other half of the decision to abbreviate, and the reason nothing is actually lost.
+ */
 export function RelativeTime({ value, className }: { value: string | null | undefined; className?: string }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -15,7 +21,7 @@ export function RelativeTime({ value, className }: { value: string | null | unde
     <Tooltip>
       <TooltipTrigger asChild>
         <time dateTime={value} className={className} suppressHydrationWarning>
-          {relativeTime(value, now)}
+          {compactTime(value, now)}
         </time>
       </TooltipTrigger>
       <TooltipContent>{formatDateTime(value)}</TooltipContent>

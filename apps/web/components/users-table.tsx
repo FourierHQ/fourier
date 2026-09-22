@@ -9,10 +9,57 @@ import { RelativeTime } from "@/components/relative-time";
 import { EmptyState } from "@/components/empty-state";
 import { Location } from "@/components/location";
 import { displayName, formatNumber, initials, shortId } from "@/lib/format";
+import { cn } from "@/lib/utils";
 import type { UserRecord } from "@/lib/api";
 
 export function UserAvatar({ name, className = "size-7 text-[10px]" }: { name: string; className?: string }) {
   return <div className={`flex shrink-0 items-center justify-center rounded-full bg-muted font-medium text-muted-foreground ${className}`}>{initials(name)}</div>;
+}
+
+/**
+ * How a person is named in a list: where they were, then who they are — or, when nobody
+ * has identified them, the word Anon and enough of their id to tell two of them apart.
+ *
+ * One component rather than the same three spans written wherever people are listed.
+ * The anonymous rendering is the load-bearing half: a bare truncated uuid reads as a
+ * name that happens to be ugly, and a row of them reads as a list of different-looking
+ * strangers rather than a list of people nothing is known about yet. "Anon" says the
+ * state, and the id fragment after it is there to distinguish, not to be read.
+ */
+export function PersonLabel({
+  label,
+  personId,
+  identified,
+  country,
+  city,
+  mono = true,
+  className,
+}: {
+  /** What to show when they are identified: a user id, or a name off their traits. */
+  label: string;
+  personId: string;
+  identified: boolean;
+  country?: string;
+  city?: string;
+  /** Off where `label` is a human name, which should not be set in a monospace face. */
+  mono?: boolean;
+  className?: string;
+}) {
+  return (
+    <span className={cn("flex min-w-0 items-center gap-1.5", className)}>
+      <Location country={country ?? ""} city={city} className="shrink-0" />
+      <span className="flex min-w-0 items-baseline gap-1">
+        {identified ? (
+          <span className={cn("truncate", mono && "font-mono")}>{label}</span>
+        ) : (
+          <>
+            <span className="text-muted-foreground">Anon</span>
+            <span className="truncate font-mono text-[10px] text-muted-foreground/60">{personId.slice(0, 8)}</span>
+          </>
+        )}
+      </span>
+    </span>
+  );
 }
 
 export function UsersTable({ users, loading, showCompany = true, emptyDescription }: { users: UserRecord[] | undefined; loading?: boolean; showCompany?: boolean; emptyDescription?: React.ReactNode }) {
@@ -34,8 +81,8 @@ export function UsersTable({ users, loading, showCompany = true, emptyDescriptio
           <TableHead className="hidden truncate md:table-cell">Email</TableHead>
           {showCompany && <TableHead className="w-[14%] truncate">Company</TableHead>}
           <TableHead className="w-[72px] text-right">Events</TableHead>
-          <TableHead className="w-[96px] text-right">First seen</TableHead>
-          <TableHead className="w-[96px] text-right">Last seen</TableHead>
+          <TableHead className="w-[72px] text-right">First seen</TableHead>
+          <TableHead className="w-[72px] text-right">Last seen</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>

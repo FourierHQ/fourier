@@ -5,7 +5,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Check } from "lucide-react";
-import { ConversionRateChart, FunnelSteps, SplitBars, TrendChart } from "@/components/web/charts";
+import { ConversionRateChart, CountChart, FunnelSteps, SplitBars } from "@/components/web/charts";
 import { WebControls } from "@/components/web/controls";
 import { ManageGoalsDialog } from "@/components/web/goals";
 import { GoalDetailSheet } from "@/components/web/goal-detail";
@@ -277,7 +277,7 @@ export default function ConversionsPage() {
               </CardHeader>
               <CardContent>
                 <Panel error={errorOf(report.data?.volume)} onRetry={() => report.refetch()}>
-                  <TrendChart
+                  <CountChart
                     data={volume}
                     label={goalName ? `${goalName} — converting visits` : "Converting visits"}
                     interval={scope?.range.interval ?? "day"}

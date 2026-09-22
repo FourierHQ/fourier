@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
-import { Bar, BarChart, CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
+import { Bar, BarChart, CartesianGrid, ComposedChart, Line, LineChart, XAxis, YAxis } from "recharts";
 import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
@@ -116,6 +116,64 @@ export function ConversionRateChart({
             across the gap would draw a line through a value that does not exist. */}
         <Line dataKey="rate" type="monotone" stroke="var(--color-rate)" strokeWidth={2} dot={false} activeDot={{ r: 3 }} connectNulls={false} />
       </LineChart>
+    </ChartContainer>
+  );
+}
+
+/**
+ * A count over time, as columns.
+ *
+ * Conversions are discrete things that happened, not a quantity that exists between
+ * measurements. Drawn as a line, two conversions a week apart become a flat line at 1
+ * across the days between them — a picture of five conversions that never happened.
+ * Columns cannot make that claim: where there is nothing, there is nothing.
+ *
+ * Every bucket in the period arrives from the server whether or not it has a count, so
+ * a gap is an explicit zero rather than a missing point. The two halves of the fix are
+ * separate on purpose — dense buckets stop the data lying, columns stop the ink lying —
+ * and a line chart over dense buckets would still invite reading the slope between two
+ * days as a rate of change.
+ *
+ * The comparison period stays a line. As a second set of bars it would read as a thing
+ * to compare bar-by-bar, which is not what it is: it is the shape of last month behind
+ * the shape of this one.
+ */
+export function CountChart({
+  data,
+  label,
+  interval = "day",
+  loading,
+  className = "h-[240px] w-full",
+}: {
+  data: SeriesPoint[] | undefined;
+  label: string;
+  interval?: Interval;
+  loading?: boolean;
+  className?: string;
+}) {
+  const rows = useMemo(() => (data ?? []).map((p) => ({ ...p, t: parseDate(p.bucket)?.getTime() ?? 0 })), [data]);
+  const hasPrevious = rows.some((r) => r.previous !== null);
+  const config = {
+    value: { label, color: "var(--chart-1)" },
+    previous: { label: "Previous period", color: "var(--muted-foreground)" },
+  } satisfies ChartConfig;
+
+  if (loading && !data) return <Skeleton className={className} />;
+  const fmt = tickFormatter(interval);
+  return (
+    <ChartContainer config={config} className={className}>
+      <ComposedChart data={rows} margin={{ left: 0, right: 8, top: 8, bottom: 0 }}>
+        <CartesianGrid vertical={false} strokeDasharray="3 3" />
+        <XAxis dataKey="t" type="number" domain={["dataMin", "dataMax"]} scale="time" tickFormatter={fmt} tickLine={false} axisLine={false} minTickGap={32} fontSize={11} />
+        {/* allowDecimals off: there is no such thing as 2.5 conversions, and on a chart
+            topping out at 2 the default ticks are 0.5, 1, 1.5 — axis labels for values
+            the series cannot take. */}
+        <YAxis tickFormatter={(v) => formatNumber(v)} tickLine={false} axisLine={false} width={40} fontSize={11} allowDecimals={false} />
+        <ChartTooltip cursor={false} content={<ChartTooltipContent labelFormatter={(_, p) => fmt((p?.[0]?.payload as { t: number })?.t ?? 0)} indicator="line" />} />
+        {hasPrevious && <Line dataKey="previous" type="monotone" stroke="var(--color-previous)" strokeWidth={1.5} strokeDasharray="4 3" dot={false} opacity={0.65} />}
+        <Bar dataKey="value" fill="var(--color-value)" radius={2} maxBarSize={28} />
+        {hasPrevious && <ChartLegend content={<ChartLegendContent />} />}
+      </ComposedChart>
     </ChartContainer>
   );
 }

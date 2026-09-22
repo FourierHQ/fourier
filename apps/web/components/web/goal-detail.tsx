@@ -10,9 +10,10 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { EventsTable } from "@/components/events-table";
 import { Location } from "@/components/location";
 import { RelativeTime } from "@/components/relative-time";
-import { UserAvatar } from "@/components/users-table";
+import { TouchBadge } from "@/components/attribution";
+import { PersonLabel, UserAvatar } from "@/components/users-table";
 import { CopyButton } from "@/components/copy-button";
-import { TrendChart } from "@/components/web/charts";
+import { CountChart } from "@/components/web/charts";
 import { DETAIL_SHEET, DetailStat } from "@/components/web/detail-sheet";
 import { GoalMark } from "@/components/web/goal-mark";
 import { MetricLabel } from "@/components/web/metric";
@@ -114,7 +115,7 @@ export function GoalDetailSheet({
 
                   <section>
                     <h3 className="mb-2 text-sm font-medium">{isSupporting ? "Visits with this action" : "Conversions"} over time</h3>
-                    <TrendChart
+                    <CountChart
                       data={detail?.trend}
                       label={isSupporting ? "Visits" : "Converting visits"}
                       interval={scope?.range.interval ?? "day"}
@@ -180,12 +181,12 @@ function ConvertersTable({
           <TableHead className="truncate">Person</TableHead>
           <TableHead className="hidden w-[22%] truncate sm:table-cell">Company</TableHead>
           <TableHead className="w-[76px] text-right">Times</TableHead>
-          <TableHead className="w-[96px] text-right">Last</TableHead>
+          <TableHead className="w-[72px] text-right">Last</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
         {rows.map((r) => {
-          const name = displayName(r.traits, r.is_identified ? r.person_id : shortId(r.person_id, 12));
+          const name = displayName(r.traits, r.person_id);
           const email = (r.traits.email as string) ?? "";
           return (
             <TableRow
@@ -196,23 +197,20 @@ function ConvertersTable({
               onKeyDown={(e) => (e.key === "Enter" ? onSelect(r.person_id) : undefined)}
             >
               <TableCell className="overflow-hidden">
-                <div className="flex min-w-0 items-center gap-2.5">
-                  <UserAvatar name={name} />
-                  <div className="min-w-0">
-                    <div className="flex min-w-0 items-center gap-1.5">
-                      <span className="truncate font-medium">{name}</span>
-                      {!r.is_identified && (
-                        <Badge variant="outline" className="shrink-0 text-[10px]">
-                          anonymous
-                        </Badge>
-                      )}
-                    </div>
-                    <div className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
-                      <Location country={r.country} city={r.city} className="shrink-0" />
-                      <span className="truncate">{email && email !== name ? email : r.last_path ? shortPath(r.last_path, 28) : ""}</span>
-                    </div>
-                  </div>
-                </div>
+                {/* Named the way the Events view names people, so the same person reads
+                    the same in both places. */}
+                <PersonLabel
+                  label={name}
+                  personId={r.person_id}
+                  identified={r.is_identified}
+                  country={r.country}
+                  city={r.city}
+                  mono={false}
+                  className="text-sm font-medium"
+                />
+                <span className="mt-0.5 block truncate pl-[22px] text-xs text-muted-foreground">
+                  {email && email !== name ? email : r.last_path ? shortPath(r.last_path, 32) : ""}
+                </span>
               </TableCell>
               <TableCell className="hidden overflow-hidden text-ellipsis sm:table-cell">
                 {r.group_id ? (
@@ -253,7 +251,8 @@ function ConvertersTable({
 function PersonPage({ personId, onBack, backLabel }: { personId: string; onBack: () => void; backLabel?: string }) {
   const { data, isLoading, isError, error } = useUser(personId);
   const user = data?.user;
-  const name = user ? displayName(user.traits, shortId(user.distinct_id, 12)) : shortId(personId, 12);
+  const attribution = data?.attribution;
+  const name = user ? displayName(user.traits, user.distinct_id) : personId;
   const email = (user?.traits.email as string) ?? "";
 
   return (
@@ -264,12 +263,13 @@ function PersonPage({ personId, onBack, backLabel }: { personId: string; onBack:
           {backLabel ? `Back to ${backLabel}` : "Back"}
         </Button>
         <SheetTitle className="flex items-center gap-2 pr-8 text-sm">
-          <UserAvatar name={name} />
-          <span className="truncate">{name}</span>
-          {user && !user.is_identified && (
-            <Badge variant="outline" className="shrink-0 text-[10px]">
-              anonymous
-            </Badge>
+          {user?.is_identified ? (
+            <>
+              <UserAvatar name={name} />
+              <span className="truncate">{name}</span>
+            </>
+          ) : (
+            <PersonLabel label={name} personId={personId} identified={false} country={user?.country} city={user?.city} className="text-sm" />
           )}
         </SheetTitle>
         <SheetDescription>{email || "Everything Fourier has recorded for this person"}</SheetDescription>
@@ -325,6 +325,53 @@ function PersonPage({ personId, onBack, backLabel }: { personId: string; onBack:
                   </Link>
                 </Button>
               </div>
+            )}
+
+            {/* How they got here, which is the question a conversion drilldown asks
+                next: this person converted — what found them, and what brought them
+                back. Derived over all their history, not the selected period, because
+                the touch that found them is usually older than the report. */}
+            {attribution && attribution.touch_count > 0 && (
+              <section>
+                <h3 className="mb-2 text-sm font-medium">How they arrived</h3>
+                <dl className="grid grid-cols-2 gap-3">
+                  <div className="min-w-0">
+                    <dt className="mb-1 text-xs text-muted-foreground">First touch</dt>
+                    <dd className="flex min-w-0 flex-col items-start gap-0.5">
+                      {attribution.first_touch ? (
+                        <>
+                          <TouchBadge touch={attribution.first_touch} className="max-w-full" />
+                          <RelativeTime value={attribution.first_touch.timestamp} className="text-[11px] text-muted-foreground" />
+                        </>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">—</span>
+                      )}
+                    </dd>
+                  </div>
+                  <div className="min-w-0">
+                    <dt className="mb-1 text-xs text-muted-foreground">
+                      <MetricLabel hint="The last arrival that was not direct, when they have one. Someone who returns by typing the address has not been found again by anything, and crediting that to “direct” would bury whatever actually brought them back.">
+                        Last touch
+                      </MetricLabel>
+                    </dt>
+                    <dd className="flex min-w-0 flex-col items-start gap-0.5">
+                      {attribution.last_touch ? (
+                        <>
+                          <TouchBadge touch={attribution.last_touch} className="max-w-full" />
+                          <RelativeTime value={attribution.last_touch.timestamp} className="text-[11px] text-muted-foreground" />
+                        </>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">—</span>
+                      )}
+                    </dd>
+                  </div>
+                </dl>
+                {attribution.touch_count > 1 && (
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    {formatNumber(attribution.touch_count)} arrivals recorded in total.
+                  </p>
+                )}
+              </section>
             )}
 
             <section>
