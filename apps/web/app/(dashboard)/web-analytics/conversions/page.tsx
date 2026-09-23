@@ -1,5 +1,6 @@
 "use client";
 
+import { useMemo, useState } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -9,7 +10,7 @@ import { ConversionRateChart, CountChart, FunnelSteps, SplitBars } from "@/compo
 import { WebControls } from "@/components/web/controls";
 import { ManageGoalsDialog } from "@/components/web/goals";
 import { GoalDetailSheet } from "@/components/web/goal-detail";
-import { GoalMark } from "@/components/web/goal-mark";
+import { GoalNameCell, NewValuesNotice, groupSplitRows } from "@/components/web/split-rows";
 import { DeltaBadge, MetricLabel, RateCell } from "@/components/web/metric";
 import { RankedTable } from "@/components/web/ranked-table";
 import { NeedsGoal, NoTraffic, Panel } from "@/components/web/states";
@@ -20,7 +21,6 @@ import {
   unwrap,
   useWebConversions,
   type ConvertingPageRow,
-  type GoalSummaryRow,
   type LandingPageRow,
   type ConversionPages,
   type ConversionPageRow,
@@ -173,6 +173,16 @@ export default function ConversionsPage() {
   const goalName = countingLabel(scope);
   const loading = report.isLoading;
   const selectedGoal = get(P.goal) ?? scope?.goal?.id ?? null;
+  // Split goals whose values are folded away, and the one whose new values are being reviewed.
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  const [reviewing, setReviewing] = useState<string | null>(null);
+  const toggle = (id: string) => setCollapsed((c) => (c.has(id) ? new Set([...c].filter((x) => x !== id)) : new Set([...c, id])));
+  const goalRows = useMemo(() => (goals ? groupSplitRows(goals, collapsed, (r) => r.converting_sessions.current) : undefined), [goals, collapsed]);
+  const supportingRows = useMemo(() => (supporting ? groupSplitRows(supporting, collapsed, (r) => r.sessions.current) : undefined), [supporting, collapsed]);
+  const noticeRows = [
+    ...(goals ?? []).map((g) => ({ name: g.name, type: "primary" as const, split: g.split })),
+    ...(supporting ?? []).map((a) => ({ name: a.name, type: "supporting" as const, split: a.split })),
+  ];
 
   if (report.isSuccess && avail && !avail.has_traffic && !avail.has_primary_goal) {
     return (
@@ -213,9 +223,10 @@ export default function ConversionsPage() {
               </div>
             </CardHeader>
             <CardContent className="p-0">
+              <NewValuesNotice rows={noticeRows} onReview={setReviewing} />
               <Panel error={errorOf(report.data?.goals)} onRetry={() => report.refetch()}>
-                <RankedTable<GoalSummaryRow>
-                  rows={goals}
+                <RankedTable<NonNullable<typeof goalRows>[number]>
+                  rows={goalRows}
                   loading={loading}
                   rowKey={(r) => r.id}
                   // The row is the drilldown: clicking a number opens the people behind
@@ -228,12 +239,7 @@ export default function ConversionsPage() {
                     {
                       key: "name",
                       header: "Goal",
-                      cell: (r) => (
-                        <span className="flex items-center gap-2">
-                          <GoalMark name={r.name} />
-                          <span className="font-medium">{r.name}</span>
-                        </span>
-                      ),
+                      cell: (r) => <GoalNameCell name={r.name} type="primary" split={r.split} meta={r.meta} onToggle={toggle} />,
                     },
                     { key: "converting", header: "Converting sessions", cell: (r) => formatNumber(r.converting_sessions.current) },
                     { key: "rate", header: "Conversion rate", cell: (r) => <RateCell value={r.conversion_rate} /> },
@@ -458,7 +464,7 @@ export default function ConversionsPage() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {supporting.map((a) => (
+                      {(supportingRows ?? []).map((a) => (
                         // Same drilldown as a goal: "who clicked this" is the same
                         // question as "who converted", asked of a rule that is
                         // deliberately not counted as a conversion.
@@ -470,10 +476,7 @@ export default function ConversionsPage() {
                           onKeyDown={(e) => (e.key === "Enter" ? set({ drill: a.id, person: null }) : undefined)}
                         >
                           <TableCell>
-                            <span className="flex items-center gap-2">
-                              <GoalMark type="supporting" name={a.name} />
-                              <span className="font-medium">{a.name}</span>
-                            </span>
+                            <GoalNameCell name={a.name} type="supporting" split={a.split} meta={a.meta} onToggle={toggle} />
                           </TableCell>
                           <TableCell className="text-right tabular-nums">{formatNumber(a.sessions.current)}</TableCell>
                           <TableCell className="text-right tabular-nums">{formatNumber(a.people.current)}</TableCell>
@@ -490,6 +493,9 @@ export default function ConversionsPage() {
           </Card>
         </>
       )}
+
+      {/* Opened from the new-values notice, straight onto the goal to review. */}
+      <ManageGoalsDialog trigger={null} open={Boolean(reviewing)} onOpenChange={(o) => !o && setReviewing(null)} editing={reviewing} />
 
       <GoalDetailSheet
         definition={drill}

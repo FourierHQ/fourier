@@ -14,7 +14,8 @@
  * from a client component, which the package root is not.
  */
 
-import type { GoalMatch, PathRule, PropertyFilter } from "./definitions";
+import type { GoalMatch, GoalType, PathRule, PropertyFilter, SplitGoalConfig } from "./definitions";
+import { nameSplitValue } from "./split-naming";
 
 /** The event shape this needs. Anything with these fields will do. */
 export interface MatchableEvent {
@@ -72,6 +73,9 @@ function propertyMatches(f: PropertyFilter, properties: Record<string, unknown> 
       return has(properties, f.key) && extract(properties, f.key) !== (f.value ?? "");
     case "contains":
       return f.value ? extract(properties, f.key).includes(f.value) : true;
+    case "not_in":
+      // No presence check, as on the SQL side: a missing value is "" and is not excluded.
+      return !(f.values ?? []).includes(extract(properties, f.key));
   }
 }
 
@@ -79,4 +83,29 @@ export function eventMatches(match: GoalMatch, e: MatchableEvent): boolean {
   if (match.match === "pageview") return e.type === "page" && pathMatches(match.path, e.path ?? "");
   if (e.event !== match.event) return false;
   return (match.properties ?? []).every((f) => propertyMatches(f, e.properties));
+}
+
+/** Which value of a split an event is, as the goal it completes. */
+export interface SplitEventMatch {
+  value: string;
+  name: string;
+  type: GoalType;
+}
+
+/**
+ * Mirrors the expansion in ./split-goals for one event: the event and the split's own
+ * filters must hold, and the value must not be one the operator excluded. The name
+ * climbs the same ladder the reports do, minus the page-title rung, which needs every
+ * page view and is the one thing a single row cannot answer.
+ */
+export function splitEventMatch(config: SplitGoalConfig, e: MatchableEvent): SplitEventMatch | null {
+  if (e.event !== config.event) return null;
+  if (!(config.properties ?? []).every((f) => propertyMatches(f, e.properties))) return null;
+  const value = extract(e.properties, config.split.key);
+  const override = config.split.values?.[value];
+  const type = override?.type ?? config.type;
+  if (type === "excluded") return null;
+  const label = config.split.label_key ? extract(e.properties, config.split.label_key) : null;
+  const { name } = nameSplitValue({ value, key: config.split.key, renamed: override?.name, label, labelKey: config.split.label_key });
+  return { value, name, type };
 }

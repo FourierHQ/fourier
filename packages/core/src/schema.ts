@@ -862,9 +862,15 @@ definitions — what the operator has told Fourier to look for: conversion goals
   config by kind — definitions.ts owns the parsing, and is the authority on the shape:
     goal — {type: 'primary' | 'supporting'} merged with either {match: 'pageview', path: {op:
       'exact' | 'prefix' | 'contains', value}} or {match: 'event', event, properties?: [{key, op:
-      'eq' | 'neq' | 'contains' | 'exists', value?}]}, plus an optional funnel: [{name, match}] of
-      ordered steps. Only primary goals may be counted in a conversion rate; supporting actions
-      are reported and never added to a conversion total.
+      'eq' | 'neq' | 'contains' | 'exists' | 'not_in', value?, values?}]}, plus an optional funnel:
+      [{name, match}] of ordered steps. Only primary goals may be counted in a conversion rate;
+      supporting actions are reported and never added to a conversion total.
+      A split goal is {match: 'event_split', event, properties?, split: {key, label_key?, values?:
+      {<value>: {name?, type?: 'primary' | 'supporting' | 'excluded'}}, absorbs?: [goal ids]}}: one
+      goal per value of properties[key]. Reproduce it in SQL as JSONExtractString(properties, key)
+      grouped, leaving out values whose type differs from the goal's. A value with an entry in
+      values has been reviewed; one without is counted the way the goal counts. Goals listed in
+      absorbs were combined into the split and are not in force while it exists.
     page_group — {rules: [{op, value}]}, same path rule shape.
     hidden_event — {hidden: bool}, and the row id IS the event name. Absence means the default.
   Nothing here is applied at ingest. A definition is compiled into SQL when a report runs, so

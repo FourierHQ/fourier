@@ -4,10 +4,10 @@ import {
   attributionReport,
   availability,
   countingLabel,
-  defaultGoal,
   deleteDefinition,
   eventTimeseries,
   funnel,
+  goalScanWindow,
   goalSummary,
   groupAttribution,
   headline,
@@ -19,7 +19,7 @@ import {
   hiddenEventsFor,
   listEventNames,
   listEvents,
-  listGoals,
+  listGoalDefinitions,
   listGroups,
   listPageGroups,
   listProjects,
@@ -27,8 +27,12 @@ import {
   listUsers,
   propertyKeys,
   propertyValues,
+  isSplitConfig,
   resolveGoal,
+  resolveGoals,
   resolveRange,
+  splitCatalog,
+  splitValueGoalId,
   runSql,
   schemaDoc,
   supportingActions,
@@ -37,8 +41,10 @@ import {
   RANGE_PRESETS,
   parseEnvironment,
   scope as makeScope,
-  type Goal,
   type GoalConfig,
+  type GoalDefinition,
+  type SplitGoalConfig,
+  type SplitValue,
   type GoalMatch,
   type GoalType,
   type PropertyFilter,
@@ -140,6 +146,59 @@ const goalTypeArg = z
     "primary: something the site exists to produce, and the only kind a conversion rate counts. supporting: evidence along the way — a CTA click, a form start — reported on its own and never added to a conversion total.",
   );
 
+/**
+ * Splitting a goal by a property. Flat, like the match: an agent says `split_by:
+ * "form_id"` on the goal it is already describing rather than learning a second shape.
+ */
+const splitShape = {
+  split_by: z
+    .string()
+    .min(1)
+    .max(200)
+    .optional()
+    .describe(
+      "Make this one goal per value of an event property. 'Form Submitted' split by 'form_id' reports each form on its own row, and a form added later appears by itself — counted the way this goal counts and flagged as new until someone reviews it. Event goals only. Choose from event_property_keys: a good split property is on nearly every event and has a handful of recurring values; one with a different value every time (an email, an order id) is not a split.",
+    ),
+  label_by: z
+    .string()
+    .min(1)
+    .max(200)
+    .optional()
+    .describe(
+      "A property that names each value, for when split_by is an id: 'form_name' beside 'form_id', 'product_name' beside 'sku'. Values already readable name themselves; values with neither are named after the page they are completed on.",
+    ),
+  split_values: z
+    .array(
+      z.object({
+        value: z.string().max(1000).describe("The split property's value, exactly as event_property_values or goal_values gives it. '' means events that carried none."),
+        name: z.string().min(1).max(200).optional().describe("What the reports call it."),
+        type: z
+          .enum(["inherit", "primary", "supporting", "excluded"])
+          .optional()
+          .describe("How it counts. inherit (the default) follows the goal. supporting reports it apart from conversions; excluded counts it as nothing — spam, a test form."),
+        reset: z.boolean().optional().describe("Forget everything decided about this value, so it shows as new again."),
+      }),
+    )
+    .max(500)
+    .optional()
+    .describe("Decisions about individual values. Any value listed is marked reviewed, which is what stops it showing as new. On update these merge into what is already there."),
+};
+
+function splitValues(existing: Record<string, SplitValue>, input: z.infer<typeof splitShape.split_values>): Record<string, SplitValue> {
+  const out = { ...existing };
+  for (const v of input ?? []) {
+    if (v.reset) {
+      delete out[v.value];
+      continue;
+    }
+    const prior = out[v.value] ?? {};
+    const type = v.type === undefined ? prior.type : v.type === "inherit" ? undefined : v.type;
+    const name = v.name?.trim() || prior.name;
+    out[v.value] = { ...(name ? { name } : {}), ...(type ? { type } : {}) };
+  }
+  return out;
+}
+
 type MatchInput = {
   match?: "pageview" | "event";
   event?: string;
@@ -179,6 +238,28 @@ function toMatch(input: MatchInput, where: string, base?: GoalMatch): GoalMatch 
   return { match: "event", event, ...(filters.length ? { properties: filters } : {}) };
 }
 
+function toSplit(
+  match: GoalMatch,
+  type: GoalType,
+  funnel: { name: string; match: GoalMatch }[],
+  split: { key: string; label_key?: string; values: Record<string, SplitValue>; absorbs?: string[] },
+): SplitGoalConfig {
+  if (match.match !== "event") throw new Error("split_by splits an event goal by one of its properties; a page-view goal has none.");
+  return {
+    type,
+    match: "event_split",
+    event: match.event,
+    ...(match.properties?.length ? { properties: match.properties } : {}),
+    ...(funnel.length ? { funnel } : {}),
+    split: {
+      key: split.key,
+      ...(split.label_key ? { label_key: split.label_key } : {}),
+      ...(Object.keys(split.values).length ? { values: split.values } : {}),
+      ...(split.absorbs?.length ? { absorbs: split.absorbs } : {}),
+    },
+  };
+}
+
 function toFunnel(steps: StepInput[]): { name: string; match: GoalMatch }[] {
   return steps.map((s, i) => {
     const name = s.name.trim();
@@ -205,15 +286,29 @@ function matchFields(m: GoalMatch) {
 }
 
 /** A goal in the same flat shape the write tools take, so a read can be edited and sent back. */
-function describeGoal(g: Goal) {
+function describeGoal(g: GoalDefinition) {
+  const c = g.config;
+  const funnel = c.funnel?.length ? { funnel: c.funnel.map((s) => ({ name: s.name, ...matchFields(s.match) })) } : {};
+  const rule = isSplitConfig(c)
+    ? {
+        match: "event" as const,
+        event: c.event,
+        ...(c.properties?.length ? { properties: c.properties } : {}),
+        split_by: c.split.key,
+        ...(c.split.label_key ? { label_by: c.split.label_key } : {}),
+        // Only what has been decided. goal_values lists every value, named, with counts.
+        split_values: Object.entries(c.split.values ?? {}).map(([value, v]) => ({ value, ...v })),
+        ...(c.split.absorbs?.length ? { replaces_goals: c.split.absorbs } : {}),
+      }
+    : matchFields(c);
   return {
     id: g.id,
     name: g.name,
-    type: g.config.type,
+    type: c.type,
     is_default: g.is_default,
     position: g.position,
-    ...matchFields(g.config),
-    ...(g.config.funnel?.length ? { funnel: g.config.funnel.map((s) => ({ name: s.name, ...matchFields(s.match) })) } : {}),
+    ...rule,
+    ...funnel,
     created_at: g.created_at,
     updated_at: g.updated_at,
   };
@@ -225,7 +320,7 @@ function describeGoal(g: Goal) {
  * will compile.
  */
 async function savedGoal(projectId: string, id: string) {
-  const goal = (await listGoals(projectId)).find((g) => g.id === id);
+  const goal = (await listGoalDefinitions(projectId)).find((g) => g.id === id);
   if (!goal) throw new Error(`Goal ${id} was written but could not be read back.`);
   return describeGoal(goal);
 }
@@ -472,17 +567,21 @@ export function registerFourierTools(server: McpServer) {
     {
       title: "List goals",
       description:
-        "Conversion goals and supporting actions, each with the rule it matches on: the event or page path, any property filters, and the funnel steps leading to it. Primary goals are the only things a conversion rate counts; supporting actions are reported separately and never added into a conversion total. Goals are shared by every environment, so there is no environment argument.",
+        "Conversion goals and supporting actions, each with the rule it matches on: the event or page path, any property filters, and the funnel steps leading to it. A goal with split_by is one goal per value of that property — use goal_values to see the values. Primary goals are the only things a conversion rate counts; supporting actions are reported separately and never added into a conversion total. Goals are shared by every environment, so there is no environment argument.",
       inputSchema: z.object({ project_id: projectArg }),
       annotations: readOnly,
     },
     async ({ project_id }) => {
-      const goals = await listGoals((await project(project_id)).id);
+      const defs = await listGoalDefinitions((await project(project_id)).id);
+      // Goals a split replaced are kept, hidden, so deleting the split can bring them
+      // back. They are not in force, so they are not listed.
+      const inForce = defs.filter((d) => !d.absorbed_by);
+      const marked = defs.find((d) => d.is_default);
       return text({
-        goals: goals.map(describeGoal),
+        goals: inForce.map(describeGoal),
         // Which goal a report reaches for when it needs exactly one — a funnel cannot be
         // drawn to "any of three things" — and the reader has not named one.
-        default_goal_id: defaultGoal(goals)?.id ?? null,
+        default_goal_id: marked ? (marked.absorbed_by ?? marked.id) : (inForce.find((d) => d.config.type === "primary")?.id ?? null),
       });
     },
   );
@@ -505,15 +604,19 @@ export function registerFourierTools(server: McpServer) {
           .describe("Ordered steps a single visit must pass through, in order, to reach this goal. Omit for the honest default: a visit, and then the goal. Primary goals only."),
         is_default: z.boolean().optional().describe("Make this the goal a funnel falls back to. At most one per project; setting it clears the previous one."),
         position: z.number().int().min(0).optional().describe("Sort order in the reports."),
+        ...splitShape,
       }),
       annotations: write,
     },
-    async ({ project_id, name, type, funnel: steps, is_default, position, ...m }) => {
+    async ({ project_id, name, type, funnel: steps, is_default, position, split_by, label_by, split_values, ...m }) => {
       const pid = (await project(project_id)).id;
       const kind = type ?? "primary";
       guardSupporting(kind, is_default, steps);
       const built = steps ? toFunnel(steps) : [];
-      const config: GoalConfig = { type: kind, ...toMatch(m, "goal"), ...(built.length ? { funnel: built } : {}) };
+      const match = toMatch(m, "goal");
+      const config: GoalConfig | SplitGoalConfig = split_by
+        ? toSplit(match, kind, built, { key: split_by, label_key: label_by, values: splitValues({}, split_values) })
+        : { type: kind, ...match, ...(built.length ? { funnel: built } : {}) };
       const saved = await upsertDefinition(pid, "goal", { name, config, position, is_default });
       return text({ goal: await savedGoal(pid, saved.id) });
     },
@@ -534,18 +637,35 @@ export function registerFourierTools(server: McpServer) {
         funnel: z.array(funnelStepArg).max(8).optional().describe("Replaces the existing steps. [] drops the funnel and returns the goal to a visit, then the goal."),
         is_default: z.boolean().optional(),
         position: z.number().int().min(0).optional(),
+        ...splitShape,
       }),
       annotations: { ...write, idempotentHint: true },
     },
-    async ({ project_id, goal_id, name, type, funnel: steps, is_default, position, ...m }) => {
+    async ({ project_id, goal_id, name, type, funnel: steps, is_default, position, split_by, label_by, split_values, ...m }) => {
       const pid = (await project(project_id)).id;
-      const existing = (await listGoals(pid)).find((g) => g.id === goal_id);
+      const existing = (await listGoalDefinitions(pid)).find((g) => g.id === goal_id && !g.absorbed_by);
       if (!existing) throw new Error(`No goal with id ${goal_id}. Use list_goals to see them.`);
       const kind = type ?? existing.config.type;
       const nextDefault = is_default ?? existing.is_default;
       const built = steps ? toFunnel(steps) : (existing.config.funnel ?? []);
       guardSupporting(kind, nextDefault, built);
-      const config: GoalConfig = { type: kind, ...toMatch(m, "goal", existing.config), ...(built.length ? { funnel: built } : {}) };
+      const prior = existing.config;
+      let config: GoalConfig | SplitGoalConfig;
+      if (isSplitConfig(prior) || split_by) {
+        const base: GoalMatch = isSplitConfig(prior) ? { match: "event", event: prior.event, ...(prior.properties?.length ? { properties: prior.properties } : {}) } : prior;
+        const key = split_by ?? (isSplitConfig(prior) ? prior.split.key : "");
+        // Decisions belong to the values of one property. Splitting by another starts over.
+        const kept = isSplitConfig(prior) && prior.split.key === key ? (prior.split.values ?? {}) : {};
+        const label = label_by ?? (isSplitConfig(prior) && prior.split.key === key ? prior.split.label_key : undefined);
+        config = toSplit(toMatch(m, "goal", base), kind, built, {
+          key,
+          label_key: label,
+          values: splitValues(kept, split_values),
+          absorbs: isSplitConfig(prior) ? prior.split.absorbs : undefined,
+        });
+      } else {
+        config = { type: kind, ...toMatch(m, "goal", prior), ...(built.length ? { funnel: built } : {}) };
+      }
       await upsertDefinition(pid, "goal", { id: goal_id, name: name ?? existing.name, config, position, is_default: nextDefault });
       return text({ goal: await savedGoal(pid, goal_id) });
     },
@@ -555,14 +675,14 @@ export function registerFourierTools(server: McpServer) {
     "delete_goal",
     {
       title: "Delete goal",
-      description: "Remove a goal or supporting action. The events it matched are untouched — a goal is only ever a reading of them — so the same rule can be defined again and will report the same history.",
+      description: "Remove a goal or supporting action. The events it matched are untouched — a goal is only ever a reading of them — so the same rule can be defined again and will report the same history. Deleting a split goal that replaced others (replaces_goals) brings those back.",
       inputSchema: z.object({ project_id: projectArg, goal_id: z.string() }),
       annotations: { ...write, destructiveHint: true, idempotentHint: true },
     },
     async ({ project_id, goal_id }) => {
       const pid = (await project(project_id)).id;
       if (!(await deleteDefinition(pid, "goal", goal_id))) throw new Error(`No goal with id ${goal_id}. Use list_goals to see them.`);
-      return text({ deleted: goal_id, goals: (await listGoals(pid)).map(describeGoal) });
+      return text({ deleted: goal_id, goals: (await listGoalDefinitions(pid)).filter((d) => !d.absorbed_by).map(describeGoal) });
     },
   );
 
@@ -571,14 +691,14 @@ export function registerFourierTools(server: McpServer) {
     {
       title: "Goal performance",
       description:
-        "How the goals are actually doing: conversions and conversion rate for every primary goal against the same denominator, the funnel to the selected goal, and supporting actions — each against the preceding equivalent period. Counted in sessions, excluding bots. Read `availability` before reporting a zero: no primary goal configured, or no traffic at all, is a setup state rather than nobody converting.",
+        "How the goals are actually doing: conversions and conversion rate for every primary goal against the same denominator, the funnel to the selected goal, and supporting actions — each against the preceding equivalent period. Counted in sessions, excluding bots. A split goal appears as its rollup (split.role 'all') followed by one row per value; the rollup is distinct visits, not the sum of its rows, and a row with split.is_new has been counted without anyone reviewing it. Read `availability` before reporting a zero: no primary goal configured, or no traffic at all, is a setup state rather than nobody converting.",
       inputSchema: z.object({
         project_id: projectArg,
         environment: environmentArg,
         goal_id: z
           .string()
           .optional()
-          .describe("Narrow to one primary goal. Omit to count visits that completed any of them — and note the funnel only follows a goal's configured steps when you name that goal, since a path cannot lead to three destinations at once."),
+          .describe("Narrow to one primary goal — or one value of a split goal, by the goal_id goal_values gives it. Omit to count visits that completed any of them — and note the funnel only follows a goal's configured steps when you name that goal, since a path cannot lead to three destinations at once."),
         source_id: sourceArg,
         range: z.enum(RANGE_PRESETS).optional().describe("Named window. Default 30d."),
         from: z.string().optional().describe("ISO date or timestamp. Give from/to instead of range for a custom window."),
@@ -591,14 +711,16 @@ export function registerFourierTools(server: McpServer) {
     },
     async ({ project_id, environment, goal_id, source_id, range, from, to, timezone, compare, include_bots }) => {
       const pid = (await project(project_id)).id;
-      const [scope, goals, pageGroups] = await Promise.all([scopeFor(project_id, environment), listGoals(pid), listPageGroups(pid)]);
+      const [scope, defs, pageGroups] = await Promise.all([scopeFor(project_id, environment), listGoalDefinitions(pid), listPageGroups(pid)]);
+      const r = resolveRange({ preset: range, from, to, compare: compare !== false, timezone });
+      const goals = await resolveGoals(scope, defs, goalScanWindow(r), { include: [goal_id] });
       const selected = resolveGoal(goals, goal_id);
       // Naming a goal that is not a primary goal would otherwise report every goal under
       // a heading that says one, which is the wrong number silently.
       if (goal_id && !selected) throw new Error(`${goal_id} is not a primary goal in this project. list_goals shows which are; supporting actions cannot be selected, they appear in the supporting table.`);
       const w: WebScope = {
         scope,
-        range: resolveRange({ preset: range, from, to, compare: compare !== false, timezone }),
+        range: r,
         filters: { sourceId: source_id ?? null, includeBots: include_bots ?? false },
         goal: selected,
         goals,
@@ -627,6 +749,42 @@ export function registerFourierTools(server: McpServer) {
         funnel: path,
         supporting,
         availability: avail,
+      });
+    },
+  );
+
+  server.registerTool(
+    "goal_values",
+    {
+      title: "Split goal values",
+      description:
+        "Every value of a split goal (one with split_by): what the reports call it and why, how often it was completed in the last 90 days and when it was first seen, how it counts, and whether anyone has reviewed it. A value that is not reviewed is already being counted the way the goal counts — this is how to find the form someone added last week. Each value's goal_id can be passed to goal_report; rename, reclassify or exclude one with update_goal's split_values.",
+      inputSchema: z.object({ project_id: projectArg, environment: environmentArg, goal_id: z.string().describe("A split goal, from list_goals.") }),
+      annotations: readOnly,
+    },
+    async ({ project_id, environment, goal_id }) => {
+      const pid = (await project(project_id)).id;
+      const def = (await listGoalDefinitions(pid)).find((d) => d.id === goal_id);
+      if (!def) throw new Error(`No goal with id ${goal_id}. Use list_goals to see them.`);
+      if (!isSplitConfig(def.config)) throw new Error(`${def.name} is not split by a property. update_goal with split_by makes it one.`);
+      const catalog = await splitCatalog(await scopeFor(project_id, environment), def.config);
+      return text({
+        goal: { id: def.id, name: def.name, type: def.config.type, split_by: catalog.key, label_by: catalog.label_key },
+        ...(catalog.suggested_label_key ? { suggested_label_by: catalog.suggested_label_key } : {}),
+        values: catalog.values.map((v) => ({
+          goal_id: splitValueGoalId(def.id, v.value),
+          value: v.value,
+          name: v.name,
+          named_from: v.name_source,
+          ...(v.name_evidence ? { evidence: v.name_evidence } : {}),
+          counts_as: v.type,
+          reviewed: v.reviewed,
+          completions_90d: v.count,
+          completions_ever: v.total,
+          first_seen: v.first_seen,
+          last_seen: v.last_seen,
+        })),
+        ...(catalog.truncated ? { truncated: true } : {}),
       });
     },
   );

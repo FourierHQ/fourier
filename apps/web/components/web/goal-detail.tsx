@@ -21,7 +21,7 @@ import { QueryError } from "@/components/web/states";
 import { useUser } from "@/lib/api";
 import { displayName, formatNumber, formatRate, formatRatio, shortId, shortPath } from "@/lib/format";
 import { ExploreLink } from "@/components/web/explore-link";
-import { errorOf, unwrap, useWebDefinitions, useWebGoalDetail, type Goal, type GoalConverterRow, type ScopeEcho } from "@/lib/web-api";
+import { errorOf, unwrap, useWebGoalDetail, type Goal, type GoalConverterRow, type GoalSplit, type ScopeEcho } from "@/lib/web-api";
 
 /**
  * Who completed a goal, in a sheet over the table it came from.
@@ -56,10 +56,11 @@ export function GoalDetailSheet({
 }) {
   // Kept loading behind the person page so Back is instant rather than a second wait.
   const report = useWebGoalDetail(definition);
-  // The rule itself, for the Events link — the report carries the counts, not the config.
-  const defs = useWebDefinitions();
-  const config = defs.data?.goals.find((g) => g.id === definition);
   const detail = unwrap(report.data?.detail);
+  // The rule as it compiles, for the Events link. From the report rather than the stored
+  // definitions: a value of a split goal has no definition of its own.
+  const config = detail ? { config: detail.match } : undefined;
+  const split = detail?.split ?? null;
   const error = errorOf(report.data?.detail);
   const loading = report.isLoading;
   const isSupporting = detail?.type === "supporting";
@@ -86,6 +87,7 @@ export function GoalDetailSheet({
                   ? "Who triggered this action, under the filters currently on screen"
                   : "Who converted, under the filters currently on screen"}
               </SheetDescription>
+              {split && <SplitOrigin split={split} type={detail?.type ?? "primary"} />}
             </SheetHeader>
 
             <div className="space-y-6 p-4">
@@ -394,7 +396,65 @@ function PersonPage({ personId, onBack, backLabel }: { personId: string; onBack:
  * Why this list and the Events view disagree, said once, at the point where someone is
  * about to click through to the second one and compare the two.
  */
-function GoalFootnote({ goal, scope, isSupporting }: { goal: Goal | undefined; scope: ScopeEcho | undefined; isSupporting: boolean }) {
+const NAMED_FROM: Record<string, string> = {
+  label: "its label property",
+  page: "the title of the page it's completed on",
+  raw: "nothing — the data has no name for it",
+  unset: "",
+};
+
+/**
+ * Where a value of a split goal comes from, and — when it is new — that it is already
+ * being counted. The drawer is where someone lands from a surprising row, so it is the
+ * place to say "nobody reviewed this; it counts because the goal does".
+ */
+function SplitOrigin({ split, type }: { split: GoalSplit; type: "primary" | "supporting" }) {
+  if (split.role === "all") {
+    return (
+      <p className="text-xs text-muted-foreground">
+        Every <code className="font-mono">{split.key}</code> of {split.definition_name} that counts as{" "}
+        {type === "primary" ? "a conversion" : "a supporting action"}, as one number — visits, not the sum of its rows.
+      </p>
+    );
+  }
+  if (split.role === "other") {
+    return (
+      <p className="text-xs text-muted-foreground">
+        Values of <code className="font-mono">{split.key}</code> without a row of their own — there were too many to list.
+        Review {split.definition_name} to give one a name.
+      </p>
+    );
+  }
+  const from = split.name_source ? NAMED_FROM[split.name_source] : undefined;
+  return (
+    <div className="space-y-1.5 text-xs text-muted-foreground">
+      <p className="flex flex-wrap items-center gap-x-1.5">
+        <span>One value of {split.definition_name}:</span>
+        <code className="rounded bg-muted px-1 font-mono">
+          {split.key} = {split.value === "" ? "(not set)" : split.value}
+        </code>
+        {split.value && <CopyButton value={split.value} />}
+      </p>
+      {from && (
+        <p>
+          Named from {from}
+          {split.name_evidence && split.name_source === "page" ? ` (${split.name_evidence.replace(/^Title of /, "")})` : ""}. Rename it in Manage goals.
+        </p>
+      )}
+      {split.is_new && (
+        <p className="rounded-md border border-brand-mint/40 bg-brand-mint/5 px-2 py-1.5 text-foreground">
+          <Badge variant="secondary" className="mr-1.5 font-normal">
+            New
+          </Badge>
+          First completed <RelativeTime value={split.first_seen ?? undefined} />. Nobody has reviewed it yet, so it is counted as{" "}
+          {type === "primary" ? "a conversion" : "a supporting action"} because {split.definition_name} is.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function GoalFootnote({ goal, scope, isSupporting }: { goal: Pick<Goal, "config"> | undefined; scope: ScopeEcho | undefined; isSupporting: boolean }) {
   const thing = isSupporting ? "action" : "goal";
   return (
     <div className="space-y-2 border-t pt-4">

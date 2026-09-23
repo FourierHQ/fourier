@@ -9,7 +9,8 @@
     "./environments": "./src/environments.ts",
     "./periods": "./src/periods.ts",
     "./classify": "./src/classify.ts",
-    "./goal-match": "./src/goal-match.ts"
+    "./goal-match": "./src/goal-match.ts",
+    "./split-naming": "./src/split-naming.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

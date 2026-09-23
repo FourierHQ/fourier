@@ -12,6 +12,7 @@
     "start": "next start -p 5050",
     "typecheck": "tsc --noEmit",
     "seed": "node --env-file=../../.env --import tsx scripts/seed.ts",
+    "seed:forms": "node --env-file=../../.env --import tsx scripts/seed-forms.ts",
     "mcp": "node --env-file=../../.env --import tsx scripts/mcp-stdio.ts"
   },
   "dependencies": {
