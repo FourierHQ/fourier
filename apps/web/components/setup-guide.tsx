@@ -10,8 +10,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CodeBlock } from "@/components/code-block";
 import { CopyButton } from "@/components/copy-button";
 import { useCreateSource, useOverview, useSources, type SourceWithKeys } from "@/lib/api";
-import { ENVIRONMENTS, useEnvironment } from "@/lib/environment";
-import { ENVIRONMENT_LABELS } from "@fourierhq/core/environments";
+import { useEnvironment } from "@/lib/environment";
+import { ENVIRONMENT_LABELS, isKeyedEnvironment, KEYED_ENVIRONMENTS } from "@fourierhq/core/environments";
 import { Input } from "@/components/ui/input";
 import { Plus } from "lucide-react";
 
@@ -94,7 +94,7 @@ function EnvironmentNote() {
       </p>
       <p className="mt-2 flex flex-wrap items-center gap-1">
         <span>Showing keys for</span>
-        {ENVIRONMENTS.map((env) => (
+        {KEYED_ENVIRONMENTS.map((env) => (
           <Button
             key={env}
             size="sm"
@@ -111,6 +111,39 @@ function EnvironmentNote() {
 }
 
 export function SetupGuide({ compact = false }: { compact?: boolean }) {
+  const { environment } = useEnvironment();
+  // Test has no write key to install with. Falling through would show the source's
+  // production key under a "Test" label, and a key copied from there would send test
+  // traffic straight into production.
+  if (!isKeyedEnvironment(environment)) return <ImportOnlyNote />;
+  return <KeyedSetupGuide compact={compact} />;
+}
+
+/** Where Test's data comes from, in place of install steps it has no key for. */
+function ImportOnlyNote() {
+  const { setEnvironment } = useEnvironment();
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Test is filled by import</CardTitle>
+        <CardDescription>
+          No SDK writes here and there is no write key to install. Import events from Amplitude into Test, look around, then empty it and import again as
+          often as you like — production never sees any of it.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-wrap gap-2">
+        <Button asChild size="sm">
+          <Link href="/settings#import">Import from Amplitude</Link>
+        </Button>
+        <Button size="sm" variant="outline" onClick={() => setEnvironment("production")}>
+          Back to Production
+        </Button>
+      </CardContent>
+    </Card>
+  );
+}
+
+function KeyedSetupGuide({ compact = false }: { compact?: boolean }) {
   const { data } = useOverview();
   const host = useHost();
   const sources = useSources();
@@ -360,6 +393,9 @@ function ApiRow({ name, desc }: { name: string; desc: string }) {
 }
 
 export function SetupCallout() {
+  const { environment } = useEnvironment();
+  // There is no snippet to install in Test; SetupGuide says where its data comes from.
+  if (!isKeyedEnvironment(environment)) return null;
   return (
     <div className="flex flex-col items-start justify-between gap-3 rounded-lg border border-dashed p-5 sm:flex-row sm:items-center">
       <div>
