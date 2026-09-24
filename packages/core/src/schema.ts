@@ -34,6 +34,13 @@ export type Statement = string | { sql: string; when: "upgrade" | "change" };
 export const PAGE_LEAVE = "$page_leave";
 
 /**
+ * How long a stored message id keeps a second copy of it out. Retries land within seconds
+ * to minutes; a week also covers a client that held a batch through a long offline spell,
+ * and costs a sliver of what a week of events does.
+ */
+export const DEDUPE_WINDOW_DAYS = 7;
+
+/**
  * System events: messages Fourier's own SDK sends to make the product work, rather
  * than things a person did. They are kept out of the activity views by default.
  *
@@ -721,6 +728,36 @@ export const dataStatements: Statement[] = [
   FROM touches AS t
   LEFT JOIN identity_map AS i
     ON i.project_id = t.project_id AND i.from_id = if(t.user_id != '', t.user_id, t.anonymous_id)` },
+
+  // ---- delivery dedupe ----
+  //
+  // Every message id stored recently, for ingest to check a batch against before writing it.
+  // Clients retry, and a retry is often a copy of something already stored: the request that
+  // "failed" had arrived, and only its answer was lost. `events` cannot catch that by itself.
+  // Its sort key includes the timestamp, which normalize() recomputes from each delivery's
+  // arrival, so the copy is a different key; and the rollups above sum every row they are
+  // handed, so a copy has to be stopped before the insert rather than merged away after it.
+  //
+  // Filled by a view on `events`, so an id is only ever marked stored when its event row was:
+  // a failed insert leaves nothing here, and the retry goes through. Keyed for point lookups,
+  // and partitioned by day so a day that has aged out is dropped whole instead of rewritten.
+  //
+  // Plain CREATE IF NOT EXISTS on purpose. A preview deployment shares the production
+  // database and runs these on its first request, before its code ships; from then on the
+  // view is filled by whatever writes `events`, including code that never reads it.
+  `CREATE TABLE IF NOT EXISTS message_ids (
+    project_id   LowCardinality(String),
+    message_id   String,
+    received_at  DateTime
+  ) ENGINE = MergeTree
+  PARTITION BY toDate(received_at)
+  ORDER BY (project_id, message_id)
+  TTL received_at + INTERVAL ${DEDUPE_WINDOW_DAYS} DAY
+  SETTINGS ttl_only_drop_parts = 1`,
+
+  `CREATE MATERIALIZED VIEW IF NOT EXISTS message_ids_mv TO message_ids AS
+  SELECT project_id, message_id, toDateTime(received_at) AS received_at
+  FROM events`,
 ];
 
 /** Version bookkeeping. Every database tracks its own schema version. */
@@ -759,6 +796,9 @@ events — one row per message (track, page, screen, identify, group, alias)
   Location is resolved from the connecting IP when the event arrives, so it is where that
   message came from, not a fixed attribute of the person — one traveller has events in
   several countries. It is '' when nothing could resolve it; filter with country != ''.
+  message_id is the sender's id for the message. A second delivery of one already stored in the
+  last ${DEDUPE_WINDOW_DAYS} days is dropped at ingest; rows from before that check can hold such
+  a copy, a second or so apart, so uniqExact(message_id) counts messages where count() may not.
   For track: event = the event name. For page: event = '$page', name = page name.
   For screen: '$screen'. identify: '$identify'. group: '$group'. alias: '$alias'.
   Read JSON with JSONExtractString(properties, 'plan'), JSONExtractInt(properties, 'amount'),
