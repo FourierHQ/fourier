@@ -22,4 +22,6 @@ export * from "./classify";
 export * from "./periods";
 export * from "./definitions";
 export * from "./goal-match";
+export * from "./split-naming";
+export * from "./split-goals";
 export * from "./web-analytics";

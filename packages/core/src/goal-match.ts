@@ -14,7 +14,8 @@
  * from a client component, which the package root is not.
  */
 
-import type { GoalMatch, PathRule, PropertyFilter } from "./definitions";
+import type { GoalMatch, GoalType, PathRule, PropertyFilter, SplitGoalConfig } from "./definitions";
+import { nameSplitValue } from "./split-naming";
 
 /** The event shape this needs. Anything with these fields will do. */
 export interface MatchableEvent {
@@ -46,37 +47,199 @@ function pathMatches(rule: PathRule, path: string): boolean {
   }
 }
 
+type Doc = Record<string, unknown> | null;
+
 /**
- * Mirrors JSONExtractString, which returns the empty string for anything that is not a
- * JSON string — including numbers and booleans. So `plan eq "5"` does not match a
- * numeric 5 on the server, and must not match one here either.
+ * Every way the server could read the properties: normally one, and null when it cannot
+ * read them at all.
+ *
+ * The server never sees this object. It sees the text ingest stored, which is
+ * `JSON.stringify(properties)` (see normalize in ./ingest, the only writer of events),
+ * parsed by ClickHouse. So this is that text parsed back, which also settles everything
+ * JSON.stringify decides on the way: a key whose value is undefined is not there, NaN is
+ * null, a -0 is 0.
+ *
+ * ClickHouse refuses the whole text, not just the offending value, for two things
+ * JSON.stringify will write: a lone surrogate (half an emoji, which cutting a string
+ * with `slice` produces) in any key or string, and nesting deeper than 1024 levels.
+ * When it refuses, JSONHas is false and JSONExtractString is '' for every key, so a
+ * `neq` goal fails too.
+ *
+ * And for one thing the versions Fourier runs disagree, so there are two readings: an
+ * integer outside the 64-bit range, which JavaScript writes as plain digits from 2^64 up
+ * to 1e21. 26.8 (CI, and `latest` locally) reads it; 26.4 (production) refuses the whole
+ * text over it. This cannot know which one is answering, so a goal has to hold under
+ * both: never a mark the report does not count, at the price of a missing mark on 26.8.
+ * How 26.8 spells such an integer when it is nested is modelled in `json` —
+ * `[2 ** 64]` reads `["18446744073709552000"]` — because not_in, a negation with no
+ * presence check, is decided by it: a spelling that misses the list is a match. Once
+ * 26.4 is gone, drop the second reading.
+ *
+ * Checked against 26.4 and 26.8 by hand, and against CI's version by
+ * goal-match.integration.mts, which runs the same rows through both sides.
  */
-function extract(properties: Record<string, unknown> | null | undefined, key: string): string {
-  const v = properties?.[key];
-  return typeof v === "string" ? v : "";
+function serverReadings(properties: Record<string, unknown> | null | undefined): Doc[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(JSON.stringify(properties ?? {}));
+  } catch {
+    return [null]; // circular or a BigInt: ingest could not have stored it either
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return [null];
+  const found = { wide: false };
+  if (!readable(parsed, 1, found)) return [null];
+  return found.wide ? [parsed as Doc, null] : [parsed as Doc];
 }
 
-function has(properties: Record<string, unknown> | null | undefined, key: string): boolean {
-  return properties != null && Object.prototype.hasOwnProperty.call(properties, key) && properties[key] !== undefined;
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?:^|[^\ud800-\udbff])[\udc00-\udfff]/;
+/** The deepest level ClickHouse parses, counting the properties object itself as 1. */
+const MAX_DEPTH = 1024;
+
+function readable(v: unknown, level: number, found: { wide: boolean }): boolean {
+  if (level > MAX_DEPTH) return false;
+  if (typeof v === "string") return !LONE_SURROGATE.test(v);
+  if (typeof v === "number") {
+    if (!Number.isSafeInteger(v) && isWide(spellNumber(v))) found.wide = true;
+    return true;
+  }
+  if (v === null || typeof v !== "object") return true;
+  if (Array.isArray(v)) return v.every((x) => readable(x, level + 1, found));
+  return Object.entries(v).every(([k, x]) => !LONE_SURROGATE.test(k) && readable(x, level + 1, found));
 }
 
-function propertyMatches(f: PropertyFilter, properties: Record<string, unknown> | null | undefined): boolean {
+// Strings rather than literals: the web app compiles this file for ES2017, which has no
+// BigInt literal syntax.
+const UINT64_MAX = BigInt("18446744073709551615");
+const INT64_MIN = BigInt("-9223372036854775808");
+
+/** A number spelled as an integer that fits neither Int64 nor UInt64. */
+function isWide(spelled: string): boolean {
+  if (!/^-?\d+$/.test(spelled)) return false;
+  const n = BigInt(spelled);
+  return n > UINT64_MAX || n < INT64_MIN;
+}
+
+/**
+ * Mirrors JSONExtractString, which on the versions Fourier runs returns every value in
+ * its own spelling rather than '' for anything that is not a string:
+ *
+ * - a string is itself, unescaped;
+ * - a number is spelled as JavaScript spells it, except that an exponent is `1e21`
+ *   where JavaScript writes `1e+21`. That holds for every double: ClickHouse formats
+ *   floats as the shortest string that round-trips, as JavaScript does, and echoes
+ *   integers digit for digit;
+ * - true and false are "true" and "false";
+ * - null is '', though JSONHas still counts the key as present;
+ * - an object or array is compact JSON, with the differences `json` below handles.
+ *
+ * So `form_id eq "42"` matches a numeric 42, and `plan eq "5"` matches a numeric 5.
+ */
+function extract(doc: Doc, key: string): string {
+  if (!doc || !Object.hasOwn(doc, key)) return "";
+  return spell(doc[key]);
+}
+
+function has(doc: Doc, key: string): boolean {
+  return doc != null && Object.hasOwn(doc, key);
+}
+
+function spell(v: unknown): string {
+  if (typeof v === "string") return v;
+  if (v === null) return "";
+  if (typeof v === "number") return spellNumber(v);
+  if (typeof v === "boolean") return String(v);
+  return json(v);
+}
+
+function spellNumber(n: number): string {
+  return String(n).replace("e+", "e");
+}
+
+/**
+ * An object or array as ClickHouse writes it back out: compact, keys in the order they
+ * were stored (which is JavaScript's order, since JSON.stringify stored them), numbers
+ * spelled as above, and strings escaped as JSON.stringify escapes them except in two
+ * places — a control character's hex is upper case (\u001B, not \u001b), and U+2028 and
+ * U+2029 are escaped rather than written raw.
+ */
+function json(v: unknown): string {
+  if (v === null) return "null";
+  if (typeof v === "string") return quote(v);
+  // 26.8 quotes an integer beyond 64 bits when it is nested (see serverReadings). Only a
+  // row carrying one has a second reading, so this is 26.8's reading and nobody else's.
+  if (typeof v === "number") return !Number.isSafeInteger(v) && isWide(spellNumber(v)) ? quote(spellNumber(v)) : spellNumber(v);
+  if (typeof v === "boolean") return String(v);
+  if (Array.isArray(v)) return `[${v.map(json).join(",")}]`;
+  return `{${Object.entries(v as Record<string, unknown>)
+    .map(([k, x]) => `${quote(k)}:${json(x)}`)
+    .join(",")}}`;
+}
+
+function quote(s: string): string {
+  // Escapes are matched whole, so the `\\` of an escaped backslash is never mistaken for
+  // the start of a \u escape that happens to follow it.
+  return JSON.stringify(s).replace(/\\(?:u[0-9a-f]{4}|.)|[\u2028\u2029]/g, (m) =>
+    m.length === 1 ? `\\u${m.charCodeAt(0).toString(16)}` : m.length === 6 ? `\\u${m.slice(2).toUpperCase()}` : m,
+  );
+}
+
+function propertyMatches(f: PropertyFilter, doc: Doc): boolean {
   switch (f.op) {
     case "exists":
-      return has(properties, f.key);
+      return has(doc, f.key);
     case "eq":
-      return extract(properties, f.key) === (f.value ?? "");
+      return extract(doc, f.key) === (f.value ?? "");
     case "neq":
       // The key must be present. Without this, "plan is not free" would be true of every
-      // event carrying no plan at all — see the note on the SQL side.
-      return has(properties, f.key) && extract(properties, f.key) !== (f.value ?? "");
+      // event carrying no plan at all — see the note on the SQL side. A null counts as
+      // present here, as it does to JSONHas, even though it reads as ''.
+      return has(doc, f.key) && extract(doc, f.key) !== (f.value ?? "");
     case "contains":
-      return f.value ? extract(properties, f.key).includes(f.value) : true;
+      // position(x, '') is 1 whatever x is, so an empty needle matches even a missing key.
+      return f.value ? extract(doc, f.key).includes(f.value) : true;
+    case "not_in":
+      // No presence check, as on the SQL side: a missing value is "" and is not excluded.
+      return !(f.values ?? []).includes(extract(doc, f.key));
   }
 }
 
 export function eventMatches(match: GoalMatch, e: MatchableEvent): boolean {
   if (match.match === "pageview") return e.type === "page" && pathMatches(match.path, e.path ?? "");
   if (e.event !== match.event) return false;
-  return (match.properties ?? []).every((f) => propertyMatches(f, e.properties));
+  const filters = match.properties ?? [];
+  if (!filters.length) return true;
+  return serverReadings(e.properties).every((doc) => filters.every((f) => propertyMatches(f, doc)));
+}
+
+/** Which value of a split an event is, as the goal it completes. */
+export interface SplitEventMatch {
+  value: string;
+  name: string;
+  type: GoalType;
+}
+
+/**
+ * Mirrors the expansion in ./split-goals for one event: the event and the split's own
+ * filters must hold, and the value must not be one the operator excluded. The name
+ * climbs the same ladder the reports do, minus the page-title rung, which needs every
+ * page view and is the one thing a single row cannot answer.
+ *
+ * Held to the same rule as eventMatches: under every way the server could read the
+ * event. Readings that disagree about the value mark nothing, because the report counts
+ * it under whichever one answers and a mark must never claim the other.
+ */
+export function splitEventMatch(config: SplitGoalConfig, e: MatchableEvent): SplitEventMatch | null {
+  if (e.event !== config.event) return null;
+  const readings = serverReadings(e.properties);
+  const filters = config.properties ?? [];
+  if (!readings.every((doc) => filters.every((f) => propertyMatches(f, doc)))) return null;
+  const values = new Set(readings.map((doc) => extract(doc, config.split.key)));
+  if (values.size !== 1) return null;
+  const [value] = values;
+  const override = config.split.values?.[value];
+  const type = override?.type ?? config.type;
+  if (type === "excluded") return null;
+  const label = config.split.label_key ? extract(readings[0], config.split.label_key) : null;
+  const { name } = nameSplitValue({ value, key: config.split.key, renamed: override?.name, label, labelKey: config.split.label_key });
+  return { value, name, type };
 }

@@ -375,10 +375,11 @@ export async function propertyKeys(scope: Scope, event: string): Promise<{ key: 
  *
  * Read as strings whatever the property's JSON type is, because that is how
  * `propertyFilterSql` compares them — a number written as `2` in the payload has to
- * offer itself here as "2" or the filter it produces would match nothing. Empty values
- * are dropped: an event that carries the key with an empty string is indistinguishable
- * here from one that does not carry it at all, and `exists` is the operator for that
- * question.
+ * offer itself here as "2" or the filter it produces would match nothing, and the same
+ * goes for `true` as "true" and an object or array as its compact JSON. Empty values
+ * are dropped, and null with them since it reads as '': an event that carries the key
+ * that way is indistinguishable here from one that does not carry it at all, and
+ * `exists` is the operator for that question.
  */
 export async function propertyValues(scope: Scope, event: string, key: string, limit = 200): Promise<{ value: string; count: number }[]> {
   // Hidden for the same reason its keys are: an event left out of the reports does not

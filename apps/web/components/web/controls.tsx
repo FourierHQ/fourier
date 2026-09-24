@@ -221,11 +221,17 @@ function GoalSection({ scope }: { scope?: ScopeEcho }) {
               session here, not two — these are distinct visits, never a sum of the rows
               on the Conversions page. */}
           <DropdownMenuRadioItem value={ALL_GOALS}>All conversions</DropdownMenuRadioItem>
-          {primary.map((g) => (
-            <DropdownMenuRadioItem key={g.id} value={g.id}>
-              {g.name}
-            </DropdownMenuRadioItem>
-          ))}
+          {/* A split's values sit under its rollup. Selecting the rollup counts every value
+              that counts, selecting one value counts that value alone. */}
+          {primary.map((g) => {
+            const child = g.split && g.split.role !== "all" && primary.some((p) => p.split?.role === "all" && p.split.definition_id === g.split?.definition_id);
+            return (
+              <DropdownMenuRadioItem key={g.id} value={g.id} className={child ? "pl-5" : undefined}>
+                {child && <span className="text-muted-foreground">↳</span>}
+                {g.name}
+              </DropdownMenuRadioItem>
+            );
+          })}
         </DropdownMenuRadioGroup>
       )}
       <p className="px-1.5 pt-1 pb-1.5 text-[11px] leading-snug text-muted-foreground">

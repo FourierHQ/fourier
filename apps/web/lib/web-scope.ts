@@ -8,7 +8,7 @@
  * slightly different ways.
  */
 
-import { listGoals, listPageGroups, resolveGoal, resolveRange, type Project, type WebFilters, type WebScope } from "@fourierhq/core";
+import { goalScanWindow, listGoalDefinitions, listPageGroups, resolveGoal, resolveGoals, resolveRange, type Project, type WebFilters, type WebScope } from "@fourierhq/core";
 import { readScope } from "./db";
 
 /** Query-string names, exported so the client builds the same URLs the server reads. */
@@ -59,17 +59,24 @@ export function filtersFromParams(s: URLSearchParams): WebFilters {
  */
 export async function webScopeFromRequest(req: Request, project: Project): Promise<WebScope> {
   const s = new URL(req.url).searchParams;
-  const [goals, pageGroups, scope] = await Promise.all([listGoals(project.id), listPageGroups(project.id), readScope(project.id, req)]);
+  const [defs, pageGroups, scope] = await Promise.all([listGoalDefinitions(project.id), listPageGroups(project.id), readScope(project.id, req)]);
+  const range = resolveRange({
+    preset: str(s, PARAM.preset),
+    from: str(s, PARAM.from),
+    to: str(s, PARAM.to),
+    // Comparison is on unless it was explicitly turned off.
+    compare: s.get(PARAM.compare) !== "0",
+    timezone: str(s, PARAM.timezone),
+  });
+  // Split goals become one goal per value seen in the window. The selected goal and the
+  // one an open drawer describes are asked for by id, so narrowing the dates cannot
+  // quietly turn "Demo request" into "All conversions".
+  const goals = await resolveGoals(scope, defs, goalScanWindow(range), {
+    include: [str(s, PARAM.goal), str(s, "definition")],
+  });
   return {
     scope,
-    range: resolveRange({
-      preset: str(s, PARAM.preset),
-      from: str(s, PARAM.from),
-      to: str(s, PARAM.to),
-      // Comparison is on unless it was explicitly turned off.
-      compare: s.get(PARAM.compare) !== "0",
-      timezone: str(s, PARAM.timezone),
-    }),
+    range,
     filters: filtersFromParams(s),
     goal: resolveGoal(goals, str(s, PARAM.goal)),
     goals,
@@ -118,8 +125,8 @@ export function describeScope(w: WebScope) {
       timezone: w.range.timezone,
     },
     filters: w.filters,
-    goal: w.goal ? { id: w.goal.id, name: w.goal.name } : null,
-    goals: w.goals.map((g) => ({ id: g.id, name: g.name, type: g.config.type, is_default: g.is_default })),
+    goal: w.goal ? { id: w.goal.id, name: w.goal.name, split: w.goal.split ?? null } : null,
+    goals: w.goals.map((g) => ({ id: g.id, name: g.name, type: g.config.type, is_default: g.is_default, split: g.split ?? null })),
     page_groups: w.pageGroups.map((g) => ({ id: g.id, name: g.name })),
   };
 }

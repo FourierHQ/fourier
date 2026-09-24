@@ -205,7 +205,7 @@ One control bar runs the section — source, date range, comparison, filters —
 
 Everything is counted in **sessions**, off one rollup that the `sessions` materialised view maintains. A few consequences are worth knowing, because they are what make the numbers hold up:
 
-- **A conversion rate shows its working.** "2.5% — 12 of 480 sessions", never a bare percentage. A rate with nothing to divide by is unavailable, not 0%. A previous period of zero reads "New", not +∞%.
+- **A conversion rate shows its working.** "2.5% — 12 of 480 sessions", never a bare percentage. A rate with nothing to divide by is unavailable, not 0%. A previous period of zero reads "up from 0", not +∞% — and not "New", which a form with no conversions last month is not.
 - **A session converts once**, however many times the goal fires inside it.
 - **Landing-page conversion means conversion in visits that started there** — not conversion among everyone who happened to see the page. The All pages tab carries no per-visit conversion rate, because viewing a page is not evidence it caused anything.
 - **"Went on to convert" follows the person, not the visit.** Both page tabs, and the page drawer, count the people whose visit reached a page and who converted *afterwards* — in that same visit, or by coming back another time, split into the two. A conversion before they reached the page does not count, the return visit does not have to match the filters or even the source, and it is counted up to today, so recent pages have had less time to be returned to. It is read against the same figure for every visitor in the period, and it is still an association.
@@ -218,6 +218,8 @@ Everything is counted in **sessions**, off one rollup that the `sessions` materi
 Goals, supporting actions and page groups are defined in the dashboard and stored once for the whole install, not per environment — so a goal can be checked in preview before the tracking that fires it ships. They are compiled into SQL when a report runs, which means naming a goal a week after installing tracking reports the week you already have.
 
 A **primary goal** is something the site exists to produce and is the only thing a conversion rate counts. A **supporting action** — a CTA click, a form start, a download — is reported on its own and never added to a conversion total.
+
+A goal can be **split by a property**: `Form Submitted` split by `form_id` is one goal per form, each on its own row under a total for all of them. The values are read from the events, so a form added next month appears on its own the day it is first submitted, counted the way the goal counts, instead of going uncounted because nobody wrote a goal for it. Each value is named from the data: the value itself when it reads as a name, a property that names it (Fourier finds the one that lines up one-to-one, such as `form_name` beside `form_id`), or the title of the page it is completed on, without the site's name. A value can be renamed, made a supporting action, or excluded. Several goals that differ only by one property's value can be combined into one split; the originals are kept, hidden, and come back if the split is deleted.
 
 Reports count **all conversions** by default: a site with three goals answers "how is it doing" with the visits that completed any of them, counted once each — a visit that signs up and books a demo is one converting session, not two. Narrowing to a single goal is a refinement, and it is a separate control from the filters on purpose: a filter changes which visits are counted, while the goal changes only what counts as a conversion. The session total stays exactly where it was, which is visible in every rate's denominator.
 
@@ -260,7 +262,7 @@ claude mcp add --transport http fourier http://localhost:5050/api/mcp \
 
 The header is only needed once the instance has accounts — in development, MCP works without it.
 
-Tools: `list_projects`, `list_sources`, `get_overview`, `list_event_names`, `list_events`, `event_timeseries`, `event_property_keys`, `event_property_values`, `list_users`, `get_user`, `list_groups`, `get_group`, `list_touches`, `attribution_report`, `list_goals`, `goal_report`, `describe_schema`, `run_sql` read. `create_goal`, `update_goal` and `delete_goal` write, and are the only tools that do — they edit goals, the same rows the **Conversions** page edits, and nothing else. `run_sql` runs arbitrary ClickHouse SELECTs with `readonly=1`, a keyword guard, and the project bound server-side via the `{project_id}` placeholder.
+Tools: `list_projects`, `list_sources`, `get_overview`, `list_event_names`, `list_events`, `event_timeseries`, `event_property_keys`, `event_property_values`, `list_users`, `get_user`, `list_groups`, `get_group`, `list_touches`, `attribution_report`, `list_goals`, `goal_report`, `goal_values`, `describe_schema`, `run_sql` read. `create_goal`, `update_goal` and `delete_goal` write, and are the only tools that do — they edit goals, the same rows the **Conversions** page edits, and nothing else. `run_sql` runs arbitrary ClickHouse SELECTs with `readonly=1`, a keyword guard, and the project bound server-side via the `{project_id}` placeholder.
 
 Goals are worth calling out: an agent can read what counts as a conversion, define a new one — an event narrowed by its properties, or a page view, with an optional funnel to it — and then ask `goal_report` how it is doing. Because goals are matched when a report runs rather than at ingest, one an agent defines today reports the history you already have, and deleting it leaves the events untouched.
 
@@ -284,7 +286,7 @@ pnpm dev          starts local ClickHouse if needed, then the dashboard on :5050
 pnpm dev:demo     example app on :5051
 pnpm seed         demo data into the default project
 pnpm mcp          MCP server over stdio (same tools as /api/mcp)
-pnpm test         SDK analytics.js parity tests
+pnpm test         unit tests: SDK analytics.js parity, core goal matching
 pnpm typecheck    all packages
 pnpm build        all packages
 pnpm brand        regenerate every icon, favicon, and social card from brand/

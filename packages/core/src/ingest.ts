@@ -191,6 +191,8 @@ export function normalize(project: Project, msg: IncomingMessage, meta: IngestMe
     session_start: session.isNew === true || session.start === true ? 1 : 0,
     timestamp: ts,
     sent_at: toIso(msg.sentAt, now),
+    // Exactly JSON.stringify, and nothing after it: ./goal-match answers "is this event a
+    // conversion?" in the browser by assuming this is the text ClickHouse will read.
     properties: JSON.stringify(msg.properties ?? {}),
     traits: JSON.stringify(msg.traits ?? {}),
     context: JSON.stringify(ctx),
