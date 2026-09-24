@@ -205,7 +205,7 @@ One control bar runs the section — source, date range, comparison, conversion 
 
 Everything is counted in **sessions**, off one rollup that the `sessions` materialised view maintains. A few consequences are worth knowing, because they are what make the numbers hold up:
 
-- **A conversion rate shows its working.** "2.5% — 12 of 480 sessions", never a bare percentage. A rate with nothing to divide by is unavailable, not 0%. A previous period of zero reads "New", not +∞%.
+- **A conversion rate shows its working.** "2.5% — 12 of 480 sessions", never a bare percentage. A rate with nothing to divide by is unavailable, not 0%. A previous period of zero reads "up from 0", not +∞% — and not "New", which a form with no conversions last month is not.
 - **A session converts once**, however many times the goal fires inside it.
 - **Landing-page conversion means conversion in visits that started there** — not conversion among everyone who happened to see the page. The All pages tab carries no conversion column at all, because viewing a page is not evidence it caused anything.
 - **Bots and channels are decided when you read, not when the event arrives.** Both are derived in the `sessions_resolved` view from the stored user agent and campaign, so correcting either re-reports every visit already recorded rather than only the ones that arrive next.
