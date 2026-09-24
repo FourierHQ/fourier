@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { getDataClient } from "./client";
+import { dedupe } from "./dedupe";
 import { DEFAULT_ENVIRONMENT, type Environment } from "./environments";
 import { EMPTY_GEO, ensureGeoDb, geoFromContext, geoFromIp, type Geo } from "./geo";
 import type { Project } from "./projects";
@@ -136,7 +137,9 @@ export function normalize(project: Project, msg: IncomingMessage, meta: IngestMe
   const groupId = str(msg.groupId ?? ctx.groupId);
   const session = (ctx.session ?? {}) as Record<string, unknown>;
 
-  // Clock skew correction, like Segment: timestamp + (received - sentAt)
+  // Clock skew correction, like Segment: timestamp + (received - sentAt). Each delivery of
+  // a message arrives at its own moment, so a retry gets its own timestamp and can never
+  // be told apart from a new event by this row alone. ./dedupe keeps retries out by id.
   let ts = toIso(msg.timestamp, now);
   if (msg.sentAt && msg.timestamp) {
     const sent = new Date(msg.sentAt).getTime();
@@ -257,6 +260,8 @@ async function loadIdentityLinks(environment: Environment, projectId: string, id
 export interface IngestResult {
   accepted: number;
   rejected: number;
+  /** Copies of a message already stored (same messageId), dropped rather than counted twice. */
+  duplicates: number;
 }
 
 /**
@@ -272,12 +277,10 @@ export async function ingest(
   meta: IngestMeta = {},
   environment: Environment = DEFAULT_ENVIRONMENT,
 ): Promise<IngestResult> {
-  const client = getDataClient(environment);
   // Opens the optional local geo database on the first batch and is a no-op after that,
   // which is what lets normalize() resolve an address without being async.
   await ensureGeoDb();
-  const rows: EventRow[] = [];
-  const accepted: IncomingMessage[] = [];
+  const valid: IncomingMessage[] = [];
   let rejected = 0;
   for (const m of messages) {
     if (m.type === "track" && !m.event) {
@@ -288,10 +291,27 @@ export async function ingest(
       rejected++;
       continue;
     }
-    rows.push(normalize(project, m, meta));
-    accepted.push(m);
+    valid.push(m);
   }
-  if (rows.length === 0) return { accepted: 0, rejected };
+  // Before anything is written, so a copy of a stored message moves no rollup, trait or
+  // identity. Copies are answered as a success: the sender's message is stored, and telling
+  // it otherwise would only make it retry again.
+  const batch = await dedupe(environment, project.id, valid);
+  try {
+    const accepted = await write(project, batch.fresh, meta, environment);
+    batch.settle(true);
+    return { accepted, rejected, duplicates: batch.duplicates };
+  } catch (err) {
+    batch.settle(false);
+    throw err;
+  }
+}
+
+/** Store messages that passed validation and dedupe. Returns how many were stored. */
+async function write(project: Project, accepted: IncomingMessage[], meta: IngestMeta, environment: Environment): Promise<number> {
+  const client = getDataClient(environment);
+  const rows = accepted.map((m) => normalize(project, m, meta));
+  if (rows.length === 0) return 0;
 
   // --- traits: merge per id within the batch, then against stored state ---
   const userTraitUpdates = new Map<string, Record<string, unknown>>();
@@ -372,7 +392,7 @@ export async function ingest(
     }
   }
 
-  const inserts: Promise<unknown>[] = [client.insert({ table: "events", values: rows, format: "JSONEachRow" })];
+  const inserts: Promise<unknown>[] = [];
   if (userTraitRows.length) inserts.push(client.insert({ table: "user_traits", values: userTraitRows, format: "JSONEachRow" }));
   if (groupTraitRows.length) inserts.push(client.insert({ table: "group_traits", values: groupTraitRows, format: "JSONEachRow" }));
   if (identityLinks.length) {
@@ -380,5 +400,9 @@ export async function ingest(
     inserts.push(client.insert({ table: "identities", values: [...dedup.values()], format: "JSONEachRow" }));
   }
   await Promise.all(inserts);
-  return { accepted: rows.length, rejected };
+  // Last, because the events row is what marks a message id as stored (message_ids_mv).
+  // Written first, a failed trait or identity insert would leave the id marked, and the
+  // retry that should repair it would be dropped as a copy.
+  await client.insert({ table: "events", values: rows, format: "JSONEachRow" });
+  return rows.length;
 }
