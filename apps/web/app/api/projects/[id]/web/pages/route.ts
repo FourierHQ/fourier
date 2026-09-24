@@ -1,4 +1,4 @@
-import { allPages, availability, landingPages } from "@fourierhq/core";
+import { allPages, availability, landingPages, pageSearchNeedle, wentOnBaseline } from "@fourierhq/core";
 import { resolveProject } from "@/lib/db";
 import { error, handle, json, options } from "@/lib/http";
 import { requireProjectAccess } from "@/lib/auth";
@@ -17,13 +17,19 @@ export const GET = handle(requireProjectAccess(async (req: Request, { params }: 
   const s = new URL(req.url).searchParams;
   const tab = s.get("tab") === "all" ? "all" : "landing";
   const groupBy = s.get("group_by") === "group" ? "group" : "page";
+  // The page's own search box. Not a control-bar filter: it picks rows out of the table
+  // and changes no number on them, so it is not carried to the other reports either.
+  const search = pageSearchNeedle(s.get("q"));
 
   return json({
     scope: describeScope(w),
     tab,
     group_by: groupBy,
+    // Echoed so the client can tell which search the rows it is holding answer.
+    search,
     ...(await settle({
-      rows: tab === "all" ? allPages(w, { limit: 50, groupBy }) : landingPages(w, { limit: 50, groupBy }),
+      rows: tab === "all" ? allPages(w, { limit: 50, groupBy, search }) : landingPages(w, { limit: 50, groupBy, search }),
+      went_on_baseline: wentOnBaseline(w),
       availability: availability(w),
     })),
   });

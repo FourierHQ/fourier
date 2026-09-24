@@ -1,6 +1,10 @@
 "use client";
 
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { Search, X } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { WebControls, useClearFilters } from "@/components/web/controls";
 import { DeltaBadge, MetricLabel, RateCell } from "@/components/web/metric";
@@ -8,8 +12,9 @@ import { PageDetailSheet } from "@/components/web/page-detail";
 import { PageGroupsDialog } from "@/components/web/page-groups";
 import { RankedTable, type Column } from "@/components/web/ranked-table";
 import { NoMatches, NoTraffic, Panel } from "@/components/web/states";
-import { formatDuration, formatNumber, shortPath } from "@/lib/format";
-import { countingLabel, errorOf, unwrap, useWebPages, type LandingPageRow, type PageRow } from "@/lib/web-api";
+import { WENT_ON_HINT, WentOnCell } from "@/components/web/went-on";
+import { formatDuration, formatNumber, formatRate, shortPath } from "@/lib/format";
+import { countingLabel, errorOf, unwrap, useWebPages, type LandingPageRow, type PageRow, type WentOn } from "@/lib/web-api";
 import { useWebState } from "@/lib/web-state";
 
 /** Extracted so `rows` is PageRow[] by construction rather than by a cast. */
@@ -19,12 +24,16 @@ function AllPagesTable({
   isGroups,
   columns,
   onSelect,
+  empty,
+  baseline,
 }: {
   rows: PageRow[] | undefined;
   loading?: boolean;
   isGroups: boolean;
   columns: Column<PageRow>[];
   onSelect?: (row: PageRow) => void;
+  empty: ReactNode;
+  baseline: WentOn | null | undefined;
 }) {
   const busiest = Math.max(...(rows ?? []).map((r) => r.pageviews.current), 1);
   return (
@@ -35,15 +44,90 @@ function AllPagesTable({
       barOf={(r) => r.pageviews.current / busiest}
       onSelect={onSelect}
       columns={columns}
-      empty={<p className="px-6 py-6 text-sm text-muted-foreground">No page views recorded in this period.</p>}
+      empty={empty}
       caption={
         <>
-          No conversion rate here on purpose: whether a page was on the way to a conversion is not something this table can
-          separate from everyone passing through it. Landing pages carry one because the visit started there.
+          No per-visit conversion rate here on purpose: whether a page was on the way to a conversion is not something this
+          table can separate from everyone passing through it.
+          <BaselineNote baseline={baseline} />
           {isGroups && " Group totals are counted from the underlying visitors, not summed from page rows."}
         </>
       }
     />
+  );
+}
+
+/** The number every went-on figure in the table should be read against. */
+function BaselineNote({ baseline }: { baseline: WentOn | null | undefined }) {
+  if (!baseline?.people) return null;
+  return (
+    <>
+      {" "}
+      Went on to convert asks it of people instead, counting only what they did after reaching the page — and across every
+      visitor in this period, <span className="text-foreground">{formatRate(baseline.rate.rate)}</span> did, which is the
+      figure to read each row against.
+    </>
+  );
+}
+
+/**
+ * Finding one page by name.
+ *
+ * Searched on the server, not over the rows already on screen: the table holds the top
+ * fifty, and the page someone is looking for is usually the one that is not in them.
+ * Typed into a draft that reaches the URL a moment after the typing stops, so each
+ * keystroke is not a request — and so a search, like the tab, survives a reload and
+ * can be sent to someone.
+ */
+function PageSearch({ value, onChange, placeholder }: { value: string; onChange: (v: string | null) => void; placeholder: string }) {
+  const [draft, setDraft] = useState(value);
+  // What the URL last held, so an outside change (Clear search, Back) resets the box
+  // without the box's own debounced write bouncing back into it mid-word.
+  const committed = useRef(value);
+  // Held in a ref: the caller's handler is a new function on every render, and as a
+  // dependency it would restart the debounce each time the report behind it refreshed.
+  const emit = useRef(onChange);
+  useEffect(() => {
+    emit.current = onChange;
+  });
+  useEffect(() => {
+    if (value !== committed.current) {
+      committed.current = value;
+      setDraft(value);
+    }
+  }, [value]);
+  useEffect(() => {
+    if (draft === committed.current) return;
+    const t = setTimeout(() => {
+      committed.current = draft;
+      emit.current(draft.trim() ? draft : null);
+    }, 250);
+    return () => clearTimeout(t);
+  }, [draft]);
+
+  return (
+    <div className="relative w-full sm:w-[220px]">
+      <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" aria-hidden />
+      <Input
+        type="search"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => e.key === "Escape" && draft && (e.preventDefault(), setDraft(""))}
+        placeholder={placeholder}
+        aria-label={placeholder}
+        className="h-7 pr-7 pl-8 text-xs [&::-webkit-search-cancel-button]:hidden"
+      />
+      {draft && (
+        <button
+          type="button"
+          onClick={() => setDraft("")}
+          className="absolute top-1/2 right-1.5 -translate-y-1/2 rounded-sm p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+          aria-label="Clear search"
+        >
+          <X className="size-3" />
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -62,8 +146,9 @@ export default function PagesPage() {
   // immediately, even while the rows for it are still on their way.
   const tab = get("tab") === "all" ? "all" : "landing";
   const groupBy = get("group_by") === "group" ? "group" : "page";
+  const search = get("q");
   const selected = get("page");
-  const report = useWebPages(tab, groupBy);
+  const report = useWebPages(tab, groupBy, search);
 
   // What is actually on screen. Deliberately NOT the two above: until the new rows
   // arrive, react-query hands back the previous tab's payload, and the two tabs have
@@ -72,6 +157,7 @@ export default function PagesPage() {
   const data = report.data;
   const scope = data?.scope;
   const avail = unwrap(data?.availability);
+  const baseline = unwrap(data?.went_on_baseline);
   // What the conversion columns count: one goal, all of them, or nothing yet.
   const goalName = countingLabel(scope);
   const loading = report.isLoading;
@@ -82,6 +168,8 @@ export default function PagesPage() {
   // How many rows came back, whichever shape they are. Narrowing to read the count
   // rather than casting, so this keeps working when a third tab appears.
   const rowCount = data && "data" in data.rows ? data.rows.data.length : undefined;
+  // The search the rows on screen answer, not the one being typed.
+  const shownSearch = data?.search ?? null;
 
   if (report.isSuccess && avail && !avail.has_traffic) {
     return (
@@ -95,6 +183,28 @@ export default function PagesPage() {
       </div>
     );
   }
+
+  const noun = isGroups ? "groups" : tab === "landing" ? "landing pages" : "pages";
+  const empty = shownSearch ? (
+    <div className="flex flex-wrap items-center gap-3 px-6 py-6 text-sm text-muted-foreground">
+      <span>
+        No {noun} match <span className="text-foreground">&ldquo;{shownSearch}&rdquo;</span> in this period.
+      </span>
+      <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => set({ q: null })}>
+        Clear search
+      </Button>
+    </div>
+  ) : (
+    <p className="px-6 py-6 text-sm text-muted-foreground">
+      {tab === "landing" ? "No landing pages recorded in this period." : "No page views recorded in this period."}
+    </p>
+  );
+
+  const wentOnColumn = {
+    key: "went_on",
+    header: <MetricLabel hint={WENT_ON_HINT}>Went on to convert</MetricLabel>,
+    cell: (r: LandingPageRow | PageRow) => (goalName ? <WentOnCell value={r.went_on} /> : <span className="text-muted-foreground">—</span>),
+  };
 
   const landingColumns = [
     {
@@ -120,12 +230,13 @@ export default function PagesPage() {
     {
       key: "rate",
       header: (
-        <MetricLabel hint="Conversion within the visits that started on this page — not conversion among everyone who happened to see it. The second number flatters pages that people reach on their way to converting anyway.">
+        <MetricLabel hint="Conversion within the visits that started on this page — not conversion among everyone who happened to see it. The second number flatters pages that people reach on their way to converting anyway. For the people who came back and converted on another visit, see the next column.">
           Conv. rate
         </MetricLabel>
       ),
       cell: (r: LandingPageRow) => (goalName ? <RateCell value={r.conversion_rate} /> : <span className="text-muted-foreground">—</span>),
     },
+    wentOnColumn,
     { key: "change", header: "Change", cell: (r: LandingPageRow) => <DeltaBadge delta={r.landing_sessions} /> },
   ];
 
@@ -173,13 +284,16 @@ export default function PagesPage() {
       ),
       cell: (r: PageRow) => (avail?.has_supporting_actions ? formatNumber(r.cta_clickers) : <span className="text-muted-foreground">Not tracked</span>),
     },
+    wentOnColumn,
   ];
 
   return (
     <div className="space-y-6 p-4 md:p-6">
       <WebControls scope={scope} />
 
-      {avail?.has_traffic && !stale && rowCount === 0 ? (
+      {/* "These filters match nothing" replaces the table — but not when a search is what
+          emptied it, because then the search box has to stay where it was typed. */}
+      {avail?.has_traffic && !stale && rowCount === 0 && !shownSearch ? (
         <Card>
           <CardContent className="p-0">
             <NoMatches onClear={clearFilters} />
@@ -198,6 +312,11 @@ export default function PagesPage() {
                 </CardDescription>
               </div>
               <div className="flex flex-wrap items-center gap-2">
+                <PageSearch
+                  value={search ?? ""}
+                  onChange={(q) => set({ q })}
+                  placeholder={groupBy === "group" ? "Search groups" : "Search pages or titles"}
+                />
                 <Tabs value={tab} onValueChange={(v) => set({ tab: v })}>
                   <TabsList className="h-7">
                     <TabsTrigger value="landing" className="px-2 text-[11px]">
@@ -231,6 +350,8 @@ export default function PagesPage() {
                   loading={loading}
                   isGroups={isGroups}
                   columns={allColumns}
+                  empty={empty}
+                  baseline={baseline}
                   onSelect={isGroups ? undefined : (r) => set({ page: r.path, basis: "viewers" })}
                 />
               ) : (
@@ -242,8 +363,22 @@ export default function PagesPage() {
                   // Groups are a rollup, not a page, so there is no page detail behind them.
                   onSelect={isGroups ? undefined : (r) => set({ page: r.path, basis: "landing" })}
                   columns={landingColumns}
-                  empty={<p className="px-6 py-6 text-sm text-muted-foreground">No landing pages recorded in this period.</p>}
-                  caption={isGroups ? "Group totals are counted from the underlying visits, not summed from the pages inside them — someone who saw three pages in a group is one visitor to it." : undefined}
+                  empty={empty}
+                  caption={
+                    isGroups || Boolean(baseline?.people) ? (
+                      <>
+                        {baseline?.people ? (
+                          <>
+                            Conv. rate is the visit that landed here; went on to convert follows the person, into any later
+                            visit. Across every visitor in this period,{" "}
+                            <span className="text-foreground">{formatRate(baseline.rate.rate)}</span> went on to convert.
+                          </>
+                        ) : null}
+                        {isGroups &&
+                          " Group totals are counted from the underlying visits, not summed from the pages inside them — someone who saw three pages in a group is one visitor to it."}
+                      </>
+                    ) : undefined
+                  }
                 />
               )}
               </div>
@@ -252,7 +387,7 @@ export default function PagesPage() {
         </Card>
       )}
 
-      <PageDetailSheet path={selected} basis={get("basis") === "viewers" ? "viewers" : "landing"} onClose={() => set({ page: null, basis: null })} />
+      <PageDetailSheet path={selected} basis={get("basis") === "viewers" ? "viewers" : "landing"} onBasisChange={(basis) => set({ basis })} onClose={() => set({ page: null, basis: null })} />
     </div>
   );
 }

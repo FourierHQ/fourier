@@ -50,6 +50,7 @@ import {
   availability,
   conversionTrend,
   pageDetail,
+  wentOnBaseline,
   type Goal,
   type PathRule,
   type Project,
@@ -76,7 +77,7 @@ interface Visit {
   anonymousId: string;
   sessionId: string;
   at: Date;
-  pages: { path: string; afterMs?: number; engagedMs?: number }[];
+  pages: { path: string; afterMs?: number; engagedMs?: number; title?: string }[];
   tracks?: { event: string; properties?: Record<string, unknown>; afterMs?: number; path?: string }[];
   referrer?: string;
   utm?: Record<string, string>;
@@ -89,15 +90,15 @@ function messagesFor(v: Visit) {
   const msgs: Record<string, unknown>[] = [];
   const ua = v.userAgent ?? UA_DESKTOP;
   let first = true;
-  const ctx = (path: string, at: Date) => ({
-    page: { url: `https://${HOST}${path}`, path, search: "", title: path, referrer: first ? (v.referrer ?? "") : `https://${HOST}/` },
+  const ctx = (path: string, at: Date, title?: string) => ({
+    page: { url: `https://${HOST}${path}`, path, search: "", title: title ?? path, referrer: first ? (v.referrer ?? "") : `https://${HOST}/` },
     userAgent: ua,
     session: { id: v.sessionId, isNew: first },
     ...(v.utm && first ? { campaign: v.utm } : {}),
   });
   for (const p of v.pages) {
     const at = new Date(v.at.getTime() + (p.afterMs ?? 0));
-    msgs.push({ type: "page", anonymousId: v.anonymousId, userId: v.userId, timestamp: at.toISOString(), properties: { path: p.path, url: `https://${HOST}${p.path}` }, context: ctx(p.path, at) });
+    msgs.push({ type: "page", anonymousId: v.anonymousId, userId: v.userId, timestamp: at.toISOString(), properties: { path: p.path, url: `https://${HOST}${p.path}` }, context: ctx(p.path, at, p.title) });
     first = false;
     if (p.engagedMs) {
       const leaveAt = new Date(at.getTime() + p.engagedMs);
@@ -671,4 +672,144 @@ test("page detail describes observed navigation and does not invent exits", asyn
   assert.equal(next["/pricing"], 1, "s1 went home -> pricing");
   assert.equal(next["/product/api"], 1, "s3 went home -> product");
   assert.equal(detail.click_rate_basis, "page_viewers", "CTA exposure is not tracked and must not be implied");
+});
+
+// ---------- went on to convert, and finding a page by name ----------
+//
+// Seeded in January, a window no other test reads, so these visits cannot move any
+// number asserted above. Signup is the goal throughout.
+
+const JAN = (day: number, hour = 10) => new Date(Date.UTC(2026, 0, day, hour));
+const january = () => web({ range: resolveRange({ preset: "custom", from: "2026-01-10", to: "2026-01-16", now: NOW }) });
+
+let januarySeeded = false;
+async function seedJanuary() {
+  if (januarySeeded) return;
+  januarySeeded = true;
+  await send([
+    // Reads the guide, leaves, and signs up on a visit AFTER the range ends. The return
+    // falls outside the report, and it is still "went on to convert".
+    { anonymousId: "wo1", sessionId: "wo1-a", at: JAN(11), pages: [{ path: "/guide", title: "Getting started guide" }, { path: "/features", afterMs: 5_000 }] },
+    { anonymousId: "wo1", sessionId: "wo1-b", at: JAN(20), pages: [{ path: "/" }], tracks: [{ event: "Signup Completed", afterMs: 2_000 }] },
+    // Features, then signs up on /signup in the same visit.
+    {
+      anonymousId: "wo2",
+      sessionId: "wo2-a",
+      at: JAN(12),
+      pages: [{ path: "/features" }, { path: "/signup", afterMs: 5_000 }],
+      tracks: [{ event: "Signup Completed", afterMs: 8_000, path: "/signup" }],
+    },
+    // Signs up FIRST, then reads the guide. The guide did not lead anywhere: they had
+    // already converted by the time they saw it.
+    {
+      anonymousId: "wo3",
+      sessionId: "wo3-a",
+      at: JAN(12),
+      pages: [{ path: "/" }, { path: "/guide", afterMs: 10_000, title: "Getting started guide" }],
+      tracks: [{ event: "Signup Completed", afterMs: 1_000, path: "/" }],
+    },
+    // Reads the guide, comes back two days later — inside the range — lands elsewhere
+    // and signs up there without seeing the guide again.
+    { anonymousId: "wo4", sessionId: "wo4-a", at: JAN(11), pages: [{ path: "/guide", title: "Getting started guide" }] },
+    { anonymousId: "wo4", sessionId: "wo4-b", at: JAN(14), pages: [{ path: "/offer" }], tracks: [{ event: "Signup Completed", afterMs: 3_000 }] },
+  ]);
+}
+
+test("went on to convert: the same visit, a later one, and never before the page was seen", async () => {
+  await seedJanuary();
+  const w = await january();
+  const pages = Object.fromEntries((await allPages(w, { limit: 50 })).map((r) => [r.path, r]));
+
+  const guide = pages["/guide"]?.went_on;
+  assert.ok(guide, "a goal is configured, so the page carries the measure");
+  assert.equal(guide.people, 3, "wo1, wo3 and wo4 viewed it");
+  assert.equal(guide.same_visit, 0, "wo3 converted in that visit, but BEFORE seeing the page");
+  assert.equal(guide.later_visit, 2, "wo1 came back after the range ended, wo4 inside it");
+  assert.equal(guide.rate.numerator, 2);
+  assert.equal(guide.rate.denominator, pages["/guide"].unique_viewers.current, "the denominator is the viewers column");
+
+  const features = pages["/features"]?.went_on;
+  assert.deepEqual([features?.people, features?.same_visit, features?.later_visit], [2, 1, 1], "wo2 then and there, wo1 later");
+
+  // A person falls into one half at most: wo3 converted and viewed "/" in one visit,
+  // and that is a same-visit conversion, not also a later one.
+  const home = pages["/"]?.went_on;
+  assert.deepEqual([home?.people, home?.same_visit, home?.later_visit], [1, 1, 0]);
+
+  // Landing rows ask it of the people who landed, and a later visit counts there too —
+  // which the per-visit conversion rate beside it, by design, cannot see.
+  const landings = Object.fromEntries((await landingPages(w, { limit: 50 })).map((r) => [r.path, r]));
+  assert.equal(landings["/guide"]?.conversion_rate.numerator, 0, "neither visit that landed on the guide converted");
+  assert.deepEqual([landings["/guide"]?.went_on?.people, landings["/guide"]?.went_on?.later_visit], [2, 2], "but both people did, later");
+
+  // Another goal nobody completed is a zero, and no goal at all is not a zero.
+  const onDemo = Object.fromEntries((await allPages({ ...w, goal: DEMO }, { limit: 50 })).map((r) => [r.path, r]));
+  assert.deepEqual([onDemo["/guide"]?.went_on?.people, onDemo["/guide"]?.went_on?.rate.numerator], [3, 0]);
+  const noGoals = await allPages({ ...w, goal: null, goals: [] }, { limit: 50 });
+  assert.ok(noGoals.every((r) => r.went_on === null), "nothing configured is unavailable, not 0%");
+
+  // The baseline asks every visitor in the period the same question.
+  const baseline = await wentOnBaseline(w);
+  assert.equal(baseline?.people, 4);
+  assert.equal(baseline?.rate.numerator, 4, "all four converted at some point after their visit began");
+  assert.equal(await wentOnBaseline({ ...w, goal: null, goals: [] }), null);
+});
+
+test("the page drawer switches between landings and every visit, and matches its row on both", async () => {
+  await seedJanuary();
+  const w = await january();
+  const pageRow = (await allPages(w, { limit: 50 })).find((r) => r.path === "/guide")!;
+  const landingRow = (await landingPages(w, { limit: 50 })).find((r) => r.path === "/guide")!;
+
+  const asLanding = await pageDetail(w, "/guide", { basis: "landing" });
+  assert.equal(asLanding.basis, "landing");
+  assert.equal(asLanding.landing_sessions.current, 2, "wo1-a and wo4-a started here");
+  assert.deepEqual(asLanding.went_on, landingRow.went_on, "the drawer is the landing row, not a near relation of it");
+  assert.equal(asLanding.landing_conversion_rate?.numerator, landingRow.conversion_rate.numerator);
+  assert.equal(
+    asLanding.sources.reduce((n, s) => n + s.sessions.current, 0),
+    asLanding.landing_sessions.current,
+    "acquisition of the visits that landed here, every one of them",
+  );
+  // After a landing, each visit is counted once: wo1 went on to /features, wo4 left.
+  const nextLanding = Object.fromEntries(asLanding.next_pages.map((n) => [n.is_exit ? "(exit)" : n.path, n.sessions]));
+  assert.deepEqual(nextLanding, { "/features": 1, "(exit)": 1 });
+
+  const asViewers = await pageDetail(w, "/guide", { basis: "viewers" });
+  assert.equal(asViewers.basis, "viewers");
+  assert.equal(asViewers.unique_viewers.current, pageRow.unique_viewers.current);
+  assert.equal(asViewers.pageviews.current, pageRow.pageviews.current);
+  assert.equal(asViewers.sessions.current, 3, "three visits included it; only two started there");
+  assert.deepEqual(asViewers.went_on, pageRow.went_on, "and on this basis it is the All pages row");
+  assert.equal(
+    asViewers.sources.reduce((n, s) => n + s.sessions.current, 0),
+    asViewers.sessions.current,
+    "the sources follow the switch rather than staying on landings",
+  );
+  // After any view: wo3 read the guide last and left, which the landing basis never saw.
+  const nextAll = Object.fromEntries(asViewers.next_pages.map((n) => [n.is_exit ? "(exit)" : n.path, n.sessions]));
+  assert.deepEqual(nextAll, { "/features": 1, "(exit)": 2 });
+
+  assert.deepEqual(asViewers.went_on_baseline, await wentOnBaseline(w));
+});
+
+test("searching the page tables chooses rows and never changes what is on them", async () => {
+  await seedJanuary();
+  const w = await january();
+  const everything = Object.fromEntries((await allPages(w, { limit: 50 })).map((r) => [r.path, r]));
+
+  const byPath = await allPages(w, { limit: 50, search: "GUI" });
+  assert.deepEqual(byPath.map((r) => r.path), ["/guide"], "case-insensitive, anywhere in the path");
+  assert.deepEqual(byPath[0], everything["/guide"], "the row found is the row that was there");
+
+  assert.deepEqual((await allPages(w, { limit: 50, search: "getting started" })).map((r) => r.path), ["/guide"], "by title too");
+  assert.deepEqual((await allPages(w, { limit: 50, search: "https://example.com/features?utm_source=x" })).map((r) => r.path), ["/features"], "a pasted URL means its path");
+  assert.deepEqual(await allPages(w, { limit: 50, search: "no-such-page" }), []);
+  assert.equal((await allPages(w, { limit: 50, search: "   " })).length, Object.keys(everything).length, "blank is no search");
+
+  const landings = Object.fromEntries((await landingPages(w, { limit: 50 })).map((r) => [r.path, r]));
+  const found = await landingPages(w, { limit: 50, search: "feat" });
+  assert.deepEqual(found.map((r) => r.path), ["/features"]);
+  assert.deepEqual(found[0], landings["/features"]);
+  assert.deepEqual((await landingPages(w, { limit: 50, search: "getting" })).map((r) => r.path), ["/guide"], "landings match on title as well");
 });

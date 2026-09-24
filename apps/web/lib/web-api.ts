@@ -25,6 +25,7 @@ import type {
   SupportingActionRow,
   TrafficSeries,
   VisitorMix,
+  WentOn,
 } from "@fourierhq/core";
 import { api, LIVE_INTERVAL, PROJECT } from "./api";
 import { useEnvironmentValue } from "./environment";
@@ -57,6 +58,7 @@ export type {
   SupportingActionRow,
   TrafficSeries,
   VisitorMix,
+  WentOn,
 } from "@fourierhq/core";
 
 /**
@@ -139,6 +141,10 @@ export interface AcquisitionReport extends Report {
  */
 interface PagesReportBase extends Report {
   group_by: "page" | "group";
+  /** The search these rows answer, which trails the box while a new one is in flight. */
+  search: string | null;
+  /** Every visitor in the report, asked the went-on question. Null with no goal configured. */
+  went_on_baseline: Settled<WentOn | null>;
 }
 
 export type PagesReport =
@@ -212,7 +218,8 @@ export const useWebOverview = () => useReport<OverviewReport>("overview");
 
 export const useWebAcquisition = (groupBy: string, sort: string) => useReport<AcquisitionReport>("acquisition", { group_by: groupBy, sort });
 
-export const useWebPages = (tab: string, groupBy: string) => useReport<PagesReport>("pages", { tab, group_by: groupBy });
+export const useWebPages = (tab: string, groupBy: string, search: string | null) =>
+  useReport<PagesReport>("pages", { tab, group_by: groupBy, q: search });
 
 export const useWebConversions = (pages: string) => useReport<ConversionsReport>("conversions", { pages });
 
