@@ -285,7 +285,7 @@ pnpm dev          starts local ClickHouse if needed, then the dashboard on :5050
 pnpm dev:demo     example app on :5051
 pnpm seed         demo data into the default project
 pnpm mcp          MCP server over stdio (same tools as /api/mcp)
-pnpm test         SDK analytics.js parity tests
+pnpm test         unit tests: SDK analytics.js parity, core goal matching
 pnpm typecheck    all packages
 pnpm build        all packages
 pnpm brand        regenerate every icon, favicon, and social card from brand/

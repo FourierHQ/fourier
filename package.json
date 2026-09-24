@@ -11,7 +11,7 @@
     "dev:web": "pnpm --filter @fourierhq/web dev",
     "dev:demo": "pnpm --filter @fourierhq/example-nextjs dev",
     "build": "pnpm -r build",
-    "test": "pnpm --filter @fourierhq/sdk test",
+    "test": "pnpm -r test",
     "typecheck": "pnpm -r typecheck",
     "clickhouse": "clickhouse server --config-file=./infra/clickhouse/config.xml",
     "brand": "node brand/generate.mjs",
