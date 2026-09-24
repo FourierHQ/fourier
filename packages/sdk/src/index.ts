@@ -1,5 +1,4 @@
 import type {
-  BatchPayload,
   Callback,
   Context,
   FourierOptions,
@@ -23,7 +22,7 @@ export type {
 } from "./types";
 
 export const SDK_NAME = "fourier";
-export const SDK_VERSION = "0.2.0";
+export const SDK_VERSION = "0.2.1";
 
 // Same keys analytics.js uses, so migrating apps keep their anonymous ids.
 const ANON_KEY = "ajs_anonymous_id";
@@ -48,6 +47,28 @@ const ENGAGEMENT_TICK_MS = 1000;
 const DEFAULT_ENGAGEMENT_IDLE = 5 * 60 * 1000;
 /** Below this, a page view is a bounce off the wrong link and not worth a beacon. */
 const ENGAGEMENT_MIN_MS = 1000;
+
+/**
+ * Messages held while delivery keeps failing. Past this the oldest are dropped: a page
+ * left open through a long outage should not grow without limit, and the newest
+ * activity is what the visitor is doing now.
+ */
+const MAX_QUEUE = 1000;
+/** Longest wait between retries of a failing flush. */
+const MAX_RETRY_DELAY = 30 * 1000;
+/** Shortest first retry, so a flushInterval of zero cannot retry in a tight loop. */
+const MIN_RETRY_DELAY = 100;
+/**
+ * Browsers refuse a keepalive fetch or a beacon once the bodies in flight pass 64KB, so a
+ * request is cut to fit and only one is sent at a time. A backlog built up during an
+ * outage then leaves as several requests that can each succeed, rather than one that never can.
+ */
+const KEEPALIVE_MAX_BYTES = 64 * 1024;
+
+function byteLength(s: string): number {
+  // Three bytes per UTF-16 unit is the most UTF-8 can need, so the fallback never undercounts.
+  return typeof TextEncoder !== "undefined" ? new TextEncoder().encode(s).length : s.length * 3;
+}
 
 const isBrowser = typeof window !== "undefined" && typeof document !== "undefined";
 
@@ -282,6 +303,10 @@ export class Fourier extends Emitter {
   private store: Store;
   private queue: Message[] = [];
   private timer: ReturnType<typeof setTimeout> | null = null;
+  /** The flush under way, if any. Only one at a time; see flush(). */
+  private sending: Promise<void> | null = null;
+  /** Consecutive failed flushes. Non-zero means the next one waits for a retry delay. */
+  private failures = 0;
   private fetchImpl: typeof fetch;
   private middlewares: Middleware[] = [];
   private readyPromise: Promise<Fourier>;
@@ -932,45 +957,154 @@ export class Fourier extends Emitter {
 
   private enqueue(msg: Message) {
     this.queue.push(msg);
-    if (this.queue.length >= this.options.flushAt) void this.flush();
+    this.trimQueue();
+    this.schedule();
+  }
+
+  /**
+   * Arrange the queue's next flush. A flush already under way sees to whatever arrives
+   * while it runs, and while delivery is failing nothing goes before the retry is due:
+   * otherwise a busy page on a dead connection fires a request with every event it tracks.
+   */
+  private schedule(): void {
+    if (this.sending || this.queue.length === 0) return;
+    if (this.failures > 0) {
+      if (!this.timer) this.timer = setTimeout(() => void this.flush(), this.retryDelay());
+    } else if (this.queue.length >= this.options.flushAt) void this.flush();
     else if (!this.timer) this.timer = setTimeout(() => void this.flush(), this.options.flushInterval);
   }
 
-  async flush(useBeacon = false): Promise<void> {
+  /**
+   * The wait after the latest of a run of failed flushes: the flush interval, doubling with
+   * each failure up to MAX_RETRY_DELAY, and jittered so that when the server comes back the
+   * tabs that were waiting on it don't all return in the same second.
+   */
+  private retryDelay(): number {
+    const base = Math.max(this.options.flushInterval, MIN_RETRY_DELAY);
+    const ceiling = Math.min(MAX_RETRY_DELAY, base * 2 ** (this.failures - 1));
+    return ceiling / 2 + Math.random() * (ceiling / 2);
+  }
+
+  /** Bound the queue, dropping the oldest. Only a long run of failures gets it this far. */
+  private trimQueue(): void {
+    const over = this.queue.length - MAX_QUEUE;
+    if (over <= 0) return;
+    this.queue.splice(0, over);
+    this.log(`queue full: dropped the ${over} oldest message${over === 1 ? "" : "s"}`);
+  }
+
+  /**
+   * Send everything queued. Resolves once it has been delivered, or once delivery has failed
+   * and been left to a retry.
+   *
+   * One flush runs at a time: asked for while one is under way, the next starts when that
+   * one finishes, so it still covers everything queued at the moment of asking. Leaving the
+   * page is the exception (`useBeacon`), because it cannot wait its turn — whatever is still
+   * queued goes by beacon at once.
+   */
+  flush(useBeacon = false): Promise<void> {
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
     }
-    if (this.queue.length === 0) return;
-    const batch = this.queue.splice(0, this.queue.length);
-    const payload: BatchPayload = { writeKey: this.options.writeKey, batch, sentAt: new Date().toISOString() };
-    const body = JSON.stringify(payload);
-    const url = `${this.options.host}/v1/batch`;
+    if (useBeacon) return this.drain(true).finally(() => this.schedule());
+    if (this.sending) return this.sending.then(() => this.flush());
+    const run = this.drain(false).finally(() => {
+      this.sending = null;
+      this.schedule();
+    });
+    this.sending = run;
+    return run;
+  }
 
-    if (useBeacon && isBrowser && "sendBeacon" in navigator) {
+  /**
+   * Send what is queued now, a request at a time. Messages tracked meanwhile wait for their
+   * own flush, as they would have, rather than turning this into a request per round trip.
+   * Stops at the first failure worth retrying, with that batch back at the front of the queue.
+   */
+  private async drain(useBeacon: boolean): Promise<void> {
+    const url = `${this.options.host}/v1/batch`;
+    let left = this.queue.length;
+    while (left > 0 && this.queue.length > 0) {
+      const { batch, body, bytes } = this.nextBatch(left);
+      if (batch.length === 0) break;
+      left -= batch.length;
       // sendBeacon can't set a JSON content-type; the server accepts text/plain.
-      if (navigator.sendBeacon(url, new Blob([body], { type: "text/plain" }))) {
+      if (useBeacon && isBrowser && "sendBeacon" in navigator && navigator.sendBeacon(url, new Blob([body], { type: "text/plain" }))) {
         this.emit("flush", batch);
-        return;
+        continue;
       }
+      if (!(await this.post(url, batch, body, bytes))) return;
     }
+  }
+
+  /**
+   * Take the next request's worth off the front of the queue. Each message is serialised
+   * once, to measure it and to send it, and one that can't be (a BigInt, a cycle) is dropped
+   * here rather than failing every retry of the batch it would ride in.
+   */
+  private nextBatch(max: number): { batch: Message[]; body: string; bytes: number } {
+    // Assembled by hand so the size is known before it is sent; the same shape as BatchPayload.
+    const head = `{"writeKey":${JSON.stringify(this.options.writeKey)},"batch":[`;
+    const tail = `],"sentAt":${JSON.stringify(new Date().toISOString())}}`;
+    const batch: Message[] = [];
+    const parts: string[] = [];
+    let bytes = byteLength(head) + byteLength(tail);
+    while (batch.length < max && this.queue.length > 0) {
+      let json: string;
+      try {
+        json = JSON.stringify(this.queue[0]);
+      } catch (err) {
+        const dropped = this.queue.shift();
+        this.log("dropped a message that can't be serialised", dropped, err);
+        this.emit("error", err);
+        continue;
+      }
+      const size = byteLength(json) + (parts.length ? 1 : 0);
+      // Always at least one, however large; post() sends that one without keepalive.
+      if (parts.length && bytes + size > KEEPALIVE_MAX_BYTES) break;
+      batch.push(this.queue.shift()!);
+      parts.push(json);
+      bytes += size;
+    }
+    return { batch, body: head + parts.join(",") + tail, bytes };
+  }
+
+  /**
+   * One request. Resolves false when it failed in a way worth retrying, with the batch
+   * back in the queue. That includes a request the server may have stored before the
+   * response was lost; sending it again is safe because the server keeps each messageId once.
+   */
+  private async post(url: string, batch: Message[], body: string, bytes: number): Promise<boolean> {
     try {
       const res = await this.fetchImpl(url, {
         method: "POST",
         headers: { "Content-Type": "text/plain" },
         body,
-        keepalive: true,
+        // Lets the request outlive the page, which the browser only allows up to 64KB.
+        keepalive: bytes <= KEEPALIVE_MAX_BYTES,
       });
-      if (!res.ok) {
-        this.log(`flush failed: ${res.status}`);
-        this.emit("error", new Error(`flush failed: ${res.status}`));
-        if (res.status >= 500) this.queue.unshift(...batch.slice(0, 100));
-      } else this.emit("flush", batch);
+      if (res.ok) {
+        this.failures = 0;
+        this.emit("flush", batch);
+        return true;
+      }
+      this.log(`flush failed: ${res.status}`);
+      this.emit("error", new Error(`flush failed: ${res.status}`));
+      // As analytics.js does: a server error or rate limit is retried, and any other
+      // refusal is dropped, since the same messages would be refused the same way again.
+      if (res.status < 500 && res.status !== 429) {
+        this.failures = 0;
+        return true;
+      }
     } catch (err) {
       this.log("flush error", err);
       this.emit("error", err);
-      this.queue.unshift(...batch.slice(0, 100));
     }
+    this.failures++;
+    this.queue.unshift(...batch);
+    this.trimQueue();
+    return false;
   }
 
   private bindUnload() {
