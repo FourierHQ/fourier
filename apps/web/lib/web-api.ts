@@ -157,6 +157,8 @@ interface PagesReportBase extends Report {
   group_by: "page" | "group";
   /** The search these rows answer, which trails the box while a new one is in flight. */
   search: string | null;
+  /** The order they are in: what the server applied, which is what the header should mark. */
+  sort: { key: string; dir: "asc" | "desc" };
   /** Every visitor in the report, asked the went-on question. Null with no goal configured. */
   went_on_baseline: Settled<WentOn | null>;
 }
@@ -232,8 +234,8 @@ export const useWebOverview = () => useReport<OverviewReport>("overview");
 
 export const useWebAcquisition = (groupBy: string, sort: string) => useReport<AcquisitionReport>("acquisition", { group_by: groupBy, sort });
 
-export const useWebPages = (tab: string, groupBy: string, search: string | null) =>
-  useReport<PagesReport>("pages", { tab, group_by: groupBy, q: search });
+export const useWebPages = (tab: string, groupBy: string, search: string | null, sort: string | null, dir: string | null) =>
+  useReport<PagesReport>("pages", { tab, group_by: groupBy, q: search, sort, dir });
 
 export const useWebConversions = (pages: string) => useReport<ConversionsReport>("conversions", { pages });
 

@@ -812,3 +812,41 @@ test("searching the page tables chooses rows and never changes what is on them",
   assert.deepEqual(found[0], landings["/features"]);
   assert.deepEqual((await landingPages(w, { limit: 50, search: "getting" })).map((r) => r.path), ["/guide"], "landings match on title as well");
 });
+
+test("sorting the page tables reorders every row the report has, and nothing else", async () => {
+  await seedJanuary();
+  const w = await january();
+  const paths = (rows: { path: string }[]) => rows.map((r) => r.path);
+
+  const byTraffic = await allPages(w, { limit: 50 });
+  const alphabetical = await allPages(w, { limit: 50, sort: { key: "path", dir: "asc" } });
+  assert.deepEqual(paths(alphabetical), ["/", "/features", "/guide", "/offer", "/signup"]);
+  assert.deepEqual(paths(await allPages(w, { limit: 50, sort: { key: "path", dir: "desc" } })), [...paths(alphabetical)].reverse());
+  assert.deepEqual(
+    [...alphabetical].sort((a, b) => a.path.localeCompare(b.path)),
+    [...byTraffic].sort((a, b) => a.path.localeCompare(b.path)),
+    "the same rows with the same numbers, in another order",
+  );
+
+  // Four pages tie at 100%. The tie goes to the one with more converters behind it —
+  // /features, two of two — and then to traffic and the path, the same way up or down.
+  assert.deepEqual(paths(await allPages(w, { limit: 50, sort: { key: "went_on", dir: "desc" } })), ["/features", "/", "/offer", "/signup", "/guide"]);
+  assert.deepEqual(paths(await allPages(w, { limit: 50, sort: { key: "went_on", dir: "asc" } })), ["/guide", "/features", "/", "/offer", "/signup"]);
+
+  // Landing rows: the guide's landings converted in neither visit, so it is last on the
+  // per-visit rate even though both of those people converted later.
+  assert.deepEqual(paths(await landingPages(w, { limit: 50, sort: { key: "conversion_rate", dir: "desc" } })), ["/", "/features", "/offer", "/guide"]);
+  // Nothing in the week before, so every change is up from zero, which ranks as the
+  // largest rise there is rather than as missing — and the tie falls to traffic.
+  assert.deepEqual(paths(await landingPages(w, { limit: 50, sort: { key: "change", dir: "desc" } })), ["/guide", "/", "/features", "/offer"]);
+});
+
+test("a value that cannot be computed sorts last whichever way the column is sorted", async () => {
+  // In the main fixtures only "/" (15s) and /blog/post-a (3s) ever reported engagement.
+  const w = await web();
+  const desc = (await allPages(w, { limit: 50, sort: { key: "avg_engagement", dir: "desc" } })).map((r) => r.avg_engagement_ms);
+  const asc = (await allPages(w, { limit: 50, sort: { key: "avg_engagement", dir: "asc" } })).map((r) => r.avg_engagement_ms);
+  assert.deepEqual(desc.slice(0, 2), [15_000, 3_000]);
+  assert.deepEqual(asc.slice(0, 2), [3_000, 15_000]);
+  assert.ok(desc.slice(2).every((v) => v === null) && asc.slice(2).every((v) => v === null), "unmeasured is not the smallest value");
+});

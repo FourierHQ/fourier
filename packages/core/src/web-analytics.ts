@@ -897,6 +897,45 @@ function pageSearch(raw: string | null | undefined, p: Params): { matches: (col:
   return { matches: (col) => `positionCaseInsensitiveUTF8(${col}, ${q}) > 0` };
 }
 
+// ---------- sorting the page tables ----------
+
+/** What each page table can be sorted by. The route accepts these names and nothing else. */
+export const LANDING_SORTS = ["path", "landing_sessions", "engagement_rate", "converting_sessions", "conversion_rate", "went_on", "change"] as const;
+export const PAGE_SORTS = ["path", "unique_viewers", "pageviews", "avg_engagement", "exit_rate", "cta_clickers", "went_on"] as const;
+export type LandingSort = (typeof LANDING_SORTS)[number];
+export type PageSort = (typeof PAGE_SORTS)[number];
+export interface TableSort<K extends string> {
+  key: K;
+  dir: "asc" | "desc";
+}
+
+/**
+ * One ORDER BY, from a column's value and what breaks its ties.
+ *
+ * Applied before the LIMIT, over every row the report has, so sorting by exit rate finds
+ * the highest exit rate on the site rather than the highest among the fifty busiest
+ * pages — the same reason the search runs on the server.
+ *
+ * A value that cannot be computed — a rate over nothing, engagement nobody measured —
+ * sorts last in either direction: it is not the lowest value, it is not a value. And a
+ * rate's ties go to the larger denominator whichever way the column is sorted, so 100% of
+ * forty views comes before 100% of one; the "1 of 1" rows are still there, and their
+ * working is on the row, but they do not win a tie against evidence.
+ */
+function sortSql(value: string, dir: "asc" | "desc", ties: string[]): string {
+  return [`${value} ${dir === "asc" ? "ASC" : "DESC"} NULLS LAST`, ...ties].join(", ");
+}
+
+/** A rate as a sortable value: null, not zero, when there is nothing to divide by. */
+const rateSql = (numerator: string, denominator: string) => `if(${denominator} > 0, ${numerator} / ${denominator}, NULL)`;
+
+/**
+ * The period-over-period change as a sortable value. Up from nothing is the largest rise
+ * there is, so it sorts as infinity rather than as missing; with comparison off, or with
+ * nothing in either period, there is no change to rank and it goes last.
+ */
+const changeSql = (cur: string, prev: string) => `multiIf(${prev} > 0, (${cur} - ${prev}) / ${prev}, ${cur} > 0, inf, NULL)`;
+
 export interface LandingPageRow {
   path: string;
   title: string;
@@ -926,6 +965,8 @@ export async function landingPages(
     orderBy?: "landing_sessions" | "converting_sessions";
     /** Typed by the reader: rows whose page, title or group name contains it. */
     search?: string | null;
+    /** A column the reader sorted by. Takes precedence over `orderBy`, and changes only the order. */
+    sort?: TableSort<LandingSort> | null;
   } = {},
 ): Promise<LandingPageRow[]> {
   const { cte, params, project } = sessionBase(w);
@@ -936,16 +977,38 @@ export async function landingPages(
   // Ranked by conversions, the busiest page is not usually the top row — which is the
   // point of asking. Sessions break the tie so a page with one of each does not outrank
   // a page with one conversion from a hundred visits by accident of ordering.
-  const byConversions = opts.orderBy === "converting_sessions";
-  const order = byConversions ? "converting DESC, sessions DESC" : "sessions DESC";
+  const byConversions = opts.orderBy === "converting_sessions" && !opts.sort;
   // Ranked by conversions, a page with none is not a low-ranking row — it is not a row.
-  // Ranked by traffic it is, because then the question is where people land.
+  // Ranked by traffic it is, because then the question is where people land. A column
+  // the reader sorted by is the second case: sorting reorders the table, it does not
+  // decide what is in it.
   const having = byConversions ? "converting > 0" : "sessions > 0 OR prev_sessions > 0";
   // A group is found by its name; a page by its path or by any title it had.
   const search = pageSearch(opts.search, p);
   const titleHit = search && !isGroups ? `, max(${search.matches("entry_title")}) AS title_hit` : "";
   const searchHaving = search ? ` AND (${search.matches("key")}${titleHit ? " OR title_hit = 1" : ""})` : "";
   const withWent = hasGoal(w);
+  const sort: TableSort<LandingSort> = opts.sort ?? { key: byConversions ? "converting_sessions" : "landing_sessions", dir: "desc" };
+  const went = "(wo_same + wo_later)";
+  const order = (() => {
+    const busiest = ["l.sessions DESC", "row_key ASC"];
+    switch (sort.key) {
+      case "path":
+        return sortSql("row_key", sort.dir, []);
+      case "engagement_rate":
+        return sortSql(rateSql("l.engaged_sessions", "l.sessions"), sort.dir, busiest);
+      case "converting_sessions":
+        return sortSql("l.converting", sort.dir, busiest);
+      case "conversion_rate":
+        return sortSql(rateSql("l.converting", "l.sessions"), sort.dir, busiest);
+      case "went_on":
+        return withWent ? sortSql(rateSql(went, "wo_people"), sort.dir, [`${went} DESC`, "wo_people DESC", ...busiest]) : busiest.join(", ");
+      case "change":
+        return sortSql(changeSql("l.sessions", "l.prev_sessions"), sort.dir, busiest);
+      default:
+        return sortSql("l.sessions", sort.dir, ["row_key ASC"]);
+    }
+  })();
 
   const rows = await q<Row>(
     w.scope,
@@ -964,11 +1027,11 @@ export async function landingPages(
        WHERE entry_path != ''
        GROUP BY key
        HAVING (${having})${searchHaving}
-       ORDER BY ${order}
-       LIMIT ${limit}
      ) AS l
      ${withWent ? "LEFT JOIN went_on AS g ON g.key = l.key" : ""}
-     ORDER BY ${order.replace(/\b(converting|sessions)\b/g, "l.$1")}`,
+     -- Ordered and limited after the join, so a sort on went-on ranks every page by it.
+     ORDER BY ${order}
+     LIMIT ${limit}`,
     { ...params, ...p.values },
   );
   return rows.map((r) => {
@@ -1028,7 +1091,7 @@ export interface PageRow {
  */
 export async function allPages(
   w: WebScope,
-  opts: { limit?: number; groupBy?: "page" | "group"; search?: string | null } = {},
+  opts: { limit?: number; groupBy?: "page" | "group"; search?: string | null; sort?: TableSort<PageSort> | null } = {},
 ): Promise<PageRow[]> {
   const { cte, params, project, scanFrom, scanTo } = sessionBase(w);
   const p = new Params("ap");
@@ -1050,6 +1113,27 @@ export async function allPages(
   // expression normalises its own operand and is safe to apply a second time.
   const exitKey = opts.groupBy === "group" ? pageGroupSql(w.pageGroups, "exit_path", p) : "exit_path";
   const limit = Math.min(Math.max(opts.limit ?? 20, 1), 200);
+  const sort: TableSort<PageSort> = opts.sort ?? { key: "pageviews", dir: "desc" };
+  const went = "(wo_same + wo_later)";
+  const order = (() => {
+    const busiest = ["t.pageviews DESC", "row_key ASC"];
+    switch (sort.key) {
+      case "path":
+        return sortSql("row_key", sort.dir, []);
+      case "unique_viewers":
+        return sortSql("t.viewers", sort.dir, busiest);
+      case "avg_engagement":
+        return sortSql(rateSql("t.eng_total", "t.measured"), sort.dir, ["t.measured DESC", ...busiest]);
+      case "exit_rate":
+        return sortSql(rateSql("exits", "t.settled_views"), sort.dir, ["t.settled_views DESC", ...busiest]);
+      case "cta_clickers":
+        return sortSql("t.cta_clickers", sort.dir, busiest);
+      case "went_on":
+        return withWent ? sortSql(rateSql(went, "wo_people"), sort.dir, [`${went} DESC`, "wo_people DESC", ...busiest]) : busiest.join(", ");
+      default:
+        return sortSql("t.pageviews", sort.dir, ["row_key ASC"]);
+    }
+  })();
 
   // "CTA clickers" counts configured supporting actions. Nothing is auto-captured, so
   // with none configured this is honestly zero and the UI says the tracking is missing
@@ -1112,7 +1196,7 @@ export async function allPages(
      FROM totals AS t
      LEFT JOIN exits AS x ON x.key = t.key
      ${withWent ? "LEFT JOIN went_on AS g ON g.key = t.key" : ""}
-     ORDER BY t.pageviews DESC
+     ORDER BY ${order}
      LIMIT ${limit}`,
     { ...params, ...p.values, leave: PAGE_LEAVE, settled: SESSION_SETTLED_MS },
   );

@@ -12,7 +12,7 @@ import { PageDetailSheet } from "@/components/web/page-detail";
 import { PageGroupsDialog } from "@/components/web/page-groups";
 import { RankedTable, type Column } from "@/components/web/ranked-table";
 import { NoMatches, NoTraffic, Panel } from "@/components/web/states";
-import { WENT_ON_HINT, WentOnCell } from "@/components/web/went-on";
+import { WENT_ON_COLUMN_HINT, WentOnCell } from "@/components/web/went-on";
 import { formatDuration, formatNumber, formatRate, shortPath } from "@/lib/format";
 import { countingLabel, errorOf, unwrap, useWebPages, type LandingPageRow, type PageRow, type WentOn } from "@/lib/web-api";
 import { useWebState } from "@/lib/web-state";
@@ -26,6 +26,9 @@ function AllPagesTable({
   onSelect,
   empty,
   baseline,
+  sort,
+  sortDir,
+  onSort,
 }: {
   rows: PageRow[] | undefined;
   loading?: boolean;
@@ -34,6 +37,9 @@ function AllPagesTable({
   onSelect?: (row: PageRow) => void;
   empty: ReactNode;
   baseline: WentOn | null | undefined;
+  sort?: string;
+  sortDir?: "asc" | "desc";
+  onSort?: (key: string, dir: "asc" | "desc") => void;
 }) {
   const busiest = Math.max(...(rows ?? []).map((r) => r.pageviews.current), 1);
   return (
@@ -45,6 +51,9 @@ function AllPagesTable({
       onSelect={onSelect}
       columns={columns}
       empty={empty}
+      sort={sort}
+      sortDir={sortDir}
+      onSort={onSort}
       caption={
         <>
           No per-visit conversion rate here on purpose: whether a page was on the way to a conversion is not something this
@@ -148,7 +157,7 @@ export default function PagesPage() {
   const groupBy = get("group_by") === "group" ? "group" : "page";
   const search = get("q");
   const selected = get("page");
-  const report = useWebPages(tab, groupBy, search);
+  const report = useWebPages(tab, groupBy, search, get("sort"), get("dir"));
 
   // What is actually on screen. Deliberately NOT the two above: until the new rows
   // arrive, react-query hands back the previous tab's payload, and the two tabs have
@@ -170,6 +179,17 @@ export default function PagesPage() {
   const rowCount = data && "data" in data.rows ? data.rows.data.length : undefined;
   // The search the rows on screen answer, not the one being typed.
   const shownSearch = data?.search ?? null;
+  // Every went-on bar is a share of this: everyone in the period who went on to convert.
+  const allConverted = baseline ? baseline.same_visit + baseline.later_visit : null;
+  // The header marks the order the server applied, which is what the rows are in — not
+  // the one just clicked, until its rows arrive.
+  const sorting = {
+    sort: data?.sort.key,
+    sortDir: data?.sort.dir,
+    onSort: (key: string, dir: "asc" | "desc") => set({ sort: key, dir }),
+  };
+  // Change is only a column worth sorting when there is a comparison to change from.
+  const comparing = Boolean(scope?.range.previous_from);
 
   if (report.isSuccess && avail && !avail.has_traffic) {
     return (
@@ -202,21 +222,24 @@ export default function PagesPage() {
 
   const wentOnColumn = {
     key: "went_on",
-    header: <MetricLabel hint={WENT_ON_HINT}>Went on to convert</MetricLabel>,
-    cell: (r: LandingPageRow | PageRow) => (goalName ? <WentOnCell value={r.went_on} /> : <span className="text-muted-foreground">—</span>),
+    header: <MetricLabel hint={WENT_ON_COLUMN_HINT}>Went on to convert</MetricLabel>,
+    sortKey: goalName ? "went_on" : undefined,
+    cell: (r: LandingPageRow | PageRow) => (goalName ? <WentOnCell value={r.went_on} total={allConverted} /> : <span className="text-muted-foreground">—</span>),
   };
 
   const landingColumns = [
     {
       key: "path",
       header: isGroups ? "Group" : "Landing page",
+      sortKey: "path",
+      firstDir: "asc" as const,
       cell: (r: LandingPageRow) => (
         <span className="font-medium" title={r.path}>
           {isGroups ? r.path : shortPath(r.path)}
         </span>
       ),
     },
-    { key: "sessions", header: "Landing sessions", cell: (r: LandingPageRow) => formatNumber(r.landing_sessions.current) },
+    { key: "sessions", header: "Landing sessions", sortKey: "landing_sessions", cell: (r: LandingPageRow) => formatNumber(r.landing_sessions.current) },
     {
       key: "engagement",
       header: (
@@ -224,9 +247,10 @@ export default function PagesPage() {
           Engaged
         </MetricLabel>
       ),
+      sortKey: "engagement_rate",
       cell: (r: LandingPageRow) => <RateCell value={r.engagement_rate} />,
     },
-    { key: "converting", header: "Converting", cell: (r: LandingPageRow) => (goalName ? formatNumber(r.converting_sessions) : <span className="text-muted-foreground">—</span>) },
+    { key: "converting", header: "Converting", sortKey: goalName ? "converting_sessions" : undefined, cell: (r: LandingPageRow) => (goalName ? formatNumber(r.converting_sessions) : <span className="text-muted-foreground">—</span>) },
     {
       key: "rate",
       header: (
@@ -234,24 +258,27 @@ export default function PagesPage() {
           Conv. rate
         </MetricLabel>
       ),
+      sortKey: goalName ? "conversion_rate" : undefined,
       cell: (r: LandingPageRow) => (goalName ? <RateCell value={r.conversion_rate} /> : <span className="text-muted-foreground">—</span>),
     },
     wentOnColumn,
-    { key: "change", header: "Change", cell: (r: LandingPageRow) => <DeltaBadge delta={r.landing_sessions} /> },
+    { key: "change", header: "Change", sortKey: comparing ? "change" : undefined, cell: (r: LandingPageRow) => <DeltaBadge delta={r.landing_sessions} /> },
   ];
 
   const allColumns = [
     {
       key: "path",
       header: isGroups ? "Group" : "Page",
+      sortKey: "path",
+      firstDir: "asc" as const,
       cell: (r: PageRow) => (
         <span className="font-medium" title={r.path}>
           {isGroups ? r.path : shortPath(r.path)}
         </span>
       ),
     },
-    { key: "viewers", header: "Unique viewers", cell: (r: PageRow) => formatNumber(r.unique_viewers.current) },
-    { key: "views", header: "Page views", cell: (r: PageRow) => formatNumber(r.pageviews.current) },
+    { key: "viewers", header: "Unique viewers", sortKey: "unique_viewers", cell: (r: PageRow) => formatNumber(r.unique_viewers.current) },
+    { key: "views", header: "Page views", sortKey: "pageviews", cell: (r: PageRow) => formatNumber(r.pageviews.current) },
     {
       key: "engagement",
       header: (
@@ -259,6 +286,7 @@ export default function PagesPage() {
           Avg. engagement
         </MetricLabel>
       ),
+      sortKey: "avg_engagement",
       cell: (r: PageRow) => (
         <span className="inline-flex flex-col items-end leading-tight">
           <span>{formatDuration(r.avg_engagement_ms)}</span>
@@ -273,6 +301,7 @@ export default function PagesPage() {
           Exit rate
         </MetricLabel>
       ),
+      sortKey: "exit_rate",
       cell: (r: PageRow) => <RateCell value={r.exit_rate} unit="views" />,
     },
     {
@@ -282,6 +311,7 @@ export default function PagesPage() {
           CTA clickers
         </MetricLabel>
       ),
+      sortKey: avail?.has_supporting_actions ? "cta_clickers" : undefined,
       cell: (r: PageRow) => (avail?.has_supporting_actions ? formatNumber(r.cta_clickers) : <span className="text-muted-foreground">Not tracked</span>),
     },
     wentOnColumn,
@@ -317,7 +347,8 @@ export default function PagesPage() {
                   onChange={(q) => set({ q })}
                   placeholder={groupBy === "group" ? "Search groups" : "Search pages or titles"}
                 />
-                <Tabs value={tab} onValueChange={(v) => set({ tab: v })}>
+                {/* The two tabs sort by different columns, so a sort does not survive the switch. */}
+                <Tabs value={tab} onValueChange={(v) => set({ tab: v, sort: null, dir: null })}>
                   <TabsList className="h-7">
                     <TabsTrigger value="landing" className="px-2 text-[11px]">
                       Landing pages
@@ -352,6 +383,7 @@ export default function PagesPage() {
                   columns={allColumns}
                   empty={empty}
                   baseline={baseline}
+                  {...sorting}
                   onSelect={isGroups ? undefined : (r) => set({ page: r.path, basis: "viewers" })}
                 />
               ) : (
@@ -364,6 +396,7 @@ export default function PagesPage() {
                   onSelect={isGroups ? undefined : (r) => set({ page: r.path, basis: "landing" })}
                   columns={landingColumns}
                   empty={empty}
+                  {...sorting}
                   caption={
                     isGroups || Boolean(baseline?.people) ? (
                       <>

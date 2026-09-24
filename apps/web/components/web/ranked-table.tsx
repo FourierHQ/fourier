@@ -13,6 +13,8 @@ export interface Column<T> {
   cell: (row: T) => ReactNode;
   /** Set when this column can be sorted, and the value the API expects. */
   sortKey?: string;
+  /** Which way a first click sorts it: numbers start at the top, names at A. */
+  firstDir?: "asc" | "desc";
   className?: string;
 }
 
@@ -32,6 +34,7 @@ export function RankedTable<T>({
   onSelect,
   rowKey,
   sort,
+  sortDir = "desc",
   onSort,
   empty,
   caption,
@@ -44,7 +47,10 @@ export function RankedTable<T>({
   onSelect?: (row: T) => void;
   rowKey: (row: T) => string;
   sort?: string;
-  onSort?: (key: string) => void;
+  /** Which way `sort` runs. Descending unless a table says otherwise. */
+  sortDir?: "asc" | "desc";
+  /** Called with the column and the direction the click asks for: the column's first, or the reverse of the current one. */
+  onSort?: (key: string, dir: "asc" | "desc") => void;
   empty?: ReactNode;
   caption?: ReactNode;
 }) {
@@ -64,21 +70,53 @@ export function RankedTable<T>({
       <Table>
         <TableHeader>
           <TableRow>
-            {columns.map((c) => (
-              <TableHead
-                key={c.key}
-                className={cn(
-                  c.align === "right" || (c.align === undefined && c.key !== columns[0].key) ? "text-right" : "",
-                  c.sortKey && onSort && "cursor-pointer select-none hover:text-foreground",
-                  c.className,
-                )}
-                onClick={c.sortKey && onSort ? () => onSort(c.sortKey!) : undefined}
-                aria-sort={c.sortKey && sort === c.sortKey ? "descending" : undefined}
-              >
-                {c.header}
-                {c.sortKey && sort === c.sortKey && <span className="ml-1 text-muted-foreground">↓</span>}
-              </TableHead>
-            ))}
+            {columns.map((c) => {
+              const sortable = Boolean(c.sortKey && onSort);
+              const active = sortable && sort === c.sortKey;
+              const first = c.firstDir ?? "desc";
+              const next = active ? (sortDir === "asc" ? "desc" : "asc") : first;
+              return (
+                <TableHead
+                  key={c.key}
+                  className={cn(
+                    "group/sort",
+                    c.align === "right" || (c.align === undefined && c.key !== columns[0].key) ? "text-right" : "",
+                    sortable && "cursor-pointer select-none hover:text-foreground",
+                    active && "text-foreground",
+                    c.className,
+                  )}
+                  onClick={sortable ? () => onSort!(c.sortKey!, next) : undefined}
+                  // A header you can click is a control, so it can be reached and pressed
+                  // from the keyboard too.
+                  tabIndex={sortable ? 0 : undefined}
+                  onKeyDown={
+                    sortable
+                      ? (e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            onSort!(c.sortKey!, next);
+                          }
+                        }
+                      : undefined
+                  }
+                  aria-sort={active ? (sortDir === "asc" ? "ascending" : "descending") : undefined}
+                >
+                  {c.header}
+                  {active ? (
+                    <span className="ml-1 text-muted-foreground" aria-hidden>
+                      {sortDir === "asc" ? "↑" : "↓"}
+                    </span>
+                  ) : (
+                    sortable && (
+                      // A faint arrow on hover, so a sortable column says so before it is clicked.
+                      <span className="ml-1 text-muted-foreground opacity-0 transition-opacity group-hover/sort:opacity-50" aria-hidden>
+                        {first === "asc" ? "↑" : "↓"}
+                      </span>
+                    )
+                  )}
+                </TableHead>
+              );
+            })}
           </TableRow>
         </TableHeader>
         <TableBody>

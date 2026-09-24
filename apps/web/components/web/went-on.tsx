@@ -34,23 +34,35 @@ function splitSentence(v: WentOn): string {
 }
 
 /**
- * The table cell: the rate and its working, with a small bar saying how the converters
- * split between converting then and coming back. The bar is the composition of the
- * numerator only — it is always full — because at a few percent a bar of the rate
- * itself would be a sliver on every row and say nothing.
+ * The table cell: the rate and its working, and a bar for the page's share of everyone
+ * who went on to convert in the period.
+ *
+ * The rate and the bar answer different questions on purpose. The rate is "of the people
+ * who reached this page, how many converted" — the page's own performance. The bar is "of
+ * all the people who converted, how many had reached this page" — how much of the
+ * period's conversion passed through it — so a busy page with an ordinary rate and a quiet
+ * page with a remarkable one no longer look alike. The filled part is split into the same
+ * visit and later, which is what the column is for.
+ *
+ * The bars do not add up to a whole across the rows, and should not: someone who read
+ * three pages before converting is one of the converters behind each of them.
  */
-export function WentOnCell({ value }: { value: WentOn | null | undefined }) {
+export function WentOnCell({ value, total }: { value: WentOn | null | undefined; total?: number | null }) {
   if (!value) return <span className="text-muted-foreground">—</span>;
   const n = converted(value);
+  const share = total && total > 0 ? Math.min(n / total, 1) : null;
   const cell = (
     <span className="inline-flex flex-col items-end leading-tight">
       <span className="inline-flex items-center gap-1.5">
-        {n > 0 && (
-          <span className="flex h-1.5 w-10 gap-[2px]" aria-hidden>
-            {WENT_ON_PARTS.map((p) =>
-              value[p.key] > 0 ? (
-                <span key={p.key} className="h-full rounded-[2px]" style={{ flexGrow: value[p.key], background: p.color }} />
-              ) : null,
+        {share !== null && (
+          <span className="flex h-1.5 w-12 overflow-hidden rounded-[2px] bg-muted" aria-hidden>
+            {n > 0 && (
+              // At least a sliver, so "some" never reads as "none".
+              <span className="flex h-full gap-px" style={{ width: `max(${share * 100}%, 2px)` }}>
+                {WENT_ON_PARTS.map((p) =>
+                  value[p.key] > 0 ? <span key={p.key} className="h-full min-w-px" style={{ flexGrow: value[p.key], background: p.color }} /> : null,
+                )}
+              </span>
             )}
           </span>
         )}
@@ -64,8 +76,17 @@ export function WentOnCell({ value }: { value: WentOn | null | undefined }) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>{cell}</TooltipTrigger>
-      <TooltipContent className="text-xs">
-        <WentOnLegend value={value} />
+      <TooltipContent className="max-w-xs text-xs">
+        {/* A block of its own: the tooltip lays its children out in a row. */}
+        <div className="space-y-1.5">
+          {share !== null && total ? (
+            <p>
+              {formatNumber(n)} of the {formatNumber(total)} people who went on to convert in this period had reached this page
+              ({formatRate(share * 100)}).
+            </p>
+          ) : null}
+          <WentOnLegend value={value} />
+        </div>
       </TooltipContent>
     </Tooltip>
   );
@@ -208,12 +229,19 @@ export function WentOnPanel({
   );
 }
 
-/** The column header's definition, shared by both tabs so the two cannot drift. */
+/** What went-on means, wherever it appears. */
 export const WENT_ON_HINT = (
   <>
     People, not visits: of everyone whose visit reached this page, how many converted afterwards — in that same visit, or
-    by coming back another time. The small bar splits the two; hover for the numbers. Conversions before they reached it do
-    not count, and later ones are counted up to today, so a page read yesterday has had less time than one read last
-    month. An association, not a cause.
+    by coming back another time. Conversions before they reached the page do not count, and later ones are counted up to
+    today, so a page read yesterday has had less time than one read last month. An association, not a cause.
+  </>
+);
+
+/** The table column's, which also has its bar to explain. Shared by both tabs so the two cannot drift. */
+export const WENT_ON_COLUMN_HINT = (
+  <>
+    {WENT_ON_HINT} The bar is the page&apos;s share of everyone who went on to convert in the period, split the same two
+    ways; someone who read several pages counts toward each, so the bars add up to more than the whole.
   </>
 );
