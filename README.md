@@ -199,7 +199,7 @@ Sessions come from the SDK: 30 minutes of inactivity starts a new one, configura
 
 An opinionated report on how a marketing website is doing, in four pages and no dashboard to build: **Overview**, **Acquisition**, **Pages**, **Conversions**. Campaigns, referrers, devices, browsers, geography and page groups live inside those four as groupings, drilldowns and filters, because a sidebar of fourteen reports is one nobody finishes reading.
 
-One control bar runs the section — source, date range, comparison, conversion goal, filters — and it lives entirely in the URL, so a view can be bookmarked or sent to someone and moving between reports keeps what you were looking at.
+One control bar runs the section — source, date range, comparison, filters — and it lives entirely in the URL, so a view can be bookmarked or sent to someone and moving between reports keeps what you were looking at. The conversion goal is the first section of Filters, though it is not a filter: it changes what counts as a conversion and never which visits are shown, which is why its chip reads "Conversions: Demo requested" rather than "Goal: …".
 
 "Source" means what it means everywhere else in Fourier: a website or app with its own write key. The campaign parameter that wants the same word is reported as **campaign source**, which is what it is — it exists only where a link was tagged, so most traffic has none.
 
@@ -207,7 +207,8 @@ Everything is counted in **sessions**, off one rollup that the `sessions` materi
 
 - **A conversion rate shows its working.** "2.5% — 12 of 480 sessions", never a bare percentage. A rate with nothing to divide by is unavailable, not 0%. A previous period of zero reads "up from 0", not +∞% — and not "New", which a form with no conversions last month is not.
 - **A session converts once**, however many times the goal fires inside it.
-- **Landing-page conversion means conversion in visits that started there** — not conversion among everyone who happened to see the page. The All pages tab carries no conversion column at all, because viewing a page is not evidence it caused anything.
+- **Landing-page conversion means conversion in visits that started there** — not conversion among everyone who happened to see the page. The All pages tab carries no per-visit conversion rate, because viewing a page is not evidence it caused anything.
+- **"Went on to convert" follows the person, not the visit.** Both page tabs, and the page drawer, count the people whose visit reached a page and who converted *afterwards* — in that same visit, or by coming back another time, split into the two. A conversion before they reached the page does not count, the return visit does not have to match the filters or even the source, and it is counted up to today, so recent pages have had less time to be returned to. It is read against the same figure for every visitor in the period, and it is still an association.
 - **Bots and channels are decided when you read, not when the event arrives.** Both are derived in the `sessions_resolved` view from the stored user agent and campaign, so correcting either re-reports every visit already recorded rather than only the ones that arrive next.
 - **Engagement is measured, not inferred.** The SDK times foreground attention, stops for a hidden or idle tab, and reports it on leaving the page. Where it was never measured the reports say so rather than showing zero seconds. Turn it off with `engagement: false`.
 - **Nothing is invented.** No traffic, no goal configured, a goal nobody has completed, a measurement the SDK never sent, and a filter that matches nothing are five different states with five different messages.

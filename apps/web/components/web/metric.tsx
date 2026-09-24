@@ -64,7 +64,15 @@ export function MetricLabel({ children, hint }: { children: ReactNode; hint?: Re
       {children}
       <Tooltip>
         <TooltipTrigger asChild>
-          <button type="button" className="text-muted-foreground/70 hover:text-foreground" aria-label="What this measures">
+          <button
+            type="button"
+            className="text-muted-foreground/70 hover:text-foreground"
+            aria-label="What this measures"
+            // It sits inside sortable column headers; asking what a column means is not a
+            // request to sort by it.
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => e.stopPropagation()}
+          >
             <Info className="size-3" />
           </button>
         </TooltipTrigger>
