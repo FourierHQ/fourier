@@ -156,15 +156,16 @@ function AmplitudeImportCard() {
         <form onSubmit={onSubmit} className="space-y-5">
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="API key" htmlFor="amp-api-key">
-              <Input id="amp-api-key" value={apiKey} onChange={(e) => setApiKey(e.target.value)} autoComplete="off" spellCheck={false} className="font-mono" />
+              <Input id="amp-api-key" placeholder="Key Value, not the key's name" value={apiKey} onChange={(e) => setApiKey(e.target.value)} autoComplete="off" spellCheck={false} className="font-mono" />
             </Field>
             <Field label="Secret key" htmlFor="amp-secret-key">
               <Input id="amp-secret-key" type="password" value={secretKey} onChange={(e) => setSecretKey(e.target.value)} autoComplete="off" className="font-mono" />
             </Field>
           </div>
           <p className="-mt-2 text-xs text-muted-foreground">
-            In Amplitude: Settings → Organization settings → Projects → pick the project → General. Each project has its own pair, and the pair decides which project
-            is imported. Keys go with each request and are never stored.
+            In Amplitude: Settings → Connections → API Keys, with the project picked in the dropdown. The API key is any row&apos;s <em>Key Value</em> on the API
+            Keys tab (click Show) — not its name. The secret key is on the Secret Keys tab. The project decides what is imported. Keys go with each request and
+            are never stored.
           </p>
 
           <div className="grid gap-4 sm:grid-cols-2">
