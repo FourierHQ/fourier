@@ -868,8 +868,8 @@ definitions — what the operator has told Fourier to look for: conversion goals
       A split goal is {match: 'event_split', event, properties?, split: {key, label_key?, values?:
       {<value>: {name?, type?: 'primary' | 'supporting' | 'excluded'}}, absorbs?: [goal ids]}}: one
       goal per value of properties[key]. Reproduce it in SQL as JSONExtractString(properties, key)
-      grouped, leaving out values whose type differs from the goal's. A value with an entry in
-      values has been reviewed; one without is counted the way the goal counts. Goals listed in
+      grouped, leaving out values whose type differs from the goal's. A value with no entry in
+      values is named from the data and counted the way the goal counts. Goals listed in
       absorbs were combined into the split and are not in force while it exists.
     page_group — {rules: [{op, value}]}, same path rule shape.
     hidden_event — {hidden: bool}, and the row id IS the event name. Absence means the default.

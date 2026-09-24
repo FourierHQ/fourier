@@ -628,10 +628,9 @@ test("comparison is against the same elapsed distance, and absent when switched 
   const on = await headline(await web());
   assert.notEqual(on.sessions.previous, null);
   // Nothing was seeded in the preceding week except the 40-day-old visit, which is
-  // further back still — so the previous period is empty and the change is "up from 0".
+  // further back still — so the previous period is empty, and there is no percentage.
   assert.equal(on.sessions.previous, 0);
   assert.equal(on.sessions.change, null, "dividing by zero is not +∞%");
-  assert.equal(on.sessions.from_zero, true);
 });
 
 test("the trend keeps the two periods apart and inside the selected range", async () => {

@@ -3,7 +3,7 @@
  *
  * One event, a goal per value of a property. What has to hold: every value that counts
  * is counted exactly once whether read as its own row, as the rollup or as "All
- * conversions"; a value nobody has reviewed is counted and flagged, not dropped;
+ * conversions"; a value nobody has named is counted, not dropped;
  * reclassified and excluded values leave the rollup; names come from the data by shape,
  * never from a property's name; and a deployment that predates splits ignores them
  * instead of counting every value as a primary conversion.
@@ -278,12 +278,11 @@ test("a split expands into a rollup, a goal per value, and names from the data",
   assert.equal(byValue.get(FORM.scan)?.name, "Free vulnerability scan", "from the page, without the site's name");
   assert.equal(byValue.get(FORM.scan)?.split?.name_source, "page");
   assert.equal(byValue.get(FORM.fresh)?.name, "Brand new offer");
-  assert.equal(byValue.get(FORM.fresh)?.split?.is_new, true, "nobody reviewed it");
-  assert.equal(byValue.get(FORM.scan)?.split?.is_new, false, "reviewed without renaming is still reviewed");
+  assert.equal(byValue.get(FORM.fresh)?.split?.first_seen, new Date(ago(DAY).getTime() + 5_000).toISOString(), "its first completion, to date it by");
   assert.equal(byValue.get(FORM.guide)?.config.type, "supporting");
   assert.equal(byValue.has(FORM.spam), false, "excluded values are no goal at all");
   assert.equal(byValue.get("")?.name, "No form_id");
-  assert.equal(byValue.get(FORM.quiet)?.name, "Quiet form", "a reviewed value with no data is still listed, at zero");
+  assert.equal(byValue.get(FORM.quiet)?.name, "Quiet form", "a named value with no data is still listed, at zero");
 });
 
 test("every value that counts is counted once: as its row, in the rollup and in All conversions", async () => {
@@ -324,11 +323,11 @@ test("too many values are pooled into Other, which still adds up", async () => {
 test("a value asked for by id exists even when the window would not produce it", async () => {
   const defs = await listGoalDefinitions(project.id);
   const narrow = { from: ago(0.5 * DAY), to: NOW };
-  const id = `${SPLIT_ID}:${FORM.scan}`;
-  assert.equal((await resolveGoals(prod(), defs, narrow)).some((g) => g.id === id), true, "reviewed, so listed at zero anyway");
+  const id = `${SPLIT_ID}:${FORM.demo}`;
+  assert.equal((await resolveGoals(prod(), defs, narrow)).some((g) => g.id === id), true, "named, so listed at zero anyway");
   const freshId = `${SPLIT_ID}:${FORM.fresh}`;
   const none = { from: ago(0.1 * DAY), to: NOW };
-  assert.equal((await resolveGoals(prod(), defs, none)).some((g) => g.id === freshId), false, "unreviewed and absent: not listed");
+  assert.equal((await resolveGoals(prod(), defs, none)).some((g) => g.id === freshId), false, "unnamed and absent: not listed");
   assert.equal((await resolveGoals(prod(), defs, none, { include: [freshId] })).some((g) => g.id === freshId), true);
 });
 
@@ -352,7 +351,7 @@ test("the catalog names every value and previews the suggested label", async () 
   const demo = catalog.values.find((v) => v.value === FORM.demo)!;
   assert.equal(demo.name, "Demo request");
   assert.equal(demo.total, 4, "all history, including the submission before the window");
-  assert.equal(catalog.values.find((v) => v.value === FORM.fresh)?.reviewed, false);
+  assert.equal(catalog.values.find((v) => v.value === FORM.fresh)?.override, null, "nothing decided about it");
 });
 
 test("the browser names and types an event the way the reports do", async () => {

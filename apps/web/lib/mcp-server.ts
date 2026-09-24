@@ -157,7 +157,7 @@ const splitShape = {
     .max(200)
     .optional()
     .describe(
-      "Make this one goal per value of an event property. 'Form Submitted' split by 'form_id' reports each form on its own row, and a form added later appears by itself — counted the way this goal counts and flagged as new until someone reviews it. Event goals only. Choose from event_property_keys: a good split property is on nearly every event and has a handful of recurring values; one with a different value every time (an email, an order id) is not a split.",
+      "Make this one goal per value of an event property. 'Form Submitted' split by 'form_id' reports each form on its own row, and a form added later appears by itself, counted the way this goal counts. Event goals only. Choose from event_property_keys: a good split property is on nearly every event and has a handful of recurring values; one with a different value every time (an email, an order id) is not a split.",
     ),
   label_by: z
     .string()
@@ -176,12 +176,12 @@ const splitShape = {
           .enum(["inherit", "primary", "supporting", "excluded"])
           .optional()
           .describe("How it counts. inherit (the default) follows the goal. supporting reports it apart from conversions; excluded counts it as nothing — spam, a test form."),
-        reset: z.boolean().optional().describe("Forget everything decided about this value, so it shows as new again."),
+        reset: z.boolean().optional().describe("Forget the name and type decided for this value, so it is named from the data and counts as the goal does."),
       }),
     )
     .max(500)
     .optional()
-    .describe("Decisions about individual values. Any value listed is marked reviewed, which is what stops it showing as new. On update these merge into what is already there."),
+    .describe("Names and types for individual values. On update these merge into what is already there."),
 };
 
 function splitValues(existing: Record<string, SplitValue>, input: z.infer<typeof splitShape.split_values>): Record<string, SplitValue> {
@@ -194,7 +194,9 @@ function splitValues(existing: Record<string, SplitValue>, input: z.infer<typeof
     const prior = out[v.value] ?? {};
     const type = v.type === undefined ? prior.type : v.type === "inherit" ? undefined : v.type;
     const name = v.name?.trim() || prior.name;
-    out[v.value] = { ...(name ? { name } : {}), ...(type ? { type } : {}) };
+    // A value with nothing decided needs no entry; it is named from the data anyway.
+    if (name || type) out[v.value] = { ...(name ? { name } : {}), ...(type ? { type } : {}) };
+    else delete out[v.value];
   }
   return out;
 }
@@ -691,7 +693,7 @@ export function registerFourierTools(server: McpServer) {
     {
       title: "Goal performance",
       description:
-        "How the goals are actually doing: conversions and conversion rate for every primary goal against the same denominator, the funnel to the selected goal, and supporting actions — each against the preceding equivalent period. Counted in sessions, excluding bots. A split goal appears as its rollup (split.role 'all') followed by one row per value; the rollup is distinct visits, not the sum of its rows, and a row with split.is_new has been counted without anyone reviewing it. Read `availability` before reporting a zero: no primary goal configured, or no traffic at all, is a setup state rather than nobody converting.",
+        "How the goals are actually doing: conversions and conversion rate for every primary goal against the same denominator, the funnel to the selected goal, and supporting actions — each against the preceding equivalent period. Counted in sessions, excluding bots. A split goal appears as its rollup (split.role 'all') followed by one row per value; the rollup is distinct visits, not the sum of its rows. Read `availability` before reporting a zero: no primary goal configured, or no traffic at all, is a setup state rather than nobody converting.",
       inputSchema: z.object({
         project_id: projectArg,
         environment: environmentArg,
@@ -758,7 +760,7 @@ export function registerFourierTools(server: McpServer) {
     {
       title: "Split goal values",
       description:
-        "Every value of a split goal (one with split_by): what the reports call it and why, how often it was completed in the last 90 days and when it was first seen, how it counts, and whether anyone has reviewed it. A value that is not reviewed is already being counted the way the goal counts — this is how to find the form someone added last week. Each value's goal_id can be passed to goal_report; rename, reclassify or exclude one with update_goal's split_values.",
+        "Every value of a split goal (one with split_by): what the reports call it and why, how often it was completed in the last 90 days and when it was first seen, and how it counts. A value nobody has named is already counted the way the goal counts, and a recent first_seen is how to find the form someone added last week. Each value's goal_id can be passed to goal_report; rename, reclassify or exclude one with update_goal's split_values.",
       inputSchema: z.object({ project_id: projectArg, environment: environmentArg, goal_id: z.string().describe("A split goal, from list_goals.") }),
       annotations: readOnly,
     },
@@ -778,7 +780,6 @@ export function registerFourierTools(server: McpServer) {
           named_from: v.name_source,
           ...(v.name_evidence ? { evidence: v.name_evidence } : {}),
           counts_as: v.type,
-          reviewed: v.reviewed,
           completions_90d: v.count,
           completions_ever: v.total,
           first_seen: v.first_seen,

@@ -155,10 +155,9 @@ export function formatPoints(pp: number | null | undefined): string {
 }
 
 /**
- * A period-over-period change. `null` with a current value above zero means the previous
- * period was empty, which reads as "from 0" — an infinite percentage increase is
- * arithmetic, not information. Not "New": nothing about an empty previous period says the
- * thing did not exist then, and "New" is reserved for what nobody has reviewed yet.
+ * A period-over-period change. From an empty previous period it reads "from 0" — an
+ * infinite percentage increase is arithmetic, not information — and not "New": nothing
+ * about an empty previous period says the thing did not exist then.
  */
 export function formatChange(change: number | null | undefined, fromZero = false): string {
   if (fromZero) return "from 0";

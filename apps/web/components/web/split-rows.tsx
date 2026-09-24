@@ -1,10 +1,8 @@
 "use client";
 
 import { ChevronRight, Sparkles } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { RelativeTime } from "@/components/relative-time";
 import { GoalMark } from "@/components/web/goal-mark";
 import { cn } from "@/lib/utils";
 import type { GoalSplit } from "@/lib/web-api";
@@ -21,8 +19,6 @@ export interface SplitRowMeta {
   depth: 0 | 1;
   /** On a rollup: how many value rows sit under it. */
   children?: number;
-  /** On a rollup: how many of them are new. */
-  fresh?: number;
   collapsed?: boolean;
   /** A value shown without its rollup (a supporting value of a primary split). */
   orphan?: boolean;
@@ -53,7 +49,7 @@ export function groupSplitRows<T extends Row>(rows: T[], collapsed: Set<string>,
       .filter((k) => k.split?.definition_id === s.definition_id && k.split.role !== "all")
       .sort((a, b) => rank(a) - rank(b) || metric(b) - metric(a));
     const isCollapsed = collapsed.has(s.definition_id);
-    out.push({ ...r, meta: { depth: 0, children: kids.length, fresh: kids.filter((k) => k.split?.is_new).length, collapsed: isCollapsed } });
+    out.push({ ...r, meta: { depth: 0, children: kids.length, collapsed: isCollapsed } });
     if (!isCollapsed) for (const k of kids) out.push({ ...k, meta: { depth: 1 } });
   }
   return out;
@@ -64,29 +60,6 @@ const NAMED_FROM: Record<string, string> = {
   page: "Named from the page it's completed on",
   raw: "The data has no name for this value",
 };
-
-export function NewBadge({ split }: { split: GoalSplit }) {
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <Badge variant="secondary" className="shrink-0 cursor-default font-normal">
-          New
-        </Badge>
-      </TooltipTrigger>
-      <TooltipContent className="max-w-xs">
-        <span className="block text-xs leading-relaxed">
-          {split.first_seen ? (
-            <>
-              First completed <RelativeTime value={split.first_seen} />.{" "}
-            </>
-          ) : null}
-          Nobody has reviewed it, so it counts the way {split.definition_name} does. Review it in Manage goals to rename it or
-          change how it counts.
-        </span>
-      </TooltipContent>
-    </Tooltip>
-  );
-}
 
 /** The label cell for a goal row, split-aware. */
 export function GoalNameCell({
@@ -131,11 +104,6 @@ export function GoalNameCell({
         <span className="shrink-0 text-xs text-muted-foreground">
           {meta.children} {split.key} value{meta.children === 1 ? "" : "s"}
         </span>
-        {meta.collapsed && (meta.fresh ?? 0) > 0 && (
-          <Badge variant="secondary" className="shrink-0 font-normal">
-            {meta.fresh} new
-          </Badge>
-        )}
       </span>
     );
   }
@@ -158,53 +126,6 @@ export function GoalNameCell({
           </TooltipContent>
         </Tooltip>
       )}
-      {split.is_new && split.role === "value" && <NewBadge split={split} />}
     </span>
-  );
-}
-
-/**
- * The prompt this whole feature exists for: values that are being counted, and that
- * nobody has looked at. Shown until someone reviews them, and never blocking anything —
- * the numbers already include them.
- */
-export function NewValuesNotice({
-  rows,
-  onReview,
-}: {
-  rows: { name: string; type: "primary" | "supporting"; split: GoalSplit | null }[];
-  onReview: (definitionId: string) => void;
-}) {
-  const fresh = rows.filter((r) => r.split?.role === "value" && r.split.is_new);
-  if (!fresh.length) return null;
-  const byDef = new Map<string, { name: string; key: string; values: typeof fresh }>();
-  for (const r of fresh) {
-    const s = r.split!;
-    if (!byDef.has(s.definition_id)) byDef.set(s.definition_id, { name: s.definition_name, key: s.key, values: [] });
-    byDef.get(s.definition_id)!.values.push(r);
-  }
-  return (
-    <div className="space-y-2 border-b bg-brand-mint/5 px-4 py-3">
-      {[...byDef.entries()].map(([id, d]) => {
-        const shown = d.values.slice(0, 3);
-        const counted = d.values.every((v) => v.type === "primary") ? "as conversions" : "the way the goal counts";
-        return (
-          <div key={id} className="flex flex-wrap items-center justify-between gap-2">
-            <p className="min-w-0 text-sm">
-              <span className="font-medium">
-                {d.values.length} new {d.key} value{d.values.length === 1 ? "" : "s"}
-              </span>{" "}
-              <span className="text-muted-foreground">
-                in {d.name}, already counted {counted}: {shown.map((v) => v.name).join(", ")}
-                {d.values.length > shown.length ? ` and ${d.values.length - shown.length} more` : ""}.
-              </span>
-            </p>
-            <Button size="sm" variant="outline" className="h-7 shrink-0" onClick={() => onReview(id)}>
-              Review
-            </Button>
-          </div>
-        );
-      })}
-    </div>
   );
 }

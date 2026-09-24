@@ -12,7 +12,6 @@ import { useEventNames, useEventPropertyKeys, useEventPropertyValues } from "@/l
 import {
   useDeleteDefinition,
   useSaveDefinition,
-  useSplitCatalog,
   useWebDefinitions,
   type CombineProposal,
   type GoalDefinition,
@@ -325,9 +324,6 @@ function GoalEditor({ goal, draft, onDone }: { goal?: GoalDefinition; draft?: Dr
       : { match: "event", event: cfg?.event ?? "", properties: cfg?.properties },
   );
   const [split, setSplit] = useState<SplitState | null>(() => initialSplit(cfg));
-  // What was reviewed when the editor opened. Captured once: a value becomes "not new"
-  // by being saved, not by being typed into.
-  const [reviewed] = useState(() => new Set(Object.keys(initialSplit(cfg)?.values ?? {})));
   const [steps, setSteps] = useState<Step[]>((cfg?.funnel as Step[] | undefined) ?? []);
   const initialDefault = Boolean(goal?.is_default || goal?.inherits_default);
   const [isDefault, setIsDefault] = useState(initialDefault);
@@ -352,11 +348,6 @@ function GoalEditor({ goal, draft, onDone }: { goal?: GoalDefinition; draft?: Dr
   const cleaned = clean(match);
   const baseProps = useMemo(() => (cleaned.match === "event" ? (cleaned.properties ?? []) : []), [JSON.stringify(cleaned)]); // eslint-disable-line react-hooks/exhaustive-deps
   const splitting = match.match === "event" && split !== null;
-  // The same query the split editor shows, shared through the cache, so saving marks
-  // exactly the values that were on screen as reviewed.
-  const catalog = useSplitCatalog(
-    splitting && split?.key && cleaned.match === "event" ? { event: cleaned.event, properties: baseProps, key: split.key, label_key: split.label_key, type } : null,
-  );
   const onSplitChange = useCallback((s: SplitState) => setSplit(s), []);
 
   const submit = () => {
@@ -367,8 +358,7 @@ function GoalEditor({ goal, draft, onDone }: { goal?: GoalDefinition; draft?: Dr
     const withFunnel = type === "primary" && funnel.length ? { funnel } : {};
     let config: unknown;
     if (splitting && split && cleaned.match === "event") {
-      const listed = catalog.data?.key === split.key ? catalog.data.values.map((v) => v.value) : [];
-      const values = splitValuesToSave(split, listed);
+      const values = splitValuesToSave(split);
       const splitConfig: SplitGoalConfig = {
         type,
         match: "event_split",
@@ -464,7 +454,7 @@ function GoalEditor({ goal, draft, onDone }: { goal?: GoalDefinition; draft?: Dr
             </span>
           </label>
           {split && cleaned.match === "event" && (
-            <SplitEditor event={cleaned.event} properties={baseProps} type={type} value={split} onChange={onSplitChange} reviewed={reviewed} />
+            <SplitEditor event={cleaned.event} properties={baseProps} type={type} value={split} onChange={onSplitChange} />
           )}
         </div>
       )}
@@ -572,26 +562,9 @@ function CombineCard({ proposal, onReview }: { proposal: CombineProposal; onRevi
   );
 }
 
-/**
- * Manage goals, optionally controlled — so the Conversions page can open it straight on
- * the goal whose new values need reviewing.
- */
-export function ManageGoalsDialog({
-  trigger,
-  open: controlledOpen,
-  onOpenChange,
-  editing: controlledEditing,
-}: {
-  trigger?: React.ReactNode;
-  open?: boolean;
-  onOpenChange?: (open: boolean) => void;
-  editing?: string | null;
-}) {
-  const [ownOpen, setOwnOpen] = useState(false);
-  const open = controlledOpen ?? ownOpen;
-  const setOpen = (v: boolean) => (onOpenChange ? onOpenChange(v) : setOwnOpen(v));
-  const [ownEditing, setEditing] = useState<string | null>(null);
-  const editing = ownEditing ?? controlledEditing ?? null;
+export function ManageGoalsDialog({ trigger }: { trigger?: React.ReactNode }) {
+  const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [combining, setCombining] = useState<CombineProposal | null>(null);
   const defs = useWebDefinitions();
@@ -613,7 +586,7 @@ export function ManageGoalsDialog({
 
   const row = (g: GoalDefinition) =>
     editing === g.id ? (
-      <GoalEditor key={g.id} goal={g} onDone={() => (controlledEditing === g.id ? close(false) : setEditing(null))} />
+      <GoalEditor key={g.id} goal={g} onDone={() => setEditing(null)} />
     ) : (
       <div key={g.id} className="flex items-center gap-2 rounded-md border p-3">
         <div className="min-w-0 flex-1">
@@ -662,7 +635,7 @@ export function ManageGoalsDialog({
 
   return (
     <Dialog open={open} onOpenChange={close}>
-      {trigger !== null && <DialogTrigger asChild>{trigger ?? <Button size="sm">Manage goals</Button>}</DialogTrigger>}
+      <DialogTrigger asChild>{trigger ?? <Button size="sm">Manage goals</Button>}</DialogTrigger>
       <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle>Goals and supporting actions</DialogTitle>

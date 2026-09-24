@@ -20,8 +20,9 @@ import type { Delta, RateDelta, RateValue, SeriesPoint } from "@/lib/web-api";
  */
 export function DeltaBadge({ delta, className, sentiment = false }: { delta: Delta | null | undefined; className?: string; sentiment?: boolean }) {
   if (!delta || delta.previous === null) return null;
-  const { change, from_zero } = delta;
-  const dir = from_zero ? 1 : change == null ? 0 : change > 0 ? 1 : change < 0 ? -1 : 0;
+  const { change } = delta;
+  const fromZero = delta.previous === 0 && delta.current > 0;
+  const dir = fromZero ? 1 : change == null ? 0 : change > 0 ? 1 : change < 0 ? -1 : 0;
   const Icon = dir > 0 ? ArrowUp : dir < 0 ? ArrowDown : Minus;
   return (
     <span
@@ -35,7 +36,7 @@ export function DeltaBadge({ delta, className, sentiment = false }: { delta: Del
       title={`Previous period: ${formatNumber(delta.previous)}`}
     >
       <Icon className="size-3" aria-hidden />
-      {formatChange(change, from_zero)}
+      {formatChange(change, fromZero)}
     </span>
   );
 }

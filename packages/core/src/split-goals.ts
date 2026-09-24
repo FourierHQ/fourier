@@ -13,9 +13,9 @@
  * ordinary event match with one more property filter, so every report that already
  * handles goals handles these, with no second code path to drift from the first.
  *
- * A value nobody has reviewed is counted the way the goal counts, and marked new. That
- * is the choice between a surprise in the conversion rate, which someone notices, and a
- * missing conversion, which nobody does.
+ * A value that appears later counts the way the goal counts from its first completion.
+ * That is the choice between a surprise in the conversion rate, which someone notices,
+ * and a missing conversion, which nobody does.
  */
 
 import { getDataClient } from "./client";
@@ -47,11 +47,18 @@ async function q<T = Row>(scope: Scope, query: string, params: Record<string, un
 }
 
 /**
- * Values given a row of their own before the rest are pooled into "Other". Reviewed
- * values always get one, however many there are: someone named them, so they are shown
- * even at zero, which is how a form that has stopped working gets noticed.
+ * Values given a row of their own before the rest are pooled into "Other". A value with
+ * a name or type of its own always gets one, however many there are: someone decided
+ * about it, so it is shown even at zero, which is how a form that has stopped working
+ * gets noticed.
  */
 export const MAX_SPLIT_ROWS = 25;
+
+/** Whether the operator has decided anything about a value — a name, or how it counts. */
+function decided(values: Record<string, SplitValue> | undefined, value: string): boolean {
+  const v = values?.[value];
+  return Boolean(v?.name || v?.type);
+}
 
 const OTHER = "#other";
 
@@ -228,7 +235,6 @@ export interface SplitCatalogValue {
   /** What the name would be without the operator's rename — shown as the placeholder. */
   inferred_name: string;
   override: SplitValue | null;
-  reviewed: boolean;
   type: SplitValueType;
 }
 
@@ -279,8 +285,8 @@ async function nameValues(
  * Every value of a split, named, with what the operator has decided about each. What
  * the goal editor lists, and what an agent reads before renaming or reclassifying one.
  *
- * Values the operator reviewed but that have not appeared in the data are included too,
- * at zero, so a rename is never silently lost because its form went quiet.
+ * Values the operator named or reclassified but that have not appeared in the data are
+ * included too, at zero, so a rename is never silently lost because its form went quiet.
  */
 export async function splitCatalog(
   scope: Scope,
@@ -300,7 +306,7 @@ export async function splitCatalog(
   const known = new Set(seen.map((r) => r.value));
   const overrides = rule.split.values ?? {};
   const ghosts: ValueRow[] = Object.keys(overrides)
-    .filter((v) => !known.has(v))
+    .filter((v) => !known.has(v) && decided(overrides, v))
     .map((value) => ({ value, in_window: 0, total: 0, first_seen: null, last_seen: null, label: null }));
   const all = [...seen, ...ghosts];
   const names = await nameValues(scope, naming, all, { inferRenamed: true });
@@ -321,8 +327,7 @@ export async function splitCatalog(
         name_source: n.source,
         ...(n.evidence ? { name_evidence: n.evidence } : {}),
         inferred_name: n.inferred,
-        override: overrides[r.value] ?? null,
-        reviewed: r.value in overrides,
+        override: decided(overrides, r.value) ? overrides[r.value] : null,
         type: effectiveType(rule, r.value),
       };
     }),
@@ -486,20 +491,21 @@ async function expandSplit(
   const rows = await readValues(scope, cfg, window);
   const byValue = new Map(rows.map((r) => [r.value, r]));
 
-  // Reviewed values always; values asked for by id (a selected goal, an open drawer);
-  // then whatever else appeared in the window, busiest first, up to the cap.
+  // Values with a name or type of their own always; values asked for by id (a selected
+  // goal, an open drawer); then whatever else appeared in the window, busiest first, up
+  // to the cap.
   const requested = include.map((id) => parseChildId(def, id)).filter((x): x is { value: string } => Boolean(x && "value" in x)).map((x) => x.value);
-  const listed = new Set<string>([...Object.keys(overrides), ...requested]);
-  let unreviewed = 0;
+  const listed = new Set<string>([...Object.keys(overrides).filter((v) => decided(overrides, v)), ...requested]);
+  let others = 0;
   let pooled = false;
   for (const r of rows) {
     if (listed.has(r.value) || r.in_window === 0) continue;
-    if (unreviewed >= MAX_SPLIT_ROWS) {
+    if (others >= MAX_SPLIT_ROWS) {
       pooled = true;
       continue;
     }
     listed.add(r.value);
-    unreviewed++;
+    others++;
   }
   const values = [...listed].filter((v) => typeOf(v) !== "excluded");
 
@@ -536,7 +542,6 @@ async function expandSplit(
     const type = typeOf(value) as GoalType;
     const n = names.get(value)!;
     const seen = byValue.get(value);
-    const reviewed = value in overrides;
     return {
       ...common,
       id: splitValueGoalId(def.id, value),
@@ -554,8 +559,6 @@ async function expandSplit(
         value,
         name_source: n.source,
         ...(n.evidence ? { name_evidence: n.evidence } : {}),
-        reviewed,
-        is_new: !reviewed,
         first_seen: seen?.first_seen ?? null,
         last_seen: seen?.last_seen ?? null,
       }),
@@ -565,7 +568,7 @@ async function expandSplit(
   // Too many values to list: the rest are pooled rather than dropped, so the rows still
   // account for the rollup. Asked for by id, it exists even when nothing is pooled today.
   const otherWanted = include.some((id) => id === `${def.id}${OTHER}`);
-  const others: Goal[] =
+  const other: Goal[] =
     pooled || otherWanted
       ? [
           {
@@ -579,12 +582,12 @@ async function expandSplit(
               event: cfg.event,
               properties: [...base, { key: cfg.split.key, op: "not_in", values: [...listed] }],
             },
-            split: splitMeta({ role: "other", is_new: rows.some((r) => !listed.has(r.value) && r.in_window > 0) }),
+            split: splitMeta({ role: "other" }),
           },
         ]
       : [];
 
-  return [rollup, ...children, ...others];
+  return [rollup, ...children, ...other];
 }
 
 /**

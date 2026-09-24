@@ -199,7 +199,6 @@ function GoalControl({ scope }: { scope?: ScopeEcho }) {
             <SelectItem key={g.id} value={g.id} className={child ? "pl-6" : undefined}>
               {child && <span className="text-muted-foreground">↳</span>}
               {g.name}
-              {g.split?.is_new && g.split.role === "value" && <span className="text-[11px] text-muted-foreground">new</span>}
             </SelectItem>
           );
         })}

@@ -81,24 +81,17 @@ export const ENGAGED_MS_THRESHOLD = 10_000;
 /**
  * A value against its comparison. `change` is fractional (0.12 = up 12%) and is null
  * whenever dividing would be a lie: comparison switched off, or nothing to divide by.
- * When the previous value was zero and this one is not, `from_zero` says so, because the
- * honest rendering of that is "up from 0" and not "+∞%".
- *
- * Not "new": a form with no conversions last month and three this month has been there
- * all along. Whether something is new is a different question with a different answer —
- * see GoalSplit.is_new, which is about nobody having reviewed it.
+ * The two are told apart by `previous`, which is null only when comparison is off.
  */
 export interface Delta {
   current: number;
   previous: number | null;
   change: number | null;
-  from_zero: boolean;
 }
 
 export function delta(current: number, previous: number | null): Delta {
-  if (previous === null) return { current, previous: null, change: null, from_zero: false };
-  if (previous === 0) return { current, previous, change: null, from_zero: current > 0 };
-  return { current, previous, change: (current - previous) / previous, from_zero: false };
+  if (previous === null || previous === 0) return { current, previous, change: null };
+  return { current, previous, change: (current - previous) / previous };
 }
 
 /**

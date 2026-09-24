@@ -10,7 +10,7 @@ import { ConversionRateChart, CountChart, FunnelSteps, SplitBars } from "@/compo
 import { WebControls } from "@/components/web/controls";
 import { ManageGoalsDialog } from "@/components/web/goals";
 import { GoalDetailSheet } from "@/components/web/goal-detail";
-import { GoalNameCell, NewValuesNotice, groupSplitRows } from "@/components/web/split-rows";
+import { GoalNameCell, groupSplitRows } from "@/components/web/split-rows";
 import { DeltaBadge, MetricLabel, RateCell } from "@/components/web/metric";
 import { RankedTable } from "@/components/web/ranked-table";
 import { NeedsGoal, NoTraffic, Panel } from "@/components/web/states";
@@ -173,16 +173,11 @@ export default function ConversionsPage() {
   const goalName = countingLabel(scope);
   const loading = report.isLoading;
   const selectedGoal = get(P.goal) ?? scope?.goal?.id ?? null;
-  // Split goals whose values are folded away, and the one whose new values are being reviewed.
+  // Split goals whose values are folded away.
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
-  const [reviewing, setReviewing] = useState<string | null>(null);
   const toggle = (id: string) => setCollapsed((c) => (c.has(id) ? new Set([...c].filter((x) => x !== id)) : new Set([...c, id])));
   const goalRows = useMemo(() => (goals ? groupSplitRows(goals, collapsed, (r) => r.converting_sessions.current) : undefined), [goals, collapsed]);
   const supportingRows = useMemo(() => (supporting ? groupSplitRows(supporting, collapsed, (r) => r.sessions.current) : undefined), [supporting, collapsed]);
-  const noticeRows = [
-    ...(goals ?? []).map((g) => ({ name: g.name, type: "primary" as const, split: g.split })),
-    ...(supporting ?? []).map((a) => ({ name: a.name, type: "supporting" as const, split: a.split })),
-  ];
 
   if (report.isSuccess && avail && !avail.has_traffic && !avail.has_primary_goal) {
     return (
@@ -223,7 +218,6 @@ export default function ConversionsPage() {
               </div>
             </CardHeader>
             <CardContent className="p-0">
-              <NewValuesNotice rows={noticeRows} onReview={setReviewing} />
               <Panel error={errorOf(report.data?.goals)} onRetry={() => report.refetch()}>
                 <RankedTable<NonNullable<typeof goalRows>[number]>
                   rows={goalRows}
@@ -493,9 +487,6 @@ export default function ConversionsPage() {
           </Card>
         </>
       )}
-
-      {/* Opened from the new-values notice, straight onto the goal to review. */}
-      <ManageGoalsDialog trigger={null} open={Boolean(reviewing)} onOpenChange={(o) => !o && setReviewing(null)} editing={reviewing} />
 
       <GoalDetailSheet
         definition={drill}

@@ -404,9 +404,9 @@ const NAMED_FROM: Record<string, string> = {
 };
 
 /**
- * Where a value of a split goal comes from, and — when it is new — that it is already
- * being counted. The drawer is where someone lands from a surprising row, so it is the
- * place to say "nobody reviewed this; it counts because the goal does".
+ * Where a value of a split goal comes from: the value itself, where its name was read
+ * from, and when it first appeared — the drawer is where someone lands from a row they
+ * do not recognise.
  */
 function SplitOrigin({ split, type }: { split: GoalSplit; type: "primary" | "supporting" }) {
   if (split.role === "all") {
@@ -441,13 +441,9 @@ function SplitOrigin({ split, type }: { split: GoalSplit; type: "primary" | "sup
           {split.name_evidence && split.name_source === "page" ? ` (${split.name_evidence.replace(/^Title of /, "")})` : ""}. Rename it in Manage goals.
         </p>
       )}
-      {split.is_new && (
-        <p className="rounded-md border border-brand-mint/40 bg-brand-mint/5 px-2 py-1.5 text-foreground">
-          <Badge variant="secondary" className="mr-1.5 font-normal">
-            New
-          </Badge>
-          First completed <RelativeTime value={split.first_seen ?? undefined} />. Nobody has reviewed it yet, so it is counted as{" "}
-          {type === "primary" ? "a conversion" : "a supporting action"} because {split.definition_name} is.
+      {split.first_seen && (
+        <p>
+          First completed <RelativeTime value={split.first_seen} />.
         </p>
       )}
     </div>

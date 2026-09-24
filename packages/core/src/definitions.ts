@@ -85,9 +85,9 @@ export const goalConfigSchema = z.intersection(
 export type GoalConfig = z.infer<typeof goalConfigSchema>;
 
 /**
- * What the operator decided about one value of a split. Having an entry at all means
- * the value has been reviewed, even when nothing in it is set. That is what separates a
- * form someone looked at and was happy with from one that appeared last night.
+ * What the operator decided about one value of a split: its name, how it counts, or
+ * both. A value nothing has been decided about needs no entry — it is named from the
+ * data and counts the way the goal does.
  */
 export const splitValueSchema = z.object({
   /** Their name for it. Absent means the name is inferred from the data. */
@@ -107,7 +107,7 @@ export const goalSplitSchema = z.object({
   label_key: z.string().min(1).max(200).optional(),
   values: z
     .record(z.string().max(1000), splitValueSchema)
-    .refine((v) => Object.keys(v).length <= MAX_SPLIT_OVERRIDES, `At most ${MAX_SPLIT_OVERRIDES} reviewed values`)
+    .refine((v) => Object.keys(v).length <= MAX_SPLIT_OVERRIDES, `At most ${MAX_SPLIT_OVERRIDES} values with a name or type of their own`)
     .optional(),
   /**
    * Plain goals this one replaced when several were combined into it. They are kept, not
@@ -192,9 +192,7 @@ export interface GoalSplit {
   name_source?: "renamed" | "value" | "label" | "page" | "raw" | "unset";
   /** The page title or label a name was inferred from, when it was. */
   name_evidence?: string;
-  reviewed?: boolean;
-  /** Counted, but nobody has looked at it yet. The thing this whole feature exists to surface. */
-  is_new?: boolean;
+  /** Its first completion ever, so a value that appeared recently can be told by its date. */
   first_seen?: string | null;
   last_seen?: string | null;
 }

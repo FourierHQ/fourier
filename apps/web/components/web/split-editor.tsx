@@ -2,7 +2,6 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Loader2, Sparkles } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -97,11 +96,9 @@ interface SplitProps {
   type: "primary" | "supporting";
   value: SplitState;
   onChange: (s: SplitState) => void;
-  /** Values that were reviewed when the editor opened. Anything else is new. */
-  reviewed: Set<string>;
 }
 
-export function SplitEditor({ event, properties, type, value, onChange, reviewed }: SplitProps) {
+export function SplitEditor({ event, properties, type, value, onChange }: SplitProps) {
   const keys = useEventPropertyKeys(event);
   const catalog = useSplitCatalog(value.key ? { event, properties, key: value.key, label_key: value.label_key, type } : null);
   const [showAll, setShowAll] = useState(false);
@@ -123,7 +120,7 @@ export function SplitEditor({ event, properties, type, value, onChange, reviewed
     // Values decided about but not in the data any more still appear, at zero, so a
     // decision is never lost from view because its form went quiet.
     const ghosts: SplitCatalogValue[] = Object.keys(value.values)
-      .filter((v) => !listed.has(v))
+      .filter((v) => !listed.has(v) && (value.values[v]?.name || value.values[v]?.type))
       .map((v) => ({
         value: v,
         count: 0,
@@ -134,13 +131,11 @@ export function SplitEditor({ event, properties, type, value, onChange, reviewed
         name_source: "raw",
         inferred_name: shortValue(v),
         override: value.values[v],
-        reviewed: true,
         type: value.values[v]?.type ?? type,
       }));
     return [...seen, ...ghosts];
   }, [data, value.key, value.values, type]);
 
-  const fresh = rows.filter((r) => !reviewed.has(r.value));
   const shown = showAll ? rows : rows.slice(0, SHOW);
   const labelOptions = (keys.data ?? []).map((k) => k.key).filter((k) => k !== value.key);
 
@@ -184,9 +179,9 @@ export function SplitEditor({ event, properties, type, value, onChange, reviewed
       </div>
 
       <p className="text-xs leading-relaxed text-muted-foreground">
-        A value that appears later is counted as {type === "primary" ? "a conversion" : "a supporting action"} from its first
-        completion and marked <strong className="font-medium text-foreground">New</strong> until someone reviews it here. Saving
-        marks every value listed below as reviewed. Names come from the data; type one to use your own.
+        A value that appears later gets a row of its own and is counted as{" "}
+        {type === "primary" ? "a conversion" : "a supporting action"} from its first completion. Names come from the data; type
+        one to use your own.
       </p>
 
       {value.key && (
@@ -199,8 +194,7 @@ export function SplitEditor({ event, properties, type, value, onChange, reviewed
                 </span>
               ) : (
                 <>
-                  {formatNumber(rows.length)} value{rows.length === 1 ? "" : "s"}
-                  {fresh.length > 0 && reviewed.size > 0 && <> · {formatNumber(fresh.length)} new</>} · completions in the last 90 days
+                  {formatNumber(rows.length)} value{rows.length === 1 ? "" : "s"} · completions in the last 90 days
                 </>
               )}
             </span>
@@ -214,25 +208,17 @@ export function SplitEditor({ event, properties, type, value, onChange, reviewed
             <ul className="divide-y">
               {shown.map((r) => {
                 const decided = value.values[r.value];
-                const isNew = !reviewed.has(r.value);
                 const counts: CountsAs = decided?.type ?? "inherit";
                 return (
                   <li key={r.value} className="flex flex-wrap items-center gap-2 px-3 py-2">
                     <div className="min-w-[220px] flex-1 space-y-0.5">
-                      <div className="flex items-center gap-1.5">
-                        <Input
-                          className="h-7 text-xs"
-                          aria-label={`Name for ${r.value || "no value"}`}
-                          placeholder={r.inferred_name}
-                          value={decided?.name ?? ""}
-                          onChange={(e) => patchValue(r.value, { name: e.target.value })}
-                        />
-                        {isNew && reviewed.size > 0 && (
-                          <Badge variant="secondary" className="shrink-0 font-normal">
-                            New
-                          </Badge>
-                        )}
-                      </div>
+                      <Input
+                        className="h-7 text-xs"
+                        aria-label={`Name for ${r.value || "no value"}`}
+                        placeholder={r.inferred_name}
+                        value={decided?.name ?? ""}
+                        onChange={(e) => patchValue(r.value, { name: e.target.value })}
+                      />
                       <p className="flex min-w-0 items-center gap-1 text-[11px] text-muted-foreground">
                         <span className="truncate font-mono" title={r.value}>
                           {r.value === "" ? "(not set)" : shortValue(r.value)}
@@ -282,16 +268,12 @@ export function SplitEditor({ event, properties, type, value, onChange, reviewed
   );
 }
 
-/**
- * What gets stored: every value on screen marked reviewed, with only the decisions that
- * differ from the defaults written into it. A value off screen keeps whatever it had.
- */
-export function splitValuesToSave(state: SplitState, listed: string[]): Record<string, SplitValue> {
+/** What gets stored: only the values with a name or type of their own. Everything else is read from the data. */
+export function splitValuesToSave(state: SplitState): Record<string, SplitValue> {
   const out: Record<string, SplitValue> = {};
-  for (const v of new Set([...Object.keys(state.values), ...listed])) {
-    const d = state.values[v] ?? {};
+  for (const [v, d] of Object.entries(state.values)) {
     const name = d.name?.trim();
-    out[v] = { ...(name ? { name } : {}), ...(d.type ? { type: d.type } : {}) };
+    if (name || d.type) out[v] = { ...(name ? { name } : {}), ...(d.type ? { type: d.type } : {}) };
   }
   return out;
 }
