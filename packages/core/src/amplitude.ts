@@ -15,6 +15,9 @@
  * - `message_id` is `amp:` + Amplitude's own `uuid`, and ids already stored are skipped
  *   before the insert. Skipping afterwards would be too late: every materialised view
  *   counts a row the moment it is inserted, whether or not the row later merges away.
+ *   That check reads `events` itself, across all time, so ingest's delivery dedupe is
+ *   switched off for these batches: its week-long window adds nothing, and its in-memory
+ *   claims would outlive an emptied Test and drop a re-import as copies of deleted rows.
  * - Amplitude's `device_id` becomes `amp:<device_id>`. Amplitude and Fourier each set
  *   their own cookie, so the two id spaces can never refer to the same browser, and the
  *   prefix guarantees they never collide either. `user_id` is kept exactly as it is:
@@ -560,7 +563,7 @@ export async function importAmplitudeDay(project: Project, opts: AmplitudeImport
   let rejected = 0;
   const receivedAt = new Date();
   for (let i = 0; i < fresh.length; i += CHUNK) {
-    const r = await ingest(project, fresh.slice(i, i + CHUNK), { sourceId: opts.sourceId, receivedAt }, environment);
+    const r = await ingest(project, fresh.slice(i, i + CHUNK), { sourceId: opts.sourceId, receivedAt, idsChecked: true }, environment);
     imported += r.accepted;
     rejected += r.rejected;
   }
