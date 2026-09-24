@@ -850,3 +850,131 @@ test("a value that cannot be computed sorts last whichever way the column is sor
   assert.deepEqual(asc.slice(0, 2), [3_000, 15_000]);
   assert.ok(desc.slice(2).every((v) => v === null) && asc.slice(2).every((v) => v === null), "unmeasured is not the smallest value");
 });
+
+// ---------- the drawer's quality figures, and how they move ----------
+
+/** Every count in a series, summed, so a total can be held to the chart it heads. */
+const sumRates = (points: ({ numerator: number; denominator: number } | null)[]) =>
+  points.reduce((t, r) => ({ numerator: t.numerator + (r?.numerator ?? 0), denominator: t.denominator + (r?.denominator ?? 0) }), { numerator: 0, denominator: 0 });
+
+test("the drawer's time, bounce and exit are its rows' numbers, and each chart sums to its headline", async () => {
+  const w = await web();
+  const pageRow = (await allPages(w, { limit: 50 })).find((r) => r.path === "/")!;
+
+  // On every visit that included the home page: the All pages row, figure for figure.
+  const asViewers = await pageDetail(w, "/", { basis: "viewers" });
+  assert.deepEqual(asViewers.exit_rate, pageRow.exit_rate, "exit rate is the row's exit rate");
+  assert.equal(asViewers.avg_engagement_ms, pageRow.avg_engagement_ms, "time on page is the row's average engagement");
+  assert.equal(asViewers.measured_views, pageRow.measured_views);
+  assert.equal(asViewers.bounce_rate, null, "a bounce is a fact about a landing, not about a view");
+  assert.ok(asViewers.over_time.every((p) => p.engagement_rate === null && p.bounce_rate === null && p.conversion_rate === null));
+
+  // On the visits that landed there: s1 and s3 went on, the returning visitor did not.
+  const asLanding = await pageDetail(w, "/", { basis: "landing" });
+  assert.deepEqual([asLanding.bounce_rate?.numerator, asLanding.bounce_rate?.denominator], [1, 3], "s-new saw one page and left");
+  const leftTheSite = asLanding.next_pages.find((n) => n.is_exit)?.sessions;
+  assert.equal(asLanding.bounce_rate?.numerator, leftTheSite, "the bounce is the “Left the site” row below it, counted once per visit");
+  assert.equal(asLanding.exit_rate, null, "restricted to landings, an exit is a bounce under another name");
+  assert.equal(asLanding.avg_engagement_ms, 15_000, "s1's fifteen seconds, the only measurement taken on a landing here");
+
+  // Each series covers the chart above it bucket for bucket, and adds up to its headline.
+  assert.equal(asLanding.over_time.length, asLanding.trend.length, "the same buckets as the traffic chart");
+  assert.deepEqual(sumRates(asLanding.over_time.map((p) => p.engagement_rate)), {
+    numerator: asLanding.landing_engagement_rate.numerator,
+    denominator: asLanding.landing_engagement_rate.denominator,
+  });
+  assert.deepEqual(sumRates(asLanding.over_time.map((p) => p.conversion_rate)), {
+    numerator: asLanding.landing_conversion_rate!.numerator,
+    denominator: asLanding.landing_conversion_rate!.denominator,
+  });
+  assert.deepEqual(sumRates(asLanding.over_time.map((p) => p.bounce_rate)), { numerator: 1, denominator: 3 });
+  assert.deepEqual(sumRates(asViewers.over_time.map((p) => p.exit_rate)), { numerator: 1, denominator: 3 });
+  assert.equal(asLanding.over_time.reduce((n, p) => n + p.measured_views, 0), asLanding.measured_views);
+  // A day nobody was measured on is a gap in the line, not a day of zero seconds.
+  assert.ok(asLanding.over_time.some((p) => p.avg_engagement_ms === null));
+  assert.ok(!asLanding.over_time.some((p) => p.avg_engagement_ms === 0));
+
+  // A page nobody was ever measured on has no time on page, rather than none.
+  const api = await pageDetail(w, "/product/api", { basis: "viewers" });
+  assert.equal(api.avg_engagement_ms, null);
+  assert.equal(api.measured_views, 0);
+
+  // With no goal there is no conversion rate to chart, rather than a line along zero.
+  const noGoals = await pageDetail({ ...w, goal: null, goals: [] }, "/", { basis: "landing" });
+  assert.ok(noGoals.over_time.every((p) => p.conversion_rate === null));
+});
+
+test("the channels over time are the sources list spread across the period", async () => {
+  const w = await web();
+  for (const basis of ["landing", "viewers"] as const) {
+    const d = await pageDetail(w, "/", { basis });
+    const stacked = d.channels_over_time.points.reduce((n, p) => n + Object.values(p.values).reduce((a, b) => a + b, 0), 0);
+    const visits = basis === "landing" ? d.landing_sessions.current : d.sessions.current;
+    assert.equal(stacked, visits, `${basis}: every visit on the basis is in exactly one band of one bucket`);
+    assert.equal(d.channels_over_time.points.length, d.trend.length, `${basis}: every bucket, including the empty ones`);
+    // Biggest first — the order of the list beneath — and named as that list names them.
+    assert.deepEqual(d.channels_over_time.channels, d.sources.map((s) => s.key));
+  }
+  // s1 arrived from Google; s3 and the returning visitor came direct.
+  assert.deepEqual((await pageDetail(w, "/", { basis: "landing" })).channels_over_time.channels, ["Direct", "Organic Search"]);
+});
+
+test("a visit still in progress has not bounced or exited, and a bounce can still be engaged", async () => {
+  // Timed against the real clock, because whether a visit has finished is measured
+  // against now, and in an hour of its own that no other test reads.
+  const now = new Date();
+  const at = (msAgo: number) => new Date(now.getTime() - msAgo);
+  const MIN = 60_000;
+  const msgs = [
+    // Finished: one page, a glance. Bounced, not engaged.
+    { anonymousId: "lv1", sessionId: "lv1-a", at: at(180 * MIN), pages: [{ path: "/live" }] },
+    // Finished: one page, read for twenty seconds. Bounced — and engaged, because
+    // engagement counts attention and a bounce only counts pages.
+    { anonymousId: "lv2", sessionId: "lv2-a", at: at(240 * MIN), pages: [{ path: "/live", engagedMs: 20_000 }] },
+    // Still going: one page so far. It has not left, so it is on neither side.
+    { anonymousId: "lv3", sessionId: "lv3-a", at: at(1 * MIN), pages: [{ path: "/live" }] },
+    // Still going, and already on a second page: certainly not a bounce, but held out of
+    // the denominator with the rest of the unfinished, as exit rate holds them out.
+    { anonymousId: "lv4", sessionId: "lv4-a", at: at(2 * MIN), pages: [{ path: "/live" }, { path: "/live-next", afterMs: 30_000 }] },
+  ].flatMap(messagesFor);
+  await ingest(project, msgs as never, { receivedAt: now, userAgent: UA_DESKTOP }, "production");
+  await getDataClient("production").command({ query: `OPTIMIZE TABLE sessions FINAL` });
+
+  const w = await web({
+    range: resolveRange({ preset: "custom", from: at(360 * MIN).toISOString(), to: new Date(now.getTime() + 60 * MIN).toISOString(), now }),
+  });
+  const asLanding = await pageDetail(w, "/live", { basis: "landing" });
+  assert.equal(asLanding.landing_sessions.current, 4);
+  assert.deepEqual([asLanding.bounce_rate?.numerator, asLanding.bounce_rate?.denominator], [2, 2], "lv1 and lv2; lv3 and lv4 are not finished");
+  assert.equal(asLanding.next_pages.find((n) => n.is_exit)?.sessions, 2, "and the “Left the site” row agrees");
+  assert.deepEqual([asLanding.landing_engagement_rate.numerator, asLanding.landing_engagement_rate.denominator], [2, 4], "lv2 on time, lv4 on pages");
+  assert.equal(asLanding.avg_engagement_ms, 20_000);
+
+  const asViewers = await pageDetail(w, "/live", { basis: "viewers" });
+  const row = (await allPages(w, { limit: 50 })).find((r) => r.path === "/live")!;
+  assert.deepEqual([asViewers.exit_rate?.numerator, asViewers.exit_rate?.denominator], [2, 2], "the two finished views, both last");
+  assert.deepEqual(asViewers.exit_rate, row.exit_rate);
+});
+
+test("a visit with no page view has no landing page and no exit, rather than the home page's", async () => {
+  // In March, a window nothing else reads. m2 sends events and never a page view: a
+  // server-side call, a background ping. It is a visit, and it landed nowhere.
+  const MAR = (day: number, hour = 10) => new Date(Date.UTC(2026, 2, day, hour));
+  await send([
+    { anonymousId: "m1", sessionId: "m1-a", at: MAR(10), pages: [{ path: "/" }] },
+    { anonymousId: "m2", sessionId: "m2-a", at: MAR(10), pages: [], tracks: [{ event: "Server Ping", path: "/" }] },
+    { anonymousId: "m3", sessionId: "m3-a", at: MAR(11), pages: [{ path: "/" }, { path: "/pricing", afterMs: 5_000 }] },
+  ]);
+  const w = await web({ range: resolveRange({ preset: "custom", from: "2026-03-09", to: "2026-03-12", now: NOW }) });
+
+  assert.equal((await headline(w)).sessions.current, 3, "it is still a visit");
+  const landing = (await landingPages(w, { limit: 50 })).find((r) => r.path === "/");
+  assert.equal(landing?.landing_sessions.current, 2, "m1 and m3 landed on the home page; m2 landed nowhere");
+  const row = (await allPages(w, { limit: 50 })).find((r) => r.path === "/")!;
+  assert.deepEqual([row.exit_rate.numerator, row.exit_rate.denominator], [1, 2], "only m1 left from the home page");
+
+  const asLanding = await pageDetail(w, "/", { basis: "landing" });
+  assert.deepEqual([asLanding.bounce_rate?.numerator, asLanding.bounce_rate?.denominator], [1, 2], "m2 is not a bounce off a page it never saw");
+  assert.equal(asLanding.bounce_rate?.numerator, asLanding.next_pages.find((n) => n.is_exit)?.sessions);
+  assert.deepEqual((await pageDetail(w, "/", { basis: "viewers" })).exit_rate, row.exit_rate);
+});

@@ -301,8 +301,13 @@ function sessionBase(w: WebScope): Base {
       s.events AS events,
       s.engaged_ms AS engaged_ms,
       s.identified AS identified,
-      ${normalizedPath("s.entry_path")} AS entry_path,
-      ${normalizedPath("s.exit_path")} AS exit_path,
+      -- Normalised, except that empty stays empty. A visit with no page view — events
+      -- only, the 'Unattributed' channel — has no landing page and no exit page, and
+      -- every report tells it apart by entry_path = ''. normalizedPath() reads an empty
+      -- path as the root, which is right for a page view and wrong here: it would land
+      -- every one of those visits on "/", as a bounce, and exit them there too.
+      if(s.entry_path = '', '', ${normalizedPath("s.entry_path")}) AS entry_path,
+      if(s.exit_path = '', '', ${normalizedPath("s.exit_path")}) AS exit_path,
       s.entry_title AS entry_title,
       s.channel AS channel,
       s.utm_source AS utm_source,
@@ -1279,11 +1284,65 @@ export interface PageDetail {
   went_on: WentOn | null;
   /** The same question of every visitor in the report, to read `went_on` against. */
   went_on_baseline: WentOn | null;
+  /**
+   * Mean measured foreground time per view of the page, among the visits on the basis.
+   * Null when nothing was measured, which is not zero. On the viewers basis it is the All
+   * pages row's figure; on the landing basis, the same measurement taken only in visits
+   * that started here.
+   */
+  avg_engagement_ms: number | null;
+  /** Views that reported a measurement: the denominator of `avg_engagement_ms`. */
+  measured_views: number;
+  /** Landing basis only; null on the viewers basis. See PageTimePoint. */
+  bounce_rate: RateValue | null;
+  /** Viewers basis only, and the All pages row's number; null on the landing basis. */
+  exit_rate: RateValue | null;
+  /** The figures above, bucket by bucket. Every bucket in the period, sums to them exactly. */
+  over_time: PageTimePoint[];
+  /**
+   * How the visits on the basis arrived, bucket by bucket: the five biggest channels over
+   * the period and the rest as "Other channels", the same bands the Acquisition chart uses.
+   */
+  channels_over_time: { channels: string[]; points: StackedPoint[] };
+}
+
+/**
+ * One bucket of the drawer's quality figures.
+ *
+ * Each rate is present only on the basis it is honest for, and null on the other:
+ *
+ *  - Engagement and bounce describe visits that *started* here. Over every visit that
+ *    included the page they are mostly arithmetic — a visit that reached this page from
+ *    another one has seen two pages, so it is engaged and did not bounce, whatever the
+ *    page did — and an inner page would read as near-perfect for reasons of its position.
+ *  - Exit rate describes views of the page, however the visit began. Restricted to
+ *    visits that landed here, it is the bounce rate again under another name.
+ *  - Conversion rate per visit is the landing rate, for the reason the Landing pages
+ *    table gives: over every visit that included a page it flatters the pages people
+ *    pass on their way to converting anyway.
+ *
+ * Bounce and exit count only visits that have gone quiet for SESSION_SETTLED_MS, on both
+ * sides of the division — someone still reading the page has not left it — so in a live
+ * bucket their denominators are smaller than the visit count beside them.
+ *
+ * A visit belongs to the bucket it started in, as it belongs to the period it started
+ * in, so every count here is additive across buckets and the totals are their sums.
+ */
+export interface PageTimePoint {
+  bucket: string;
+  /** Null where nothing was measured in the bucket: a gap in the line, not a zero. */
+  avg_engagement_ms: number | null;
+  measured_views: number;
+  engagement_rate: RateValue | null;
+  bounce_rate: RateValue | null;
+  exit_rate: RateValue | null;
+  /** Landing basis with a goal configured; null otherwise. */
+  conversion_rate: RateValue | null;
 }
 
 export async function pageDetail(w: WebScope, path: string, opts: { basis?: PageBasis } = {}): Promise<PageDetail> {
   const basis = opts.basis ?? "landing";
-  const [trendPoints, sources, nextPages, actions, totals, went, baseline] = await Promise.all([
+  const [trendPoints, sources, nextPages, actions, totals, went, baseline, quality, channels] = await Promise.all([
     pageTrend(w, path, basis),
     pageSources(w, path, basis),
     nextPagesAfter(w, path, basis),
@@ -1291,6 +1350,8 @@ export async function pageDetail(w: WebScope, path: string, opts: { basis?: Page
     pageTotals(w, path),
     pageWentOn(w, path, basis),
     wentOnBaseline(w),
+    pageQuality(w, path, basis),
+    pageChannels(w, path, basis),
   ]);
   return {
     path,
@@ -1309,6 +1370,8 @@ export async function pageDetail(w: WebScope, path: string, opts: { basis?: Page
     landing_conversion_rate: hasGoal(w) ? totals.landing_conversion_rate : null,
     went_on: went,
     went_on_baseline: baseline,
+    ...quality,
+    channels_over_time: channels,
   };
 }
 
@@ -1489,6 +1552,195 @@ async function pageSources(w: WebScope, path: string, basis: PageBasis): Promise
       conversion_rate: rate(num(r.converting), sessions),
     };
   });
+}
+
+type PageQuality = Pick<PageDetail, "avg_engagement_ms" | "measured_views" | "bounce_rate" | "exit_rate" | "over_time">;
+
+/**
+ * Time on the page, engagement, bounce and exit, per bucket and in total, for the visits
+ * on the basis on screen. See PageTimePoint for which rate belongs to which basis.
+ *
+ * One scan, counted per visit and then per bucket, with the totals summed from the
+ * buckets in TypeScript rather than asked for separately: a headline that is the sum of
+ * the chart beneath it cannot disagree with it.
+ *
+ * Each measure is counted the way the row it matches counts it. A bounce is a finished
+ * visit that saw one page — the "Left the site" row of the landing basis's next pages,
+ * which follows the landing view and finds nothing after it. An exit is a finished visit
+ * whose last view was this page, over this page's views in finished visits: the All
+ * pages row, restricted to nothing. Time on the page is summed out of this page's own
+ * $page_leave measurements, averaged over the views that reported one, as All pages does.
+ */
+async function pageQuality(w: WebScope, path: string, basis: PageBasis): Promise<PageQuality> {
+  const { cte, params, project, scanFrom, scanTo } = sessionBase(w);
+  const p = new Params("pq");
+  const target = `{${p.add(path)}:String}`;
+  const landing = basis === "landing";
+  const withGoal = hasGoal(w);
+  const rows = await q<Row>(
+    w.scope,
+    `${cte},
+     ${denseBuckets(w, p)},
+     ${pageSessionsCte(basis, target, project, scanFrom, scanTo)},
+     settled AS (
+       SELECT session_id FROM scoped WHERE period = 'current'
+       GROUP BY session_id HAVING max(ended_at) < now64(3) - toIntervalMillisecond({settled:Int64})
+     ),
+     page_visits AS (
+       SELECT session_id, started_at, engaged, converted, pageviews, exit_path,
+              toUInt8(session_id IN (SELECT session_id FROM settled)) AS is_settled
+       FROM scoped
+       WHERE period = 'current' AND session_id IN (SELECT session_id FROM page_sessions)
+     ),
+     on_page AS (
+       -- This page's own views and measurements, once per visit, so the join below adds
+       -- one row to each visit rather than one per event.
+       SELECT
+         e.session_id AS session_id,
+         countIf(e.type = 'page') AS views,
+         sumIf(JSONExtractUInt(e.properties, 'engaged_ms'), e.event = {leave:String}) AS eng_total,
+         countIf(e.event = {leave:String} AND JSONExtractUInt(e.properties, 'engaged_ms') > 0) AS measured
+       FROM events AS e
+       WHERE e.project_id = ${project} AND e.session_id != ''
+         AND e.timestamp >= ${scanFrom} AND e.timestamp < ${scanTo}
+         AND ${normalizedPath("e.path")} = ${target}
+         AND e.session_id IN (SELECT session_id FROM page_visits)
+       GROUP BY session_id
+     )
+     -- The counts are prefixed so that none shares a name with a column its own -If
+     -- condition reads: ClickHouse resolves those against the SELECT's aliases first.
+     SELECT
+       b.bucket AS bucket,
+       ifNull(a.n_visits, 0) AS n_visits,
+       ifNull(a.n_engaged, 0) AS n_engaged,
+       ifNull(a.n_converting, 0) AS n_converting,
+       ifNull(a.n_finished, 0) AS n_finished,
+       ifNull(a.n_bounced, 0) AS n_bounced,
+       ifNull(a.n_exits, 0) AS n_exits,
+       ifNull(a.n_finished_views, 0) AS n_finished_views,
+       ifNull(a.n_eng_total, 0) AS n_eng_total,
+       ifNull(a.n_measured, 0) AS n_measured
+     FROM buckets AS b
+     LEFT JOIN (
+       SELECT
+         ${bucketSql("v.started_at", w.range.interval, w.range.timezone)} AS bucket,
+         uniqExact(v.session_id) AS n_visits,
+         uniqExactIf(v.session_id, v.engaged = 1) AS n_engaged,
+         uniqExactIf(v.session_id, v.converted = 1) AS n_converting,
+         uniqExactIf(v.session_id, v.is_settled = 1) AS n_finished,
+         uniqExactIf(v.session_id, v.is_settled = 1 AND v.pageviews <= 1) AS n_bounced,
+         uniqExactIf(v.session_id, v.is_settled = 1 AND v.exit_path = ${target}) AS n_exits,
+         sumIf(o.views, v.is_settled = 1) AS n_finished_views,
+         sum(o.eng_total) AS n_eng_total,
+         sum(o.measured) AS n_measured
+       FROM page_visits AS v
+       LEFT JOIN on_page AS o ON o.session_id = v.session_id
+       GROUP BY bucket
+     ) AS a ON a.bucket = b.bucket
+     ORDER BY b.bucket`,
+    { ...params, ...p.values, tz: w.range.timezone, leave: PAGE_LEAVE, settled: SESSION_SETTLED_MS },
+  );
+
+  const counts = rows.map((r) => ({
+    bucket: String(r.bucket),
+    visits: num(r.n_visits),
+    engaged: num(r.n_engaged),
+    converting: num(r.n_converting),
+    finished: num(r.n_finished),
+    bounced: num(r.n_bounced),
+    exits: num(r.n_exits),
+    finished_views: num(r.n_finished_views),
+    eng_total: num(r.n_eng_total),
+    measured: num(r.n_measured),
+  }));
+  const avg = (total: number, measured: number) => (measured > 0 ? total / measured : null);
+  const point = (c: (typeof counts)[number]): PageTimePoint => ({
+    bucket: c.bucket,
+    avg_engagement_ms: avg(c.eng_total, c.measured),
+    measured_views: c.measured,
+    engagement_rate: landing ? rate(c.engaged, c.visits) : null,
+    bounce_rate: landing ? rate(c.bounced, c.finished) : null,
+    exit_rate: landing ? null : rate(c.exits, c.finished_views),
+    conversion_rate: landing && withGoal ? rate(c.converting, c.visits) : null,
+  });
+  const sum = counts.reduce(
+    (t, c) => {
+      for (const k of Object.keys(t) as (keyof typeof t)[]) t[k] += c[k];
+      return t;
+    },
+    { visits: 0, engaged: 0, converting: 0, finished: 0, bounced: 0, exits: 0, finished_views: 0, eng_total: 0, measured: 0 },
+  );
+  const total = point({ bucket: "", ...sum });
+  return {
+    avg_engagement_ms: total.avg_engagement_ms,
+    measured_views: total.measured_views,
+    bounce_rate: total.bounce_rate,
+    exit_rate: total.exit_rate,
+    over_time: counts.map(point),
+  };
+}
+
+/**
+ * Where the visits on the basis came from, over time — the sources list below it, spread
+ * across the period.
+ *
+ * Banded the way the Acquisition chart bands the whole site: the five biggest channels
+ * over the period, chosen once rather than per bucket, and everything else as "Other
+ * channels". Every bucket in the period is present, empty or not, so this lines up with
+ * the chart above it and a quiet week reads as a quiet week rather than as no week.
+ * Channels are listed biggest first, which is the order of the list beneath.
+ */
+async function pageChannels(w: WebScope, path: string, basis: PageBasis): Promise<{ channels: string[]; points: StackedPoint[] }> {
+  const { cte, params, project, scanFrom, scanTo } = sessionBase(w);
+  const p = new Params("pc");
+  const target = `{${p.add(path)}:String}`;
+  const rows = await q<Row>(
+    w.scope,
+    `${cte},
+     ${denseBuckets(w, p)},
+     ${pageSessionsCte(basis, target, project, scanFrom, scanTo)},
+     visits AS (
+       -- Labelled exactly as the sources list labels them, so a band and a row agree.
+       SELECT session_id, started_at, if(channel = '', '(none)', channel) AS channel
+       FROM scoped
+       WHERE period = 'current' AND session_id IN (SELECT session_id FROM page_sessions)
+     ),
+     top AS (
+       SELECT channel FROM visits GROUP BY channel ORDER BY uniqExact(session_id) DESC, channel ASC LIMIT 5
+     )
+     SELECT b.bucket AS bucket, a.band AS band, ifNull(a.sessions, 0) AS sessions
+     FROM buckets AS b
+     LEFT JOIN (
+       SELECT
+         ${bucketSql("started_at", w.range.interval, w.range.timezone)} AS bucket,
+         if(channel IN (SELECT channel FROM top), channel, {other:String}) AS band,
+         uniqExact(session_id) AS sessions
+       FROM visits
+       GROUP BY bucket, band
+     ) AS a ON a.bucket = b.bucket
+     ORDER BY b.bucket`,
+    { ...params, ...p.values, tz: w.range.timezone, other: OTHER_CHANNELS },
+  );
+
+  const byBucket = new Map<string, Record<string, number>>();
+  const totals = new Map<string, number>();
+  for (const r of rows) {
+    const b = String(r.bucket);
+    const entry = byBucket.get(b) ?? {};
+    byBucket.set(b, entry);
+    // A bucket nobody arrived in comes back once with no band; it is still a bucket.
+    const sessions = num(r.sessions);
+    if (sessions === 0) continue;
+    const band = String(r.band);
+    entry[band] = sessions;
+    totals.set(band, (totals.get(band) ?? 0) + sessions);
+  }
+  const channels = [...totals]
+    .filter(([c]) => c !== OTHER_CHANNELS)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([c]) => c);
+  if (totals.has(OTHER_CHANNELS)) channels.push(OTHER_CHANNELS);
+  return { channels, points: [...byBucket].map(([bucket, values]) => ({ bucket, values })) };
 }
 
 /**
