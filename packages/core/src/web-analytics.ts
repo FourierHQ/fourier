@@ -729,6 +729,212 @@ export async function channelStack(w: WebScope): Promise<{ channels: string[]; p
  */
 const SESSION_SETTLED_MS = 30 * 60 * 1000;
 
+// ---------- did the people who reached a page go on to convert ----------
+
+/**
+ * Of the people whose visit reached a page, how many went on to convert — in that same
+ * visit, or by coming back another time.
+ *
+ * Counted in people, not visits, because "came back later" is a fact about a person:
+ * the visit that read the page and the visit that converted are different rows, and
+ * only the person joins them. A person is counted once per page however many of their
+ * visits reached it, and falls into at most one of the two halves — the same visit
+ * wins — so `same_visit + later_visit` is exactly the numerator of `rate`.
+ *
+ * The conversion has to come at or after the page was reached. Someone who signed up
+ * and then read the docs did not go on to convert from the docs; they had already done
+ * it. And it is looked for up to now rather than up to the end of the period, since
+ * "later" is the whole point — so a page read last week has had less time to be
+ * followed by a return visit than one read last month, and a range that ends today
+ * reads lower than the same range seen a month from now.
+ *
+ * Only the visit that reached the page is held to the report's filters. The visit that
+ * converted is whatever it turned out to be — a paid-search reader who came back
+ * direct a week later still went on to convert — and it may be on another source: a
+ * marketing page read before signing up in the app is exactly the case this is for.
+ *
+ * Still an association. People who were going to convert anyway read the pricing page,
+ * and the UI says so beside the number.
+ */
+export interface WentOn {
+  /** People whose visit reached the page in the period: the denominator. */
+  people: number;
+  /** Converted in a visit that reached the page, after reaching it. */
+  same_visit: number;
+  /** Did not, but converted on a later visit. */
+  later_visit: number;
+  /** (same_visit + later_visit) of people. */
+  rate: RateValue;
+}
+
+function wentOn(people: number, sameVisit: number, laterVisit: number): WentOn {
+  return { people, same_visit: sameVisit, later_visit: laterVisit, rate: rate(sameVisit + laterVisit, people) };
+}
+
+/**
+ * The CTEs that answer it, keyed however the caller keyed its `touches`.
+ *
+ * `touches` is one row per (key, person_id, session_id, reached_at): the moment a visit
+ * in the current period first reached the thing being reported on — a page, a group,
+ * or the site itself for the baseline. The result is `went_on (key, wo_people, wo_same,
+ * wo_later)`. The column names are prefixed because ClickHouse resolves an -If
+ * condition against aliases declared in the same SELECT (see conversionCredit), and a
+ * count named `same_visit` beside a per-person flag of the same name is how that bites.
+ */
+function wentOnCtes(w: WebScope, p: Params, project: string, touches: string): string {
+  const conversion = conversionMatchSql(w, p);
+  const from = `{${p.add(chTime(w.range.current.from))}:DateTime64(3,'UTC')}`;
+  return `touches AS (${touches}),
+   conv_events AS (
+     -- No upper bound: a return visit next week is still "went on to convert".
+     SELECT session_id, timestamp AS ts
+     FROM events
+     WHERE project_id = ${project} AND session_id != '' AND timestamp >= ${from}
+       AND (${conversion})
+   ),
+   conv_by_session AS (
+     SELECT session_id, max(ts) AS last_at, count() AS n FROM conv_events GROUP BY session_id
+   ),
+   conv_by_person AS (
+     -- Resolved through the session, the way every visitor in these reports is, so the
+     -- person who converted is the same id as the person who read the page.
+     SELECT r.person_id AS person_id, max(c.last_at) AS last_at, sum(c.n) AS n
+     FROM conv_by_session AS c
+     INNER JOIN (
+       SELECT session_id, person_id FROM sessions_resolved
+       WHERE project_id = ${project} AND session_id IN (SELECT session_id FROM conv_events)
+     ) AS r ON r.session_id = c.session_id
+     GROUP BY person_id
+   ),
+   reached AS (
+     SELECT
+       t.key AS key,
+       t.person_id AS person_id,
+       min(t.reached_at) AS first_reached,
+       -- Guarded on the join having matched: an unmatched row carries the epoch and a
+       -- zero count, and the count is what says so.
+       max(toUInt8(cs.n > 0 AND cs.last_at >= t.reached_at)) AS in_visit
+     FROM touches AS t
+     LEFT JOIN conv_by_session AS cs ON cs.session_id = t.session_id
+     GROUP BY key, person_id
+   ),
+   went_on AS (
+     SELECT
+       r.key AS key,
+       uniqExact(r.person_id) AS wo_people,
+       uniqExactIf(r.person_id, r.in_visit = 1) AS wo_same,
+       uniqExactIf(r.person_id, r.in_visit = 0 AND cp.n > 0 AND cp.last_at >= r.first_reached) AS wo_later
+     FROM reached AS r
+     LEFT JOIN conv_by_person AS cp ON cp.person_id = r.person_id
+     GROUP BY key
+   )`;
+}
+
+/** Visits that started on a page reach it when they start. */
+const landingTouches = (key: string, where = "1 = 1") =>
+  `SELECT ${key} AS key, person_id, session_id, started_at AS reached_at
+   FROM scoped WHERE period = 'current' AND entry_path != '' AND ${where}`;
+
+/** Any other visit reaches a page at its first view of it. */
+const viewTouches = (key: string, project: string, scanFrom: string, scanTo: string, where = "1 = 1") =>
+  `SELECT ${key} AS key, b.person_id AS person_id, b.session_id AS session_id, min(e.timestamp) AS reached_at
+   FROM events AS e
+   INNER JOIN scoped AS b ON b.session_id = e.session_id
+   WHERE e.project_id = ${project} AND e.session_id != '' AND e.type = 'page' AND b.period = 'current'
+     AND e.timestamp >= ${scanFrom} AND e.timestamp < ${scanTo} AND ${where}
+   GROUP BY key, person_id, session_id`;
+
+async function wentOnTotal(w: WebScope, touches: (b: Base) => string, p: Params): Promise<WentOn | null> {
+  if (!hasGoal(w)) return null;
+  const b = sessionBase(w);
+  const [r] = await q<Row>(
+    w.scope,
+    `${b.cte}, ${wentOnCtes(w, p, b.project, touches(b))}
+     SELECT sum(wo_people) AS people, sum(wo_same) AS same, sum(wo_later) AS later FROM went_on`,
+    { ...b.params, ...p.values },
+  );
+  return wentOn(num(r?.people), num(r?.same), num(r?.later));
+}
+
+/**
+ * The same question asked of every visitor in the report: of the people with a visit in
+ * the period, how many converted at or after its start. A page's own rate means little
+ * on its own — 4% is excellent on a site where 1% of visitors ever convert and poor on
+ * one where 10% do — and this is what it has to be read against.
+ */
+export function wentOnBaseline(w: WebScope): Promise<WentOn | null> {
+  return wentOnTotal(w, () => `SELECT '' AS key, person_id, session_id, started_at AS reached_at FROM scoped WHERE period = 'current'`, new Params("wb"));
+}
+
+/**
+ * The typed search on a page table, as a HAVING clause over the row's key.
+ *
+ * A HAVING and never a WHERE: it chooses which rows to show and must not change what is
+ * on them. Filtering the underlying views by title in a WHERE would drop the views of a
+ * page whose title changed during the period and quietly shrink the row that is left —
+ * a search that edits the numbers it finds.
+ *
+ * A pasted URL is searched for by its path, because that is what a row is keyed on and
+ * nobody means the scheme.
+ */
+export function pageSearchNeedle(raw: string | null | undefined): string | null {
+  let s = (raw ?? "").trim();
+  if (/^https?:\/\//i.test(s)) {
+    try {
+      s = new URL(s).pathname;
+    } catch {
+      // not a URL after all; search for what was typed
+    }
+  }
+  return s ? s.slice(0, 200) : null;
+}
+
+/** A bound needle, and the predicate that looks for it in a column. Null when nothing was typed. */
+function pageSearch(raw: string | null | undefined, p: Params): { matches: (col: string) => string } | null {
+  const needle = pageSearchNeedle(raw);
+  if (!needle) return null;
+  const q = `{${p.add(needle)}:String}`;
+  return { matches: (col) => `positionCaseInsensitiveUTF8(${col}, ${q}) > 0` };
+}
+
+// ---------- sorting the page tables ----------
+
+/** What each page table can be sorted by. The route accepts these names and nothing else. */
+export const LANDING_SORTS = ["path", "landing_sessions", "engagement_rate", "converting_sessions", "conversion_rate", "went_on", "change"] as const;
+export const PAGE_SORTS = ["path", "unique_viewers", "pageviews", "avg_engagement", "exit_rate", "cta_clickers", "went_on"] as const;
+export type LandingSort = (typeof LANDING_SORTS)[number];
+export type PageSort = (typeof PAGE_SORTS)[number];
+export interface TableSort<K extends string> {
+  key: K;
+  dir: "asc" | "desc";
+}
+
+/**
+ * One ORDER BY, from a column's value and what breaks its ties.
+ *
+ * Applied before the LIMIT, over every row the report has, so sorting by exit rate finds
+ * the highest exit rate on the site rather than the highest among the fifty busiest
+ * pages — the same reason the search runs on the server.
+ *
+ * A value that cannot be computed — a rate over nothing, engagement nobody measured —
+ * sorts last in either direction: it is not the lowest value, it is not a value. And a
+ * rate's ties go to the larger denominator whichever way the column is sorted, so 100% of
+ * forty views comes before 100% of one; the "1 of 1" rows are still there, and their
+ * working is on the row, but they do not win a tie against evidence.
+ */
+function sortSql(value: string, dir: "asc" | "desc", ties: string[]): string {
+  return [`${value} ${dir === "asc" ? "ASC" : "DESC"} NULLS LAST`, ...ties].join(", ");
+}
+
+/** A rate as a sortable value: null, not zero, when there is nothing to divide by. */
+const rateSql = (numerator: string, denominator: string) => `if(${denominator} > 0, ${numerator} / ${denominator}, NULL)`;
+
+/**
+ * The period-over-period change as a sortable value. Up from nothing is the largest rise
+ * there is, so it sorts as infinity rather than as missing; with comparison off, or with
+ * nothing in either period, there is no change to rank and it goes last.
+ */
+const changeSql = (cur: string, prev: string) => `multiIf(${prev} > 0, (${cur} - ${prev}) / ${prev}, ${cur} > 0, inf, NULL)`;
 
 export interface LandingPageRow {
   path: string;
@@ -737,6 +943,8 @@ export interface LandingPageRow {
   engagement_rate: RateValue;
   converting_sessions: number;
   conversion_rate: RateValue;
+  /** People who landed here and converted then or later. Null when no goal is configured. */
+  went_on: WentOn | null;
 }
 
 /**
@@ -751,35 +959,77 @@ export interface LandingPageRow {
  */
 export async function landingPages(
   w: WebScope,
-  opts: { limit?: number; groupBy?: "page" | "group"; orderBy?: "landing_sessions" | "converting_sessions" } = {},
+  opts: {
+    limit?: number;
+    groupBy?: "page" | "group";
+    orderBy?: "landing_sessions" | "converting_sessions";
+    /** Typed by the reader: rows whose page, title or group name contains it. */
+    search?: string | null;
+    /** A column the reader sorted by. Takes precedence over `orderBy`, and changes only the order. */
+    sort?: TableSort<LandingSort> | null;
+  } = {},
 ): Promise<LandingPageRow[]> {
-  const { cte, params } = sessionBase(w);
+  const { cte, params, project } = sessionBase(w);
   const p = new Params("lp");
-  const key = opts.groupBy === "group" ? pageGroupSql(w.pageGroups, "entry_path", p) : "entry_path";
+  const isGroups = opts.groupBy === "group";
+  const key = isGroups ? pageGroupSql(w.pageGroups, "entry_path", p) : "entry_path";
   const limit = Math.min(Math.max(opts.limit ?? 20, 1), 200);
   // Ranked by conversions, the busiest page is not usually the top row — which is the
   // point of asking. Sessions break the tie so a page with one of each does not outrank
   // a page with one conversion from a hundred visits by accident of ordering.
-  const byConversions = opts.orderBy === "converting_sessions";
-  const order = byConversions ? "converting DESC, sessions DESC" : "sessions DESC";
+  const byConversions = opts.orderBy === "converting_sessions" && !opts.sort;
   // Ranked by conversions, a page with none is not a low-ranking row — it is not a row.
-  // Ranked by traffic it is, because then the question is where people land.
+  // Ranked by traffic it is, because then the question is where people land. A column
+  // the reader sorted by is the second case: sorting reorders the table, it does not
+  // decide what is in it.
   const having = byConversions ? "converting > 0" : "sessions > 0 OR prev_sessions > 0";
+  // A group is found by its name; a page by its path or by any title it had.
+  const search = pageSearch(opts.search, p);
+  const titleHit = search && !isGroups ? `, max(${search.matches("entry_title")}) AS title_hit` : "";
+  const searchHaving = search ? ` AND (${search.matches("key")}${titleHit ? " OR title_hit = 1" : ""})` : "";
+  const withWent = hasGoal(w);
+  const sort: TableSort<LandingSort> = opts.sort ?? { key: byConversions ? "converting_sessions" : "landing_sessions", dir: "desc" };
+  const went = "(wo_same + wo_later)";
+  const order = (() => {
+    const busiest = ["l.sessions DESC", "row_key ASC"];
+    switch (sort.key) {
+      case "path":
+        return sortSql("row_key", sort.dir, []);
+      case "engagement_rate":
+        return sortSql(rateSql("l.engaged_sessions", "l.sessions"), sort.dir, busiest);
+      case "converting_sessions":
+        return sortSql("l.converting", sort.dir, busiest);
+      case "conversion_rate":
+        return sortSql(rateSql("l.converting", "l.sessions"), sort.dir, busiest);
+      case "went_on":
+        return withWent ? sortSql(rateSql(went, "wo_people"), sort.dir, [`${went} DESC`, "wo_people DESC", ...busiest]) : busiest.join(", ");
+      case "change":
+        return sortSql(changeSql("l.sessions", "l.prev_sessions"), sort.dir, busiest);
+      default:
+        return sortSql("l.sessions", sort.dir, ["row_key ASC"]);
+    }
+  })();
 
   const rows = await q<Row>(
     w.scope,
-    `${cte}
-     SELECT
-       ${key} AS key,
-       any(entry_title) AS title,
-       ${AGG.sessions} AS sessions,
-       ${AGG.prevSessions} AS prev_sessions,
-       ${AGG.engagedSessions} AS engaged_sessions,
-       ${AGG.converting} AS converting
-     FROM scoped
-     WHERE entry_path != ''
-     GROUP BY key
-     HAVING ${having}
+    `${cte}${withWent ? `, ${wentOnCtes(w, p, project, landingTouches(key))}` : ""}
+     SELECT l.*, l.key AS row_key${withWent ? ", ifNull(g.wo_people, 0) AS wo_people, ifNull(g.wo_same, 0) AS wo_same, ifNull(g.wo_later, 0) AS wo_later" : ""}
+     FROM (
+       SELECT
+         ${key} AS key,
+         any(entry_title) AS title,
+         ${AGG.sessions} AS sessions,
+         ${AGG.prevSessions} AS prev_sessions,
+         ${AGG.engagedSessions} AS engaged_sessions,
+         ${AGG.converting} AS converting
+         ${titleHit}
+       FROM scoped
+       WHERE entry_path != ''
+       GROUP BY key
+       HAVING (${having})${searchHaving}
+     ) AS l
+     ${withWent ? "LEFT JOIN went_on AS g ON g.key = l.key" : ""}
+     -- Ordered and limited after the join, so a sort on went-on ranks every page by it.
      ORDER BY ${order}
      LIMIT ${limit}`,
     { ...params, ...p.values },
@@ -787,12 +1037,13 @@ export async function landingPages(
   return rows.map((r) => {
     const sessions = num(r.sessions);
     return {
-      path: String(r.key),
+      path: String(r.row_key),
       title: String(r.title ?? ""),
       landing_sessions: delta(sessions, prevOr(w, num(r.prev_sessions))),
       engagement_rate: rate(num(r.engaged_sessions), sessions),
       converting_sessions: num(r.converting),
       conversion_rate: rate(num(r.converting), sessions),
+      went_on: withWent ? wentOn(num(r.wo_people), num(r.wo_same), num(r.wo_later)) : null,
     };
   });
 }
@@ -823,26 +1074,66 @@ export interface PageRow {
    */
   exit_rate: RateValue;
   cta_clickers: number;
+  /** People who viewed it and converted afterwards, then or later. Null when no goal is configured. */
+  went_on: WentOn | null;
 }
 
 
 /**
  * All pages: every page that was viewed, however the visit started.
  *
- * This deliberately carries no conversion rate. Viewing a page and later converting is
- * a correlation a table cannot separate from "everybody passes through here", and a
- * conversion column next to a page name is read as a claim that the page caused it.
- * Landing pages may carry one, because the session genuinely started there.
+ * This deliberately carries no per-visit conversion rate. "Visits that included this
+ * page, and converted" is a correlation a table cannot separate from "everybody passes
+ * through here", and a conversion column next to a page name is read as a claim that
+ * the page caused it. What it carries instead is `went_on`: people, counted only for
+ * conversions that came after they saw the page, and read against a site-wide baseline
+ * in the UI — the same association, stated in the terms that make it hard to misread.
  */
-export async function allPages(w: WebScope, opts: { limit?: number; groupBy?: "page" | "group" } = {}): Promise<PageRow[]> {
+export async function allPages(
+  w: WebScope,
+  opts: { limit?: number; groupBy?: "page" | "group"; search?: string | null; sort?: TableSort<PageSort> | null } = {},
+): Promise<PageRow[]> {
   const { cte, params, project, scanFrom, scanTo } = sessionBase(w);
   const p = new Params("ap");
-  const key = opts.groupBy === "group" ? pageGroupSql(w.pageGroups, "e.path", p) : normalizedPath("e.path");
+  const isGroups = opts.groupBy === "group";
+  const key = isGroups ? pageGroupSql(w.pageGroups, "e.path", p) : normalizedPath("e.path");
+  const search = pageSearch(opts.search, p);
+  // Qualified, because the SELECT this lands in also declares `anyIf(title, …) AS title`,
+  // and a bare `title` beside it resolves to that aggregate rather than the column.
+  const titleHit = search && !isGroups ? `, maxIf(${search.matches("pe.title")}, pe.type = 'page') AS title_hit` : "";
+  const searchHaving = search ? ` AND (${search.matches("key")}${titleHit ? " OR title_hit = 1" : ""})` : "";
+  const withWent = hasGoal(w);
+  // Read off page_events, which has already joined every view to its visit: the first
+  // view of each page in each visit is where that visit reached it.
+  const touches = `SELECT key, person_id, session_id, min(ts) AS reached_at
+     FROM page_events WHERE period = 'current' AND type = 'page'
+     GROUP BY key, person_id, session_id`;
   // The same key, applied to where the visit stopped. `exit_path` arrives from `base`
   // already normalised, so it is compared against the page key on equal terms; the group
   // expression normalises its own operand and is safe to apply a second time.
   const exitKey = opts.groupBy === "group" ? pageGroupSql(w.pageGroups, "exit_path", p) : "exit_path";
   const limit = Math.min(Math.max(opts.limit ?? 20, 1), 200);
+  const sort: TableSort<PageSort> = opts.sort ?? { key: "pageviews", dir: "desc" };
+  const went = "(wo_same + wo_later)";
+  const order = (() => {
+    const busiest = ["t.pageviews DESC", "row_key ASC"];
+    switch (sort.key) {
+      case "path":
+        return sortSql("row_key", sort.dir, []);
+      case "unique_viewers":
+        return sortSql("t.viewers", sort.dir, busiest);
+      case "avg_engagement":
+        return sortSql(rateSql("t.eng_total", "t.measured"), sort.dir, ["t.measured DESC", ...busiest]);
+      case "exit_rate":
+        return sortSql(rateSql("exits", "t.settled_views"), sort.dir, ["t.settled_views DESC", ...busiest]);
+      case "cta_clickers":
+        return sortSql("t.cta_clickers", sort.dir, busiest);
+      case "went_on":
+        return withWent ? sortSql(rateSql(went, "wo_people"), sort.dir, [`${went} DESC`, "wo_people DESC", ...busiest]) : busiest.join(", ");
+      default:
+        return sortSql("t.pageviews", sort.dir, ["row_key ASC"]);
+    }
+  })();
 
   // "CTA clickers" counts configured supporting actions. Nothing is auto-captured, so
   // with none configured this is honestly zero and the UI says the tracking is missing
@@ -862,6 +1153,8 @@ export async function allPages(w: WebScope, opts: { limit?: number; groupBy?: "p
          ${key} AS key,
          b.period AS period,
          b.person_id AS person_id,
+         b.session_id AS session_id,
+         e.timestamp AS ts,
          e.type AS type,
          e.title AS title,
          toUInt8(e.event = {leave:String}) AS is_leave,
@@ -872,7 +1165,7 @@ export async function allPages(w: WebScope, opts: { limit?: number; groupBy?: "p
        INNER JOIN scoped AS b ON b.session_id = e.session_id
        WHERE e.project_id = ${project} AND e.session_id != ''
          AND e.timestamp >= ${scanFrom} AND e.timestamp < ${scanTo}
-     ),
+     ),${withWent ? `\n     ${wentOnCtes(w, p, project, touches)},` : ""}
      exits AS (
        SELECT ${exitKey} AS key, uniqExactIf(session_id, period = 'current') AS exits
        FROM scoped
@@ -891,14 +1184,19 @@ export async function allPages(w: WebScope, opts: { limit?: number; groupBy?: "p
          countIf(period = 'current' AND is_leave = 1 AND eng_ms > 0) AS measured,
          countIf(period = 'current' AND type = 'page' AND is_settled = 1) AS settled_views,
          uniqExactIf(person_id, period = 'current' AND is_cta = 1) AS cta_clickers
-       FROM page_events
+         ${titleHit}
+       FROM page_events AS pe
        GROUP BY key
-       HAVING pageviews > 0 OR prev_pageviews > 0
+       HAVING (pageviews > 0 OR prev_pageviews > 0)${searchHaving}
      )
-     SELECT t.*, ifNull(x.exits, 0) AS exits
+     -- The key under a name of its own: with a second join, ClickHouse names the
+     -- column from \`t.*\` "t.key" to tell it from the other tables' keys, and a row
+     -- read by \`key\` then comes back with no path at all.
+     SELECT t.*, t.key AS row_key, ifNull(x.exits, 0) AS exits${withWent ? ", ifNull(g.wo_people, 0) AS wo_people, ifNull(g.wo_same, 0) AS wo_same, ifNull(g.wo_later, 0) AS wo_later" : ""}
      FROM totals AS t
      LEFT JOIN exits AS x ON x.key = t.key
-     ORDER BY t.pageviews DESC
+     ${withWent ? "LEFT JOIN went_on AS g ON g.key = t.key" : ""}
+     ORDER BY ${order}
      LIMIT ${limit}`,
     { ...params, ...p.values, leave: PAGE_LEAVE, settled: SESSION_SETTLED_MS },
   );
@@ -906,7 +1204,7 @@ export async function allPages(w: WebScope, opts: { limit?: number; groupBy?: "p
   return rows.map((r) => {
     const measured = num(r.measured);
     return {
-      path: String(r.key),
+      path: String(r.row_key),
       title: String(r.title ?? ""),
       unique_viewers: delta(num(r.viewers), prevOr(w, num(r.prev_viewers))),
       pageviews: delta(num(r.pageviews), prevOr(w, num(r.prev_pageviews))),
@@ -920,6 +1218,7 @@ export async function allPages(w: WebScope, opts: { limit?: number; groupBy?: "p
       // than 0%, which `rate` already handles.
       exit_rate: rate(num(r.exits), num(r.settled_views)),
       cta_clickers: num(r.cta_clickers),
+      went_on: withWent ? wentOn(num(r.wo_people), num(r.wo_same), num(r.wo_later)) : null,
     };
   });
 }
@@ -941,9 +1240,22 @@ export interface PageActionRow {
   rate: RateValue;
 }
 
+/**
+ * Which visits a page's drawer describes.
+ *
+ * `landing` is the visits that started on the page — the Landing pages tab's row, and
+ * the only population a per-visit conversion rate is honest for. `viewers` is every
+ * visit that included it however it began — the All pages tab's row. The drawer opens
+ * on whichever tab the reader came from and can switch, and every section of it follows
+ * the switch: a trend of landings above a list of where *all* viewers came from would be
+ * two populations presented as one.
+ */
+export type PageBasis = "landing" | "viewers";
+
 export interface PageDetail {
   path: string;
   title: string;
+  basis: PageBasis;
   trend: SeriesPoint[];
   sources: BreakdownRow[];
   next_pages: NextPageRow[];
@@ -956,21 +1268,34 @@ export interface PageDetail {
   click_rate_basis: "page_viewers" | "exposed_viewers";
   landing_sessions: Delta;
   unique_viewers: Delta;
+  pageviews: Delta;
+  /** Visits that included the page at all, however they began. */
+  sessions: Delta;
+  /** Of the visits that landed here, the same number as the Landing pages row. */
+  landing_engagement_rate: RateValue;
+  /** Of the visits that landed here. Null when no goal is configured. */
+  landing_conversion_rate: RateValue | null;
+  /** For the basis on screen. Null when no goal is configured. */
+  went_on: WentOn | null;
+  /** The same question of every visitor in the report, to read `went_on` against. */
+  went_on_baseline: WentOn | null;
 }
 
-export async function pageDetail(w: WebScope, path: string, opts: { basis?: "landing" | "viewers" } = {}): Promise<PageDetail> {
+export async function pageDetail(w: WebScope, path: string, opts: { basis?: PageBasis } = {}): Promise<PageDetail> {
   const basis = opts.basis ?? "landing";
-  const scopedToPage: WebScope = w;
-  const [trendPoints, sources, nextPages, actions, totals] = await Promise.all([
-    pageTrend(scopedToPage, path, basis),
-    pageSources(scopedToPage, path),
-    nextPagesAfter(scopedToPage, path),
-    pageActions(scopedToPage, path),
-    pageTotals(scopedToPage, path),
+  const [trendPoints, sources, nextPages, actions, totals, went, baseline] = await Promise.all([
+    pageTrend(w, path, basis),
+    pageSources(w, path, basis),
+    nextPagesAfter(w, path, basis),
+    pageActions(w, path, basis),
+    pageTotals(w, path),
+    pageWentOn(w, path, basis),
+    wentOnBaseline(w),
   ]);
   return {
     path,
     title: totals.title,
+    basis,
     trend: trendPoints,
     sources,
     next_pages: nextPages,
@@ -978,41 +1303,111 @@ export async function pageDetail(w: WebScope, path: string, opts: { basis?: "lan
     click_rate_basis: "page_viewers",
     landing_sessions: totals.landing_sessions,
     unique_viewers: totals.unique_viewers,
+    pageviews: totals.pageviews,
+    sessions: totals.sessions,
+    landing_engagement_rate: totals.landing_engagement_rate,
+    landing_conversion_rate: hasGoal(w) ? totals.landing_conversion_rate : null,
+    went_on: went,
+    went_on_baseline: baseline,
   };
 }
 
-async function pageTotals(w: WebScope, path: string): Promise<{ title: string; landing_sessions: Delta; unique_viewers: Delta }> {
+/**
+ * The visits a basis covers, as a CTE named `page_sessions` over both periods.
+ *
+ * Views are matched on the normalised path exactly as the All pages row keys them, and
+ * landings on `entry_path` exactly as the Landing pages row does, so the drawer's
+ * numbers are the row's numbers rather than a near relation of them.
+ */
+function pageSessionsCte(basis: PageBasis, target: string, project: string, scanFrom: string, scanTo: string): string {
+  return basis === "landing"
+    ? `page_sessions AS (SELECT session_id FROM scoped WHERE entry_path = ${target})`
+    : `page_sessions AS (
+         SELECT DISTINCT e.session_id AS session_id
+         FROM events AS e
+         INNER JOIN scoped AS b ON b.session_id = e.session_id
+         WHERE e.project_id = ${project} AND e.session_id != '' AND e.type = 'page'
+           AND e.timestamp >= ${scanFrom} AND e.timestamp < ${scanTo}
+           AND ${normalizedPath("e.path")} = ${target}
+       )`;
+}
+
+interface PageTotals {
+  title: string;
+  landing_sessions: Delta;
+  unique_viewers: Delta;
+  pageviews: Delta;
+  sessions: Delta;
+  landing_engagement_rate: RateValue;
+  landing_conversion_rate: RateValue;
+}
+
+async function pageTotals(w: WebScope, path: string): Promise<PageTotals> {
   const { cte, params, project, scanFrom, scanTo } = sessionBase(w);
   const p = new Params("pt");
   const target = `{${p.add(path)}:String}`;
+  // Two one-row aggregates side by side rather than a column of scalar subqueries, each
+  // of which would re-read the page's views from scratch.
   const [r] = await q<Row>(
     w.scope,
     `${cte},
      views AS (
-       SELECT b.period AS period, b.person_id AS person_id, e.title AS title
+       SELECT b.period AS period, b.person_id AS person_id, b.session_id AS session_id, e.title AS title
        FROM events AS e
        INNER JOIN scoped AS b ON b.session_id = e.session_id
-       WHERE e.project_id = ${project} AND e.type = 'page'
+       WHERE e.project_id = ${project} AND e.session_id != '' AND e.type = 'page'
          AND e.timestamp >= ${scanFrom} AND e.timestamp < ${scanTo}
          AND ${normalizedPath("e.path")} = ${target}
      )
-     SELECT
-       (SELECT anyIf(title, title != '') FROM views) AS title,
-       (SELECT uniqExactIf(person_id, period = 'current') FROM views) AS viewers,
-       (SELECT uniqExactIf(person_id, period = 'previous') FROM views) AS prev_viewers,
-       uniqExactIf(session_id, period = 'current' AND entry_path = ${target}) AS landing,
-       uniqExactIf(session_id, period = 'previous' AND entry_path = ${target}) AS prev_landing
-     FROM scoped`,
+     SELECT v.*, l.*
+     FROM (
+       SELECT
+         anyIf(title, title != '') AS page_title,
+         uniqExactIf(person_id, period = 'current') AS viewers,
+         uniqExactIf(person_id, period = 'previous') AS prev_viewers,
+         countIf(period = 'current') AS pageviews,
+         countIf(period = 'previous') AS prev_pageviews,
+         uniqExactIf(session_id, period = 'current') AS visits,
+         uniqExactIf(session_id, period = 'previous') AS prev_visits
+       FROM views
+     ) AS v
+     CROSS JOIN (
+       SELECT
+         uniqExactIf(session_id, period = 'current') AS landing,
+         uniqExactIf(session_id, period = 'previous') AS prev_landing,
+         uniqExactIf(session_id, period = 'current' AND engaged = 1) AS landing_engaged,
+         uniqExactIf(session_id, period = 'current' AND converted = 1) AS landing_converting
+       FROM scoped WHERE entry_path = ${target}
+     ) AS l`,
     { ...params, ...p.values },
   );
+  const landing = num(r?.landing);
   return {
-    title: String(r?.title ?? ""),
-    landing_sessions: delta(num(r?.landing), prevOr(w, num(r?.prev_landing))),
+    title: String(r?.page_title ?? ""),
+    landing_sessions: delta(landing, prevOr(w, num(r?.prev_landing))),
     unique_viewers: delta(num(r?.viewers), prevOr(w, num(r?.prev_viewers))),
+    pageviews: delta(num(r?.pageviews), prevOr(w, num(r?.prev_pageviews))),
+    sessions: delta(num(r?.visits), prevOr(w, num(r?.prev_visits))),
+    landing_engagement_rate: rate(num(r?.landing_engaged), landing),
+    landing_conversion_rate: rate(num(r?.landing_converting), landing),
   };
 }
 
-async function pageTrend(w: WebScope, path: string, basis: "landing" | "viewers"): Promise<SeriesPoint[]> {
+/** One page's went-on, counted exactly the way its table row is. */
+function pageWentOn(w: WebScope, path: string, basis: PageBasis): Promise<WentOn | null> {
+  const p = new Params("pw");
+  const target = `{${p.add(path)}:String}`;
+  return wentOnTotal(
+    w,
+    (b) =>
+      basis === "landing"
+        ? landingTouches("''", `entry_path = ${target}`)
+        : viewTouches("''", b.project, b.scanFrom, b.scanTo, `${normalizedPath("e.path")} = ${target}`),
+    p,
+  );
+}
+
+async function pageTrend(w: WebScope, path: string, basis: PageBasis): Promise<SeriesPoint[]> {
   const { cte, params, project, scanFrom, scanTo } = sessionBase(w);
   const p = new Params("pg");
   const target = `{${p.add(path)}:String}`;
@@ -1061,15 +1456,17 @@ async function pageTrend(w: WebScope, path: string, basis: "landing" | "viewers"
   return rows.map((r) => ({ bucket: String(r.bucket), value: num(r.value), previous: hasPrev(w) ? num(r.previous) : null }));
 }
 
-/** Where the sessions that landed on this page came from. */
-async function pageSources(w: WebScope, path: string): Promise<BreakdownRow[]> {
-  const { cte, params } = sessionBase(w);
+/** Where the visits on this basis came from. */
+async function pageSources(w: WebScope, path: string, basis: PageBasis): Promise<BreakdownRow[]> {
+  const { cte, params, project, scanFrom, scanTo } = sessionBase(w);
   const p = new Params("ps");
   const target = `{${p.add(path)}:String}`;
   const rows = await q<Row>(
     w.scope,
     `${cte},
-     totals AS (SELECT uniqExactIf(session_id, period = 'current' AND entry_path = ${target}) AS total FROM scoped)
+     ${pageSessionsCte(basis, target, project, scanFrom, scanTo)},
+     on_page AS (SELECT * FROM scoped WHERE session_id IN (SELECT session_id FROM page_sessions)),
+     totals AS (SELECT uniqExactIf(session_id, period = 'current') AS total FROM on_page)
      SELECT
        if(channel = '', '(none)', channel) AS key,
        uniqExactIf(session_id, period = 'current') AS sessions,
@@ -1077,7 +1474,7 @@ async function pageSources(w: WebScope, path: string): Promise<BreakdownRow[]> {
        uniqExactIf(session_id, period = 'current' AND engaged = 1) AS engaged_sessions,
        uniqExactIf(session_id, period = 'current' AND converted = 1) AS converting,
        if((SELECT total FROM totals) > 0, uniqExactIf(session_id, period = 'current') / (SELECT total FROM totals) * 100, 0) AS share
-     FROM scoped WHERE entry_path = ${target}
+     FROM on_page
      GROUP BY key HAVING sessions > 0 ORDER BY sessions DESC LIMIT 10`,
     { ...params, ...p.values },
   );
@@ -1100,11 +1497,17 @@ async function pageSources(w: WebScope, path: string): Promise<BreakdownRow[]> {
  * since gone quiet for longer than a session can stay open; a visit still in progress
  * has not exited anything, and saying it has would overstate every exit rate during
  * the hours anyone is actually looking at this page.
+ *
+ * On the landing basis it is the page after the landing, once per visit — so the rows
+ * account for every settled visit that started here exactly once, and "left the site"
+ * is a bounce. On the viewers basis it follows every view of the page, so a visit that
+ * came back to it twice and went somewhere different each time appears under both.
  */
-async function nextPagesAfter(w: WebScope, path: string): Promise<NextPageRow[]> {
+async function nextPagesAfter(w: WebScope, path: string, basis: PageBasis): Promise<NextPageRow[]> {
   const { cte, params, project, scanFrom, scanTo } = sessionBase(w);
   const p = new Params("np");
   const target = `{${p.add(path)}:String}`;
+  const landing = basis === "landing";
   const rows = await q<Row>(
     w.scope,
     `${cte},
@@ -1118,13 +1521,17 @@ async function nextPagesAfter(w: WebScope, path: string): Promise<NextPageRow[]>
        INNER JOIN scoped AS b ON b.session_id = e.session_id
        WHERE e.project_id = ${project} AND e.type = 'page' AND b.period = 'current'
          AND e.timestamp >= ${scanFrom} AND e.timestamp < ${scanTo}
+         ${landing ? `AND b.entry_path = ${target}` : ""}
      ),
      ordered AS (
        SELECT
          session_id,
          path,
          ts,
-         leadInFrame(path) OVER (PARTITION BY session_id ORDER BY ts ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS next_path
+         leadInFrame(path) OVER (PARTITION BY session_id ORDER BY ts ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS next_path,
+         -- Which view of this path within the visit. The landing basis keeps only the
+         -- first, which in a visit that started here is the landing itself.
+         row_number() OVER (PARTITION BY session_id, path ORDER BY ts ASC) AS nth_view
        FROM views
      ),
      settled AS (
@@ -1135,7 +1542,7 @@ async function nextPagesAfter(w: WebScope, path: string): Promise<NextPageRow[]>
        multiIf(next_path != '', next_path, session_id IN (SELECT session_id FROM settled), '', NULL) AS key,
        uniqExact(session_id) AS sessions
      FROM ordered
-     WHERE path = ${target}
+     WHERE path = ${target} ${landing ? "AND nth_view = 1" : ""}
      GROUP BY key
      HAVING isNotNull(key)
      ORDER BY sessions DESC LIMIT 10`,
@@ -1144,8 +1551,12 @@ async function nextPagesAfter(w: WebScope, path: string): Promise<NextPageRow[]>
   return rows.map((r) => ({ path: String(r.key ?? ""), sessions: num(r.sessions), is_exit: String(r.key ?? "") === "" }));
 }
 
-/** Configured supporting actions fired on this page, and how many distinct people fired them. */
-async function pageActions(w: WebScope, path: string): Promise<PageActionRow[]> {
+/**
+ * Configured supporting actions fired on this page, and how many distinct people fired
+ * them — among the visits on the basis on screen, so on the landing basis both the
+ * clickers and the viewers they are divided by are people whose visit started here.
+ */
+async function pageActions(w: WebScope, path: string, basis: PageBasis): Promise<PageActionRow[]> {
   // Leaves, so first-match-wins names the specific value rather than the rollup holding it.
   const supporting = leafGoals(w.goals).filter((g) => g.config.type === "supporting");
   if (!supporting.length) return [];
@@ -1164,6 +1575,7 @@ async function pageActions(w: WebScope, path: string): Promise<PageActionRow[]> 
        WHERE e.project_id = ${project} AND b.period = 'current'
          AND e.timestamp >= ${scanFrom} AND e.timestamp < ${scanTo}
          AND ${normalizedPath("e.path")} = ${target}
+         ${basis === "landing" ? `AND b.entry_path = ${target}` : ""}
      ),
      viewers AS (SELECT uniqExactIf(person_id, type = 'page') AS n FROM on_page)
      SELECT action AS name, uniqExact(person_id) AS clickers, (SELECT n FROM viewers) AS viewers
