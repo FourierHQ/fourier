@@ -22,7 +22,7 @@ export type {
 } from "./types";
 
 export const SDK_NAME = "fourier";
-export const SDK_VERSION = "0.2.0";
+export const SDK_VERSION = "0.2.1";
 
 // Same keys analytics.js uses, so migrating apps keep their anonymous ids.
 const ANON_KEY = "ajs_anonymous_id";
