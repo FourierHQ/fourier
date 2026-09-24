@@ -4,6 +4,7 @@
  *   pnpm seed
  */
 import { configFromEnv, ensureDefaultProject, ingest, migrateAll, parseEnvironment, upsertDefinition, type IncomingMessage } from "@fourierhq/core";
+import { seedForms } from "./seed-forms";
 
 const COMPANIES = [
   { id: "acme", name: "Acme Inc", plan: "enterprise", industry: "Manufacturing", seats: 120 },
@@ -291,6 +292,10 @@ async function main() {
   await upsertDefinition(project.id, "page_group", { id: "seed-group-blog", name: "Blog", position: 0, config: { rules: [{ op: "prefix", value: "/blog" }] } });
   await upsertDefinition(project.id, "page_group", { id: "seed-group-product", name: "Product", position: 1, config: { rules: [{ op: "prefix", value: "/product" }, { op: "exact", value: "/pricing" }] } });
   await upsertDefinition(project.id, "page_group", { id: "seed-group-docs", name: "Docs", position: 2, config: { rules: [{ op: "prefix", value: "/docs" }] } });
+
+  // Several forms behind one event, with a goal per form written out by hand — what
+  // split goals are for, and what the Conversions page offers to combine.
+  accepted += await seedForms(project, environment);
 
   console.log(`Seeded ${accepted} events into project "${project.name}" (${project.id})`);
   console.log(`Write key: ${project.write_key}`);

@@ -26,6 +26,7 @@ const eq = (key: string, value: string): PropertyFilter => ({ key, op: "eq", val
 const neq = (key: string, value: string): PropertyFilter => ({ key, op: "neq", value });
 const contains = (key: string, value: string): PropertyFilter => ({ key, op: "contains", value });
 const exists = (key: string): PropertyFilter => ({ key, op: "exists" });
+const notIn = (key: string, ...values: string[]): PropertyFilter => ({ key, op: "not_in", values });
 
 const matches = (props: Record<string, unknown> | null | undefined, ...filters: PropertyFilter[]) => eventMatches(goal(...filters), ev(props));
 
@@ -179,6 +180,23 @@ test("an integer beyond 64 bits is marked only where every ClickHouse version ag
   // ...while one that both versions answer the same way still is.
   assert.equal(matches({ plan: "pro", ids: [2 ** 64] }, eq("missing", "")), true);
   assert.equal(matches({ plan: "pro", ids: [2 ** 64] }, contains("plan", "")), true);
+});
+
+test("not_in needs no key, and compares in the same spelling as eq", () => {
+  // What a split goal's rollup and Other bucket compile to: every value but these.
+  assert.equal(matches({ form_id: "a" }, notIn("form_id", "b", "c")), true);
+  assert.equal(matches({ form_id: "b" }, notIn("form_id", "b", "c")), false);
+  assert.equal(matches({}, notIn("form_id", "b")), true, "a missing key is '', which is not excluded — the split's 'not set' row");
+  assert.equal(matches({}, notIn("form_id", "")), false, "unless '' is on the list");
+  assert.equal(matches({ form_id: 42 }, notIn("form_id", "42")), false, "a number in its own spelling");
+  assert.equal(matches({ form_id: 42 }, notIn("form_id")), true, "an empty list excludes nothing");
+});
+
+test("a nested integer beyond 64 bits is quoted, as 26.8 spells it", () => {
+  // 26.4 refuses the text, so it reads ''. Both readings have to agree for a mark.
+  assert.equal(matches({ v: [2 ** 64] }, notIn("v", '["18446744073709552000"]')), false, "26.8 has it on the list");
+  assert.equal(matches({ v: [2 ** 64] }, notIn("v", "[18446744073709552000]")), true, "neither version spells it bare");
+  assert.equal(matches({ v: [2 ** 64] }, notIn("v", "")), false, "26.4 reads '' and has that on the list");
 });
 
 test("every filter must hold, and the event name must match", () => {

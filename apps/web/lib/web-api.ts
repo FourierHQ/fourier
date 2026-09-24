@@ -4,10 +4,16 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
   Availability,
   BreakdownRow,
+  CombineProposal,
   Delta,
   FilterValues,
   Funnel,
   Goal,
+  GoalDefinition,
+  GoalSplit,
+  PropertyFilter,
+  SplitCatalog,
+  SplitKeyCandidate,
   GoalConverterRow,
   GoalDetail,
   GoalSummaryRow,
@@ -33,11 +39,19 @@ import { useWebState } from "./web-state";
 export type {
   Availability,
   BreakdownRow,
+  CombineProposal,
   CreditRow,
   Delta,
   Funnel,
   FunnelStep,
   Goal,
+  GoalDefinition,
+  GoalSplit,
+  SplitCatalog,
+  SplitCatalogValue,
+  SplitGoalConfig,
+  SplitKeyCandidate,
+  SplitValue,
   GoalConverterRow,
   GoalDetail,
   GoalSummaryRow,
@@ -98,8 +112,8 @@ export interface ScopeEcho {
     timezone: string;
   };
   filters: Record<string, unknown>;
-  goal: { id: string; name: string } | null;
-  goals: { id: string; name: string; type: "primary" | "supporting"; is_default: boolean }[];
+  goal: { id: string; name: string; split: GoalSplit | null } | null;
+  goals: { id: string; name: string; type: "primary" | "supporting"; is_default: boolean; split: GoalSplit | null }[];
   page_groups: { id: string; name: string }[];
 }
 
@@ -267,7 +281,50 @@ export function useWebFilterValues() {
 export function useWebDefinitions() {
   return useQuery({
     queryKey: ["web", "definitions"],
-    queryFn: () => api<{ goals: Goal[]; page_groups: PageGroup[] }>(`/api/projects/${PROJECT}/web/definitions`),
+    queryFn: () => api<{ goals: GoalDefinition[]; page_groups: PageGroup[]; combinable: CombineProposal[] }>(`/api/projects/${PROJECT}/web/definitions`),
+  });
+}
+
+/**
+ * Which of an event's properties are worth splitting a goal by, best first. Read from the
+ * environment on screen, like the property pickers beside it.
+ */
+export function useSplitCandidates(event: string | null | undefined, properties: PropertyFilter[] | undefined) {
+  const environment = useEnvironmentValue();
+  const name = event?.trim() ?? "";
+  const props = JSON.stringify(properties ?? []);
+  return useQuery({
+    queryKey: ["web", "split-candidates", environment, name, props],
+    queryFn: () =>
+      api<{ candidates: SplitKeyCandidate[] }>(
+        `/api/projects/${PROJECT}/web/goal-values?${new URLSearchParams({ event: name, properties: props, environment })}`,
+      ).then((r) => r.candidates),
+    enabled: Boolean(name),
+    staleTime: 60_000,
+  });
+}
+
+/** Every value a split would produce, named the way the reports will name it. */
+export function useSplitCatalog(
+  rule: { event: string; properties?: PropertyFilter[]; key: string; label_key?: string | null; type: "primary" | "supporting" } | null,
+) {
+  const environment = useEnvironmentValue();
+  const params = rule
+    ? new URLSearchParams({
+        event: rule.event.trim(),
+        properties: JSON.stringify(rule.properties ?? []),
+        key: rule.key.trim(),
+        type: rule.type,
+        environment,
+        ...(rule.label_key ? { label_key: rule.label_key } : {}),
+      }).toString()
+    : "";
+  return useQuery({
+    queryKey: ["web", "split-catalog", params],
+    queryFn: () => api<{ catalog: SplitCatalog }>(`/api/projects/${PROJECT}/web/goal-values?${params}`).then((r) => r.catalog),
+    enabled: Boolean(rule?.event.trim() && rule.key.trim()),
+    staleTime: 30_000,
+    placeholderData: (prev) => prev,
   });
 }
 

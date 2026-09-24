@@ -25,12 +25,15 @@ import { getDataClient } from "./client";
 import { browserSql, channelSql, deviceSql } from "./classify";
 import {
   type Goal,
+  type GoalConfig,
+  type GoalSplit,
   type GoalType,
   type PageGroup,
   Params,
   matchSql,
   normalizedPath,
   pageGroupSql,
+  leafGoals,
   primaryGoals,
 } from "./definitions";
 import type { Scope } from "./environments";
@@ -57,6 +60,17 @@ async function q<T = Row>(scope: Scope, query: string, params: Record<string, un
 const SESSION_TAIL_MS = 12 * 60 * 60 * 1000;
 
 /**
+ * The events a report reads to decide which sessions converted: both periods, plus the
+ * tail. A split goal lists its values from exactly this window, so every event that can
+ * complete the rollup also completes one of the rows beneath it — list them from a
+ * narrower window and a value seen only in the tail is counted by the rollup and by no
+ * row, and "any conversion", which reads the rows, misses it.
+ */
+export function goalScanWindow(range: ResolvedRange): { from: Date; to: Date } {
+  return { from: range.previous ? range.previous.from : range.current.from, to: new Date(range.current.to.getTime() + SESSION_TAIL_MS) };
+}
+
+/**
  * Ten measured foreground seconds makes a session engaged on its own. Mirrored in the
  * `engaged_base` column of sessions_resolved, which is where it is actually applied.
  */
@@ -67,20 +81,17 @@ export const ENGAGED_MS_THRESHOLD = 10_000;
 /**
  * A value against its comparison. `change` is fractional (0.12 = up 12%) and is null
  * whenever dividing would be a lie: comparison switched off, or nothing to divide by.
- * When the previous value was zero and this one is not, `is_new` says so, because the
- * honest rendering of that is "New" and not "+∞%".
+ * The two are told apart by `previous`, which is null only when comparison is off.
  */
 export interface Delta {
   current: number;
   previous: number | null;
   change: number | null;
-  is_new: boolean;
 }
 
 export function delta(current: number, previous: number | null): Delta {
-  if (previous === null) return { current, previous: null, change: null, is_new: false };
-  if (previous === 0) return { current, previous, change: null, is_new: current > 0 };
-  return { current, previous, change: (current - previous) / previous, is_new: false };
+  if (previous === null || previous === 0) return { current, previous, change: null };
+  return { current, previous, change: (current - previous) / previous };
 }
 
 /**
@@ -222,7 +233,9 @@ function sessionBase(w: WebScope): Base {
   const scanFrom = `{${p.add(chTime(range.previous ? range.previous.from : range.current.from))}:DateTime64(3,'UTC')}`;
   const scanTo = `{${p.add(chTime(new Date(range.current.to.getTime() + SESSION_TAIL_MS)))}:DateTime64(3,'UTC')}`;
 
-  const primaries = primaryGoals(w.goals);
+  // Leaves, not rollups: a split's rollup is the union of its values, so leaving it out
+  // changes nothing but the length of the predicate.
+  const primaries = leafGoals(primaryGoals(w.goals));
   // Engagement's goal leg reads EVERY primary goal, never the selected one. Otherwise
   // switching which goal you are looking at would silently move the engagement rate.
   const anyPrimary = primaries.length ? primaries.map((g) => matchSql(g.config, p)).join(" OR ") : "0";
@@ -358,7 +371,7 @@ function denseBuckets(w: WebScope, p: Params): string {
  */
 export function conversionMatchSql(w: WebScope, p: Params): string {
   if (w.goal) return matchSql(w.goal.config, p);
-  const primaries = primaryGoals(w.goals);
+  const primaries = leafGoals(primaryGoals(w.goals));
   return primaries.length ? primaries.map((g) => matchSql(g.config, p)).join(" OR ") : "0";
 }
 
@@ -834,7 +847,7 @@ export async function allPages(w: WebScope, opts: { limit?: number; groupBy?: "p
   // "CTA clickers" counts configured supporting actions. Nothing is auto-captured, so
   // with none configured this is honestly zero and the UI says the tracking is missing
   // rather than implying nobody clicked anything.
-  const supporting = w.goals.filter((g) => g.config.type === "supporting");
+  const supporting = leafGoals(w.goals).filter((g) => g.config.type === "supporting");
   const ctaMatch = supporting.length ? supporting.map((g) => matchSql(g.config, p)).join(" OR ") : "0";
 
   const rows = await q<Row>(
@@ -1133,7 +1146,8 @@ async function nextPagesAfter(w: WebScope, path: string): Promise<NextPageRow[]>
 
 /** Configured supporting actions fired on this page, and how many distinct people fired them. */
 async function pageActions(w: WebScope, path: string): Promise<PageActionRow[]> {
-  const supporting = w.goals.filter((g) => g.config.type === "supporting");
+  // Leaves, so first-match-wins names the specific value rather than the rollup holding it.
+  const supporting = leafGoals(w.goals).filter((g) => g.config.type === "supporting");
   if (!supporting.length) return [];
   const { cte, params, project, scanFrom, scanTo } = sessionBase(w);
   const p = new Params("pa");
@@ -1172,6 +1186,8 @@ export interface GoalSummaryRow {
   is_default: boolean;
   converting_sessions: Delta;
   conversion_rate: RateDelta;
+  /** Set on the rows of a split goal: the rollup, each value, and any Other bucket. */
+  split: GoalSplit | null;
 }
 
 /**
@@ -1218,6 +1234,7 @@ export async function goalSummary(w: WebScope): Promise<GoalSummaryRow[]> {
       is_default: g.is_default,
       converting_sessions: delta(cur, prevOr(w, prev)),
       conversion_rate: rateDelta([cur, sessions], prevOr(w, [prev, prevSessions] as [number, number])),
+      split: g.split ?? null,
     };
   });
 }
@@ -1344,6 +1361,7 @@ export interface SupportingActionRow {
   name: string;
   sessions: Delta;
   people: Delta;
+  split: GoalSplit | null;
 }
 
 /**
@@ -1385,6 +1403,7 @@ export async function supportingActions(w: WebScope): Promise<SupportingActionRo
     name: g.name,
     sessions: delta(num(r?.[`s${i}`]), prevOr(w, num(r?.[`sp${i}`]))),
     people: delta(num(r?.[`u${i}`]), prevOr(w, num(r?.[`up${i}`]))),
+    split: g.split ?? null,
   }));
 }
 
@@ -1883,6 +1902,9 @@ export interface GoalDetail {
   id: string;
   name: string;
   type: GoalType;
+  /** The rule as it compiles, so the drawer can say what it counts and link to its events. */
+  match: GoalConfig;
+  split: GoalSplit | null;
   /** Distinct people who completed it, whatever the list below was truncated to. */
   people: Delta;
   /** Visits in which it was completed. The Goal performance table's number, exactly. */
@@ -1938,6 +1960,8 @@ export async function goalDetail(w: WebScope, goal: Goal, opts: { limit?: number
     id: goal.id,
     name: goal.name,
     type: goal.config.type,
+    match: goal.config,
+    split: goal.split ?? null,
     ...totals,
     trend,
     converters: converters.rows,

@@ -14,7 +14,8 @@
  * from a client component, which the package root is not.
  */
 
-import type { GoalMatch, PathRule, PropertyFilter } from "./definitions";
+import type { GoalMatch, GoalType, PathRule, PropertyFilter, SplitGoalConfig } from "./definitions";
+import { nameSplitValue } from "./split-naming";
 
 /** The event shape this needs. Anything with these fields will do. */
 export interface MatchableEvent {
@@ -69,9 +70,10 @@ type Doc = Record<string, unknown> | null;
  * to 1e21. 26.8 (CI, and `latest` locally) reads it; 26.4 (production) refuses the whole
  * text over it. This cannot know which one is answering, so a goal has to hold under
  * both: never a mark the report does not count, at the price of a missing mark on 26.8.
- * Under that rule how 26.8 spells such an integer never decides anything, so it is not
- * modelled. Once 26.4 is gone, drop the second reading and teach `json` that 26.8 quotes
- * one when nested: `[2 ** 64]` reads `["18446744073709552000"]`.
+ * How 26.8 spells such an integer when it is nested is modelled in `json` —
+ * `[2 ** 64]` reads `["18446744073709552000"]` — because not_in, a negation with no
+ * presence check, is decided by it: a spelling that misses the list is a match. Once
+ * 26.4 is gone, drop the second reading.
  *
  * Checked against 26.4 and 26.8 by hand, and against CI's version by
  * goal-match.integration.mts, which runs the same rows through both sides.
@@ -163,7 +165,9 @@ function spellNumber(n: number): string {
 function json(v: unknown): string {
   if (v === null) return "null";
   if (typeof v === "string") return quote(v);
-  if (typeof v === "number") return spellNumber(v);
+  // 26.8 quotes an integer beyond 64 bits when it is nested (see serverReadings). Only a
+  // row carrying one has a second reading, so this is 26.8's reading and nobody else's.
+  if (typeof v === "number") return !Number.isSafeInteger(v) && isWide(spellNumber(v)) ? quote(spellNumber(v)) : spellNumber(v);
   if (typeof v === "boolean") return String(v);
   if (Array.isArray(v)) return `[${v.map(json).join(",")}]`;
   return `{${Object.entries(v as Record<string, unknown>)
@@ -193,6 +197,9 @@ function propertyMatches(f: PropertyFilter, doc: Doc): boolean {
     case "contains":
       // position(x, '') is 1 whatever x is, so an empty needle matches even a missing key.
       return f.value ? extract(doc, f.key).includes(f.value) : true;
+    case "not_in":
+      // No presence check, as on the SQL side: a missing value is "" and is not excluded.
+      return !(f.values ?? []).includes(extract(doc, f.key));
   }
 }
 
@@ -202,4 +209,37 @@ export function eventMatches(match: GoalMatch, e: MatchableEvent): boolean {
   const filters = match.properties ?? [];
   if (!filters.length) return true;
   return serverReadings(e.properties).every((doc) => filters.every((f) => propertyMatches(f, doc)));
+}
+
+/** Which value of a split an event is, as the goal it completes. */
+export interface SplitEventMatch {
+  value: string;
+  name: string;
+  type: GoalType;
+}
+
+/**
+ * Mirrors the expansion in ./split-goals for one event: the event and the split's own
+ * filters must hold, and the value must not be one the operator excluded. The name
+ * climbs the same ladder the reports do, minus the page-title rung, which needs every
+ * page view and is the one thing a single row cannot answer.
+ *
+ * Held to the same rule as eventMatches: under every way the server could read the
+ * event. Readings that disagree about the value mark nothing, because the report counts
+ * it under whichever one answers and a mark must never claim the other.
+ */
+export function splitEventMatch(config: SplitGoalConfig, e: MatchableEvent): SplitEventMatch | null {
+  if (e.event !== config.event) return null;
+  const readings = serverReadings(e.properties);
+  const filters = config.properties ?? [];
+  if (!readings.every((doc) => filters.every((f) => propertyMatches(f, doc)))) return null;
+  const values = new Set(readings.map((doc) => extract(doc, config.split.key)));
+  if (values.size !== 1) return null;
+  const [value] = values;
+  const override = config.split.values?.[value];
+  const type = override?.type ?? config.type;
+  if (type === "excluded") return null;
+  const label = config.split.label_key ? extract(readings[0], config.split.label_key) : null;
+  const { name } = nameSplitValue({ value, key: config.split.key, renamed: override?.name, label, labelKey: config.split.label_key });
+  return { value, name, type };
 }

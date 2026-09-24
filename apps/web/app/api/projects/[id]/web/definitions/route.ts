@@ -1,5 +1,16 @@
-import { DEFINITION_KINDS, deleteDefinition, listGoals, listPageGroups, upsertDefinition, type DefinitionKind } from "@fourierhq/core";
-import { resolveProject } from "@/lib/db";
+import {
+  DEFINITION_KINDS,
+  combinableGoals,
+  deleteDefinition,
+  inheritsDefault,
+  listGoalDefinitions,
+  listPageGroups,
+  suggestLabelKey,
+  upsertDefinition,
+  type CombineProposal,
+  type DefinitionKind,
+} from "@fourierhq/core";
+import { readScope, resolveProject } from "@/lib/db";
 import { error, handle, json, options } from "@/lib/http";
 import { requireProjectAccess } from "@/lib/auth";
 
@@ -20,13 +31,30 @@ function parseKind(v: unknown): DefinitionKind | null {
  * in production and in preview, which is what makes it possible to check that it fires
  * before shipping the tracking that fires it.
  */
-export const GET = handle(requireProjectAccess(async (_req: Request, { params }: Ctx) => {
+export const GET = handle(requireProjectAccess(async (req: Request, { params }: Ctx) => {
   const { id } = await params;
   const project = await resolveProject(id);
   if (!project) return error("Project not found", 404);
-  const [goals, pageGroups] = await Promise.all([listGoals(project.id), listPageGroups(project.id)]);
-  return json({ goals, page_groups: pageGroups });
+  const [defs, pageGroups] = await Promise.all([listGoalDefinitions(project.id), listPageGroups(project.id)]);
+  const goals = defs.map((d) => (inheritsDefault(defs, d) ? { ...d, inherits_default: true } : d));
+  return json({ goals, page_groups: pageGroups, combinable: await withLabels(combinableGoals(defs), project.id, req) });
 }));
+
+/**
+ * Proposals to combine hand-written goals into one split, with the property that names
+ * the values filled in when the data has one. A proposal is advice: if the lookup fails
+ * the proposal still goes out, just without a label property chosen for it.
+ */
+async function withLabels(proposals: CombineProposal[], projectId: string, req: Request): Promise<CombineProposal[]> {
+  if (!proposals.length) return proposals;
+  const scope = await readScope(projectId, req);
+  return Promise.all(
+    proposals.map(async (p) => {
+      const label = await suggestLabelKey(scope, p.config).catch(() => null);
+      return label ? { ...p, config: { ...p.config, split: { ...p.config.split, label_key: label } } } : p;
+    }),
+  );
+}
 
 export const POST = handle(requireProjectAccess(async (req: Request, { params }: Ctx) => {
   const { id } = await params;

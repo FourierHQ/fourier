@@ -314,6 +314,11 @@ test("every goal matches the same rows on both sides", async (t) => {
       }
     }
     for (const value of await readings(key)) fromReadings.push(goal({ key, op: "eq", value }));
+    // not_in is what a split goal's rollup and Other bucket compile to. It is the one
+    // operator with no presence check, so a missing key must read as '' and match.
+    const listed = [...values];
+    add({ key, op: "not_in", values: listed.slice(0, 3) });
+    add({ key, op: "not_in", values: listed.filter((v) => v !== "") });
   }
 
   const [sql, js] = [await sqlHits(goals), jsHits(goals)];

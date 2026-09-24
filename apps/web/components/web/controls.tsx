@@ -183,18 +183,25 @@ function GoalControl({ scope }: { scope?: ScopeEcho }) {
     <Select value={selected} onValueChange={(v) => set({ [P.goal]: v === ALL_GOALS ? null : v })}>
       <SelectTrigger size="sm" className="w-[190px]" aria-label="Conversions counted">
         <Target className="size-3.5 text-muted-foreground" />
-        <SelectValue />
+        {/* The name alone: the nesting arrow is for the list, not the closed control. */}
+        <SelectValue>{selected === ALL_GOALS ? "All conversions" : (primary.find((g) => g.id === selected)?.name ?? undefined)}</SelectValue>
       </SelectTrigger>
       <SelectContent>
         {/* First and default. A visit that completes two goals is one converting
             session here, not two — these are distinct visits, never a sum of the rows
             on the Conversions page. */}
         <SelectItem value={ALL_GOALS}>All conversions</SelectItem>
-        {primary.map((g) => (
-          <SelectItem key={g.id} value={g.id}>
-            {g.name}
-          </SelectItem>
-        ))}
+        {/* A split's values sit under its rollup. Selecting the rollup counts every value
+            that counts, selecting one value counts that value alone. */}
+        {primary.map((g) => {
+          const child = g.split && g.split.role !== "all" && primary.some((p) => p.split?.role === "all" && p.split.definition_id === g.split?.definition_id);
+          return (
+            <SelectItem key={g.id} value={g.id} className={child ? "pl-6" : undefined}>
+              {child && <span className="text-muted-foreground">↳</span>}
+              {g.name}
+            </SelectItem>
+          );
+        })}
       </SelectContent>
     </Select>
   );

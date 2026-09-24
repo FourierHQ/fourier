@@ -34,10 +34,16 @@ export const pathRuleSchema = z.object({
 
 export type PathRule = z.infer<typeof pathRuleSchema>;
 
+/**
+ * `not_in` exists for split goals, which need "every value of this property except the
+ * ones reclassified". Unlike `neq` it does not require the key to be present: an event
+ * with no value at all is still one the split has to account for, under "not set".
+ */
 export const propertyFilterSchema = z.object({
   key: z.string().min(1).max(200),
-  op: z.enum(["eq", "neq", "contains", "exists"]),
+  op: z.enum(["eq", "neq", "contains", "exists", "not_in"]),
   value: z.string().max(1000).optional(),
+  values: z.array(z.string().max(1000)).max(1000).optional(),
 });
 
 export type PropertyFilter = z.infer<typeof propertyFilterSchema>;
@@ -78,6 +84,69 @@ export const goalConfigSchema = z.intersection(
 
 export type GoalConfig = z.infer<typeof goalConfigSchema>;
 
+/**
+ * What the operator decided about one value of a split: its name, how it counts, or
+ * both. A value nothing has been decided about needs no entry — it is named from the
+ * data and counts the way the goal does.
+ */
+export const splitValueSchema = z.object({
+  /** Their name for it. Absent means the name is inferred from the data. */
+  name: z.string().trim().min(1).max(200).optional(),
+  /** Absent means "whatever the goal is". `excluded` means it counts as nothing at all. */
+  type: z.enum(["primary", "supporting", "excluded"]).optional(),
+});
+
+export type SplitValue = z.infer<typeof splitValueSchema>;
+
+export const MAX_SPLIT_OVERRIDES = 500;
+
+export const goalSplitSchema = z.object({
+  /** The property whose values each become a goal of their own. */
+  key: z.string().min(1).max(200),
+  /** A property that names each value, for splits keyed on something unreadable like an id. */
+  label_key: z.string().min(1).max(200).optional(),
+  values: z
+    .record(z.string().max(1000), splitValueSchema)
+    .refine((v) => Object.keys(v).length <= MAX_SPLIT_OVERRIDES, `At most ${MAX_SPLIT_OVERRIDES} values with a name or type of their own`)
+    .optional(),
+  /**
+   * Plain goals this one replaced when several were combined into it. They are kept, not
+   * deleted, and hidden while this goal exists. Deleting this goal brings them back, and
+   * a deployment that predates split goals goes on reading them as if nothing happened.
+   */
+  absorbs: z.array(z.string().min(1).max(200)).max(200).optional(),
+});
+
+export type GoalSplitConfig = z.infer<typeof goalSplitSchema>;
+
+/**
+ * One goal per value of a property: `Form Submitted` split by `form_id` is every form,
+ * each reported on its own, including forms added after the goal was made.
+ *
+ * `match` is a new tag rather than a flag on "event" on purpose. A deployment that does
+ * not know about splits fails to parse this and drops it, which is the documented
+ * behaviour for an unrecognised definition, rather than reading it as the unsplit event
+ * and counting every value, reclassified or excluded, as a primary conversion.
+ */
+export const splitGoalConfigSchema = z.object({
+  type: goalTypeSchema,
+  funnel: z.array(z.object({ name: z.string().min(1).max(200), match: goalMatchSchema })).max(8).optional(),
+  match: z.literal("event_split"),
+  event: z.string().min(1).max(500),
+  properties: z.array(propertyFilterSchema).max(10).optional(),
+  split: goalSplitSchema,
+});
+
+export type SplitGoalConfig = z.infer<typeof splitGoalConfigSchema>;
+
+/** Everything a stored goal can be. Reports never see the split form; it is expanded first. */
+export const goalDefinitionConfigSchema = z.union([goalConfigSchema, splitGoalConfigSchema]);
+export type GoalDefinitionConfig = z.infer<typeof goalDefinitionConfigSchema>;
+
+export function isSplitConfig(c: GoalDefinitionConfig): c is SplitGoalConfig {
+  return c.match === "event_split";
+}
+
 export const pageGroupConfigSchema = z.object({ rules: z.array(pathRuleSchema).min(1).max(20) });
 export type PageGroupConfig = z.infer<typeof pageGroupConfigSchema>;
 
@@ -105,9 +174,57 @@ export interface Definition {
   updated_at: string;
 }
 
+/**
+ * Where a goal expanded from a split came from.
+ *
+ * `all` is the split as a whole: every value that counts the way the goal does, as one
+ * row. It is a rollup of the `value` and `other` goals beside it, so anything that asks
+ * "did any goal match" or "which one matched" reads the leaves instead (see leafGoals).
+ */
+export interface GoalSplit {
+  definition_id: string;
+  definition_name: string;
+  key: string;
+  role: "all" | "value" | "other";
+  /** The property value. Empty string is "not set": the event carried no value. */
+  value?: string;
+  /** How the name was arrived at, so the UI can say "inferred from …" rather than assert it. */
+  name_source?: "renamed" | "value" | "label" | "page" | "raw" | "unset";
+  /** The page title or label a name was inferred from, when it was. */
+  name_evidence?: string;
+  /** Its first completion ever, so a value that appeared recently can be told by its date. */
+  first_seen?: string | null;
+  last_seen?: string | null;
+}
+
+/**
+ * A goal as the reports read it: one rule that compiles to one predicate. A stored split
+ * definition becomes several of these (see resolveGoals); a plain one is exactly this.
+ */
 export interface Goal extends Definition {
   kind: "goal";
   config: GoalConfig;
+  split?: GoalSplit;
+}
+
+/** A goal as it is stored and edited — possibly a split that has not been expanded. */
+export interface GoalDefinition extends Definition {
+  kind: "goal";
+  config: GoalDefinitionConfig;
+  /** Set when a split goal has absorbed this one; it is hidden while that goal exists. */
+  absorbed_by?: string;
+  /** On a split: it is the default because a goal it absorbed is (see inheritsDefault). */
+  inherits_default?: boolean;
+}
+
+/**
+ * The goals that partition the events: every plain goal and every value of a split,
+ * but not a split's rollup row. Asking "did any goal match" of these gives the same
+ * answer as asking it of all goals with fewer terms, and asking "which goal matched,
+ * first match wins" gets the specific value instead of the rollup that contains it.
+ */
+export function leafGoals(goals: Goal[]): Goal[] {
+  return goals.filter((g) => g.split?.role !== "all");
 }
 
 export interface PageGroup extends Definition {
@@ -171,9 +288,33 @@ async function selectRows(projectId: string, kind: DefinitionKind): Promise<Row[
   return (await res.json()) as Row[];
 }
 
-export async function listGoals(projectId: string): Promise<Goal[]> {
+/**
+ * Every stored goal, split or plain, including plain goals a split has absorbed — which
+ * carry `absorbed_by` so an editor can say where they went.
+ */
+export async function listGoalDefinitions(projectId: string): Promise<GoalDefinition[]> {
   const rows = await selectRows(projectId, "goal");
-  return rows.map((r) => parse(r, goalConfigSchema)).filter((g): g is Goal => g !== null).map((g) => ({ ...g, kind: "goal" as const }));
+  const defs = rows
+    .map((r) => parse(r, goalDefinitionConfigSchema))
+    .filter((g): g is Definition & { config: GoalDefinitionConfig } => g !== null)
+    .map((g) => ({ ...g, kind: "goal" as const }));
+  const absorbedBy = new Map<string, string>();
+  for (const d of defs) if (isSplitConfig(d.config)) for (const id of d.config.split.absorbs ?? []) absorbedBy.set(id, d.id);
+  return defs.map((d) => (absorbedBy.has(d.id) && !isSplitConfig(d.config) ? { ...d, absorbed_by: absorbedBy.get(d.id) } : d));
+}
+
+/**
+ * The plain goals that are in force: not splits, which need a scope to expand into
+ * goals (use resolveGoals for a report), and not goals a split has absorbed.
+ */
+export async function listGoals(projectId: string): Promise<Goal[]> {
+  return plainGoals(await listGoalDefinitions(projectId));
+}
+
+export function plainGoals(defs: GoalDefinition[]): Goal[] {
+  return defs
+    .filter((d): d is GoalDefinition & { config: GoalConfig } => !isSplitConfig(d.config) && !d.absorbed_by)
+    .map(({ absorbed_by: _, ...d }) => d);
 }
 
 export async function listPageGroups(projectId: string): Promise<PageGroup[]> {
@@ -291,8 +432,8 @@ export async function upsertDefinition(
   projectId: string,
   kind: DefinitionKind,
   input: UpsertInput,
-): Promise<Definition & { config: GoalConfig | PageGroupConfig | HiddenEventConfig }> {
-  const schema = kind === "goal" ? goalConfigSchema : kind === "page_group" ? pageGroupConfigSchema : hiddenEventConfigSchema;
+): Promise<Definition & { config: GoalDefinitionConfig | PageGroupConfig | HiddenEventConfig }> {
+  const schema = kind === "goal" ? goalDefinitionConfigSchema : kind === "page_group" ? pageGroupConfigSchema : hiddenEventConfigSchema;
   const config = schema.parse(input.config);
   const name = input.name.trim();
   if (!name) throw new Error("Name is required");
@@ -433,6 +574,12 @@ function propertyFilterSql(f: PropertyFilter, params: Params): string {
       return `(JSONHas(properties, ${key}) AND ${extracted} != {${params.add(f.value ?? "")}:String})`;
     case "contains":
       return `position(${extracted}, {${params.add(f.value ?? "")}:String}) > 0`;
+    case "not_in":
+      // No presence check, deliberately unlike `neq`: a split's "not set" row is one of
+      // the values it accounts for, and the rollup that excludes a reclassified value
+      // must still count the events that carry none.
+      if (!f.values?.length) return "1";
+      return `${extracted} NOT IN {${params.add(f.values)}:Array(String)}`;
   }
 }
 
