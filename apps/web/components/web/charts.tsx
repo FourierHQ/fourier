@@ -69,23 +69,34 @@ export function TrendChart({
 }
 
 /**
- * A dot only where the line cannot draw one.
+ * Dots on the readings, wherever the line joins across a gap.
  *
- * A series with gaps in it — buckets with nothing to divide, or nothing measured — draws
- * no segment for a value that sits between two gaps, so with dots off that reading is
- * simply not on the chart. Dots on everywhere clutter a dense series. So a dot marks
- * exactly the points no segment reaches, and nothing else.
+ * A series can have buckets with nothing in it — no visits to divide, nothing measured —
+ * and the line is joined across them, because a chart of fragments cannot be read as a
+ * trend at all. But a joined stretch is a straight line through buckets that have no
+ * value, and nothing about it says so. So when the series has a gap between its first
+ * reading and its last, every real reading gets a dot, and a stretch between two dots
+ * with none on it reads as the join it is. A series with no gaps draws no dots; leading
+ * and trailing empty buckets are not joined to anything and need none.
  */
-function isolatedDot(values: (number | null)[], color: string) {
-  const has = (i: number) => i >= 0 && i < values.length && values[i] != null;
+function readingDots(values: (number | null)[], color: string) {
+  let first = -1;
+  let last = -1;
+  values.forEach((v, i) => {
+    if (v == null) return;
+    if (first < 0) first = i;
+    last = i;
+  });
+  const gapped = first >= 0 && values.slice(first, last + 1).some((v) => v == null);
+  if (!gapped) return false;
   return ({ cx, cy, index }: DotItemDotProps) =>
-    has(index) && !has(index - 1) && !has(index + 1) && cx != null && cy != null ? <circle cx={cx} cy={cy} r={2.5} fill={color} /> : <g />;
+    values[index] != null && cx != null && cy != null ? <circle cx={cx} cy={cy} r={2.5} fill={color} /> : <g />;
 }
 
 /** A rate at one bucket, with the working behind it. */
 export interface RateSeriesPoint {
   bucket: string;
-  /** Null where there was nothing to divide by: a gap in the line, never a zero. */
+  /** Null where there was nothing to divide by: joined across, never drawn as a zero. */
   rate: number | null;
   numerator: number;
   denominator: number;
@@ -122,7 +133,7 @@ export function RateChart({
   fullScale?: boolean;
 }) {
   const rows = useMemo(() => (data ?? []).map((p) => ({ ...p, t: parseDate(p.bucket)?.getTime() ?? 0 })), [data]);
-  const dot = useMemo(() => isolatedDot(rows.map((r) => r.rate), color), [rows, color]);
+  const dot = useMemo(() => readingDots(rows.map((r) => r.rate), color), [rows, color]);
   const config = { rate: { label, color } } satisfies ChartConfig;
   if (loading && !data) return <Skeleton className={className} />;
   const fmt = tickFormatter(interval);
@@ -150,9 +161,10 @@ export function RateChart({
             />
           }
         />
-        {/* connectNulls is off: a bucket with nothing to divide has no rate, and joining
-            across the gap would draw a line through a value that does not exist. */}
-        <Line dataKey="rate" type="monotone" stroke="var(--color-rate)" strokeWidth={2} dot={dot} activeDot={{ r: 3 }} connectNulls={false} />
+        {/* Joined across buckets with nothing to divide, with the readings dotted
+            wherever it is (readingDots). Never drawn at zero: an empty bucket has no
+            rate, and a zero would claim that nobody converted. */}
+        <Line dataKey="rate" type="monotone" stroke="var(--color-rate)" strokeWidth={2} dot={dot} activeDot={{ r: 3 }} connectNulls />
       </LineChart>
     </ChartContainer>
   );
@@ -177,18 +189,19 @@ export function ConversionRateChart({
 /** Measured time at one bucket. */
 export interface DurationPoint {
   bucket: string;
-  /** Mean milliseconds. Null where nothing was measured: a gap, never zero seconds. */
+  /** Mean milliseconds. Null where nothing was measured: joined across, never zero seconds. */
   value: number | null;
   /** How many measurements the mean is over, for the tooltip. */
   measured: number;
 }
 
 /**
- * Measured time over time — a mean, so a line, and a line with gaps in it: a bucket in
- * which nothing reported a measurement is not a bucket of nobody reading, and drawing it
- * at zero would show attention collapsing on every day the SDK was not installed yet.
- * The tooltip says how many views each mean is over, because a minute averaged over one
- * view and over three hundred are different findings.
+ * Measured time over time — a mean, so a line. A bucket in which nothing reported a
+ * measurement is not a bucket of nobody reading, and drawing it at zero would show
+ * attention collapsing on every day the SDK was not installed yet; the line is joined
+ * across it instead, with the readings dotted (readingDots). The tooltip says how many
+ * views each mean is over, because a minute averaged over one view and over three
+ * hundred are different findings.
  */
 export function DurationChart({
   data,
@@ -208,7 +221,7 @@ export function DurationChart({
   color?: string;
 }) {
   const rows = useMemo(() => (data ?? []).map((p) => ({ ...p, t: parseDate(p.bucket)?.getTime() ?? 0 })), [data]);
-  const dot = useMemo(() => isolatedDot(rows.map((r) => r.value), color), [rows, color]);
+  const dot = useMemo(() => readingDots(rows.map((r) => r.value), color), [rows, color]);
   const config = { value: { label, color } } satisfies ChartConfig;
   if (loading && !data) return <Skeleton className={className} />;
   const fmt = tickFormatter(interval);
@@ -238,7 +251,7 @@ export function DurationChart({
             />
           }
         />
-        <Line dataKey="value" type="monotone" stroke="var(--color-value)" strokeWidth={2} dot={dot} activeDot={{ r: 3 }} connectNulls={false} />
+        <Line dataKey="value" type="monotone" stroke="var(--color-value)" strokeWidth={2} dot={dot} activeDot={{ r: 3 }} connectNulls />
       </LineChart>
     </ChartContainer>
   );

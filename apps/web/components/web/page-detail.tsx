@@ -71,17 +71,17 @@ const CHARTS: Record<Basis, { key: ChartKey; label: string; note: string }[]> = 
     { key: "traffic", label: "Sessions", note: "Visits that started on this page. The previous period is dashed." },
     { key: "engaged", label: "Engaged", note: "Of the visits that started here, the share that saw a second page, held attention for ten measured seconds, or completed a primary goal." },
     { key: "bounce", label: "Bounce rate", note: "Of the finished visits that started here, the share that saw no other page." },
-    { key: "time", label: "Time on page", note: "Measured time on this page per view, in visits that started here. A gap is a stretch in which nothing was measured, not one in which nobody read." },
+    { key: "time", label: "Time on page", note: "Measured time on this page per view, in visits that started here. Where nothing was measured for a while, dots mark the readings and the line joins them." },
     { key: "conversion", label: "Conv. rate", note: "Of the visits that started here, the share that converted in that same visit." },
   ],
   viewers: [
     { key: "traffic", label: "Viewers", note: "Distinct people who viewed this page. The previous period is dashed." },
-    { key: "time", label: "Time on page", note: "Measured time on this page per view. A gap is a stretch in which nothing was measured, not one in which nobody read." },
+    { key: "time", label: "Time on page", note: "Measured time on this page per view. Where nothing was measured for a while, dots mark the readings and the line joins them." },
     { key: "exit", label: "Exit rate", note: "Of this page's views in finished visits, the share that were the visit's last page." },
   ],
 };
 
-/** One rate from each bucket, as the rate chart draws it. A rate the basis does not carry is a gap. */
+/** One rate from each bucket, as the rate chart draws it. A bucket with nothing to divide has no rate, and the line joins across it. */
 const rateSeries = (points: PageTimePoint[] | undefined, pick: (p: PageTimePoint) => RateValue | null) =>
   points?.map((p) => ({ bucket: p.bucket, ...(pick(p) ?? { rate: null, numerator: 0, denominator: 0 }) }));
 
