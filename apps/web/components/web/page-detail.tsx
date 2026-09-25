@@ -1,16 +1,20 @@
 "use client";
 
+import { useState } from "react";
 import { Sheet, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { HorizontalBars, TrendChart } from "@/components/web/charts";
+import { ChannelStack, DurationChart, RateChart, TrendChart, stackColors } from "@/components/web/charts";
+import { ActiveFilters } from "@/components/web/controls";
 import { DetailSheetContent, DetailStat } from "@/components/web/detail-sheet";
 import { DeltaBadge, MetricLabel, RateCell } from "@/components/web/metric";
+import { SourceTree, type SourcePath } from "@/components/web/source-tree";
 import { Panel, QueryError } from "@/components/web/states";
 import { WENT_ON_HINT, WentOnPanel } from "@/components/web/went-on";
-import { formatNumber, formatRate, formatRatio } from "@/lib/format";
-import { errorOf, unwrap, useWebPageDetail } from "@/lib/web-api";
+import { formatDuration, formatNumber, formatRate, formatRatio } from "@/lib/format";
+import { errorOf, unwrap, useWebPageDetail, type PageDetail, type PageTimePoint, type RateValue } from "@/lib/web-api";
+import { P, useWebState } from "@/lib/web-state";
 
 type Basis = "landing" | "viewers";
 
@@ -18,12 +22,13 @@ type Basis = "landing" | "viewers";
  * Everything in the drawer that changes with the basis, in one place — so switching
  * cannot leave one section describing landings under a heading about every visit.
  */
-const COPY: Record<Basis, { scope: string; trend: string; trendLabel: string; sources: string; next: string; subject: string; actions: string }> = {
+const COPY: Record<Basis, { scope: string; trendLabel: string; time: string; sources: string; next: string; subject: string; actions: string }> = {
   landing: {
     scope: "Visits that started on this page",
-    trend: "Landing sessions over time",
     trendLabel: "Landing sessions",
-    sources: "Acquisition of the visits that landed on this page.",
+    time:
+      "Average foreground time the SDK measured on this page, per view — here, only in visits that started on it. Views that never reported leaving are left out rather than counted as zero, so the measured views can be fewer than the visits.",
+    sources: "Acquisition of the visits that landed on this page. Open a channel for the sites and campaigns inside it.",
     next:
       "The page viewed after landing here, once per visit — so “Left the site” is a bounce. Observed navigation, not intent, and a visit still in progress is not counted as having left.",
     subject: "people who landed here",
@@ -31,15 +36,54 @@ const COPY: Record<Basis, { scope: string; trend: string; trendLabel: string; so
   },
   viewers: {
     scope: "Every visit that included this page, however it began",
-    trend: "Unique viewers over time",
     trendLabel: "Unique viewers",
-    sources: "How each visit that included this page began — the channel that brought the visit, not the link that led to the page.",
+    time:
+      "Average foreground time the SDK measured on this page, per view — the All pages row's Avg. engagement. Views that never reported leaving are left out rather than counted as zero, which is why the measured views can be fewer than the page views.",
+    sources:
+      "How each visit that included this page began — the channel that brought the visit, not the link that led to the page. Open a channel for the sites and campaigns inside it.",
     next:
       "The next page view after each view of this page, in the same visit. Observed navigation, not intent, and a visit still in progress is not counted as having left.",
     subject: "people who viewed this page",
     actions: "Clickers as a share of everyone who viewed the page.",
   },
 };
+
+const ENGAGED_HINT =
+  "Engaged visits as a share of visits that started on this page. A visit is engaged if it saw more than one page, held attention for ten measured seconds, or completed one of your primary goals.";
+
+const BOUNCE_HINT =
+  "Visits that started on this page and saw no other page, as a share of those visits. Counted once a visit has finished, so someone still reading is not a bounce yet. Not the opposite of Engaged: a visit that read this one page for a minute bounced, and was engaged.";
+
+const EXIT_HINT =
+  "Views of this page that were the last page of the visit, as a share of its views — the All pages row's number. Exit rate, not bounce rate: a visit that read three pages and stopped here exits here but did not bounce. Visits still in progress count on neither side.";
+
+type ChartKey = "traffic" | "engaged" | "bounce" | "time" | "conversion" | "exit";
+
+/**
+ * What the Over time chart can draw, per basis: the strip above it, less the figures
+ * that are not a series. Engagement, bounce and conversion are offered on the landing
+ * basis only and exit rate on the viewers basis only — over the other population each
+ * is either arithmetic or another metric's double (see PageTimePoint in core) — which is
+ * why the two lists are not the same list.
+ */
+const CHARTS: Record<Basis, { key: ChartKey; label: string; note: string }[]> = {
+  landing: [
+    { key: "traffic", label: "Sessions", note: "Visits that started on this page. The previous period is dashed." },
+    { key: "engaged", label: "Engaged", note: "Of the visits that started here, the share that saw a second page, held attention for ten measured seconds, or completed a primary goal." },
+    { key: "bounce", label: "Bounce rate", note: "Of the finished visits that started here, the share that saw no other page." },
+    { key: "time", label: "Time on page", note: "Measured time on this page per view, in visits that started here. Where nothing was measured for a while, dots mark the readings and the line joins them." },
+    { key: "conversion", label: "Conv. rate", note: "Of the visits that started here, the share that converted in that same visit." },
+  ],
+  viewers: [
+    { key: "traffic", label: "Viewers", note: "Distinct people who viewed this page. The previous period is dashed." },
+    { key: "time", label: "Time on page", note: "Measured time on this page per view. Where nothing was measured for a while, dots mark the readings and the line joins them." },
+    { key: "exit", label: "Exit rate", note: "Of this page's views in finished visits, the share that were the visit's last page." },
+  ],
+};
+
+/** One rate from each bucket, as the rate chart draws it. A bucket with nothing to divide has no rate, and the line joins across it. */
+const rateSeries = (points: PageTimePoint[] | undefined, pick: (p: PageTimePoint) => RateValue | null) =>
+  points?.map((p) => ({ bucket: p.bucket, ...(pick(p) ?? { rate: null, numerator: 0, denominator: 0 }) }));
 
 /**
  * One page, in a sheet over the table it came from.
@@ -76,6 +120,26 @@ export function PageDetailSheet({
   const copy = COPY[shown];
   const stale = report.isPlaceholderData;
   const hasGoal = Boolean(scope?.goals.some((g) => g.type === "primary"));
+  const interval = scope?.range.interval ?? "day";
+
+  // Which measure the chart draws. Kept across a switch of basis where the other basis
+  // has it too, so moving between the tabs keeps Time on page on screen; where it does
+  // not, the chart falls back to traffic rather than drawing a rate the basis lacks.
+  const [chartKey, setChartKey] = useState<ChartKey>("traffic");
+  const charts = CHARTS[shown].filter((c) => c.key !== "conversion" || hasGoal);
+  const chart = charts.find((c) => c.key === chartKey) ?? charts[0];
+  const points = detail?.over_time;
+  const colorOf = stackColors(detail?.channels_over_time.channels);
+
+  // Narrowing to a row of the source tree is a filter like any other: it goes in the URL,
+  // the chips below the header show it, and every section re-reads under it. A row sets
+  // its whole path and clears anything deeper, so choosing X after a campaign of X
+  // widens back out to all of X.
+  const { get, set } = useWebState();
+  const activeSource: SourcePath | null = get(P.channel)
+    ? { channel: get(P.channel)!, referrer: get(P.referrer) ?? undefined, campaign: get(P.utmCampaign) ?? undefined }
+    : null;
+  const filterTo = (p: SourcePath) => set({ [P.channel]: p.channel, [P.referrer]: p.referrer ?? null, [P.utmCampaign]: p.campaign ?? null });
 
   return (
     <Sheet open={Boolean(path)} onOpenChange={(open) => !open && onClose()}>
@@ -96,6 +160,11 @@ export function PageDetailSheet({
             </Tabs>
             <span className="text-xs text-muted-foreground">{copy.scope}</span>
           </div>
+          {/* The control bar is behind the drawer, so what the drawer is narrowed to has
+              to be said in it — and undone from it. */}
+          <div className="pt-1 empty:hidden">
+            <ActiveFilters scope={scope} />
+          </div>
         </SheetHeader>
 
         <div className={stale ? "space-y-6 p-4 opacity-60 transition-opacity" : "space-y-6 p-4 transition-opacity"}>
@@ -103,16 +172,23 @@ export function PageDetailSheet({
             <QueryError message={errorOf(report.data?.detail)} onRetry={() => report.refetch()} />
           ) : (
             <>
-              <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+              <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
                 {shown === "landing" ? (
                   <>
                     <DetailStat label="Landing sessions" value={detail?.landing_sessions.current} sub={<DeltaBadge delta={detail?.landing_sessions} />} loading={loading} />
                     <DetailStat
-                      label="Engaged"
+                      label={<MetricLabel hint={ENGAGED_HINT}>Engaged</MetricLabel>}
                       value={formatRate(detail?.landing_engagement_rate.rate)}
                       sub={detail && formatRatio(detail.landing_engagement_rate.numerator, detail.landing_engagement_rate.denominator, "visits")}
                       loading={loading}
                     />
+                    <DetailStat
+                      label={<MetricLabel hint={BOUNCE_HINT}>Bounce rate</MetricLabel>}
+                      value={formatRate(detail?.bounce_rate?.rate)}
+                      sub={detail?.bounce_rate && formatRatio(detail.bounce_rate.numerator, detail.bounce_rate.denominator, "finished visits")}
+                      loading={loading}
+                    />
+                    <TimeOnPage detail={detail} hint={copy.time} loading={loading} />
                     <DetailStat
                       label={
                         <MetricLabel hint="Conversion within the visits that started here — the Landing pages row's number. Coming back another time to convert is in the next figure, not this one.">
@@ -136,6 +212,13 @@ export function PageDetailSheet({
                       }
                       value={detail?.sessions.current}
                       sub={detail && `${formatNumber(detail.landing_sessions.current)} landed here`}
+                      loading={loading}
+                    />
+                    <TimeOnPage detail={detail} hint={copy.time} loading={loading} />
+                    <DetailStat
+                      label={<MetricLabel hint={EXIT_HINT}>Exit rate</MetricLabel>}
+                      value={formatRate(detail?.exit_rate?.rate)}
+                      sub={detail?.exit_rate && formatRatio(detail.exit_rate.numerator, detail.exit_rate.denominator, "views")}
                       loading={loading}
                     />
                   </>
@@ -170,24 +253,73 @@ export function PageDetailSheet({
               )}
 
               <section>
-                <h3 className="mb-2 text-sm font-medium">{copy.trend}</h3>
-                <TrendChart
-                  data={detail?.trend}
-                  label={copy.trendLabel}
-                  interval={scope?.range.interval ?? "day"}
-                  loading={loading}
-                  className="h-[180px] w-full"
-                />
+                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="text-sm font-medium">Over time</h3>
+                  {/* Five measures do not fit a phone-width drawer; they scroll rather than
+                      push the whole panel sideways. */}
+                  <Tabs value={chart.key} onValueChange={(v) => setChartKey(v as ChartKey)} className="max-w-full overflow-x-auto">
+                    <TabsList className="h-7">
+                      {charts.map((c) => (
+                        <TabsTrigger key={c.key} value={c.key} className="px-2 text-[11px]">
+                          {c.label}
+                        </TabsTrigger>
+                      ))}
+                    </TabsList>
+                  </Tabs>
+                </div>
+                <p className="mb-2 text-xs text-muted-foreground">{chart.note}</p>
+                {/* Keyed on the measure, so switching draws the new line fresh rather than
+                    animating the last one into it — a bounce rate morphing out of a
+                    conversion rate is a picture of a relationship that is not there. */}
+                <div key={chart.key}>
+                  {chart.key === "traffic" ? (
+                    <TrendChart data={detail?.trend} label={copy.trendLabel} interval={interval} loading={loading} className="h-[180px] w-full" />
+                  ) : chart.key === "time" ? (
+                    <DurationChart
+                      data={points?.map((p) => ({ bucket: p.bucket, value: p.avg_engagement_ms, measured: p.measured_views }))}
+                      label="Time on page"
+                      interval={interval}
+                      loading={loading}
+                      className="h-[180px] w-full"
+                    />
+                  ) : chart.key === "engaged" ? (
+                    <RateChart data={rateSeries(points, (p) => p.engagement_rate)} label="Engaged" unit="visits" fullScale interval={interval} loading={loading} className="h-[180px] w-full" />
+                  ) : chart.key === "bounce" ? (
+                    <RateChart data={rateSeries(points, (p) => p.bounce_rate)} label="Bounce rate" unit="finished visits" fullScale interval={interval} loading={loading} className="h-[180px] w-full" />
+                  ) : chart.key === "exit" ? (
+                    <RateChart data={rateSeries(points, (p) => p.exit_rate)} label="Exit rate" unit="views" fullScale interval={interval} loading={loading} className="h-[180px] w-full" />
+                  ) : (
+                    <RateChart data={rateSeries(points, (p) => p.conversion_rate)} label="Conv. rate" unit="visits" interval={interval} loading={loading} className="h-[180px] w-full" />
+                  )}
+                </div>
               </section>
 
               <section>
                 <h3 className="mb-2 text-sm font-medium">Where visitors came from</h3>
                 <p className="mb-2 text-xs text-muted-foreground">{copy.sources}</p>
                 <div className="rounded-md border">
-                  <HorizontalBars
+                  {/* The same visits over time, above the tree of them. The channel rows
+                      are keyed to the bands by colour, so they stand in for the legend. */}
+                  {(loading || Boolean(detail?.source_tree.length)) && (
+                    <div className="border-b px-2 pt-3 pb-1">
+                      <ChannelStack
+                        channels={detail?.channels_over_time.channels}
+                        points={detail?.channels_over_time.points}
+                        interval={interval}
+                        loading={loading}
+                        legend={false}
+                        className="h-[160px] w-full"
+                      />
+                    </div>
+                  )}
+                  <SourceTree
+                    nodes={detail?.source_tree}
+                    basis={shown}
+                    colorOf={colorOf}
                     loading={loading}
+                    active={activeSource}
+                    onFilter={filterTo}
                     emptyLabel={shown === "landing" ? "No visits started on this page in the selected period." : "Nobody viewed this page in the selected period."}
-                    rows={(detail?.sources ?? []).map((s) => ({ key: s.key, value: s.sessions.current, sub: formatRate(s.share) }))}
                   />
                 </div>
               </section>
@@ -266,5 +398,17 @@ export function PageDetailSheet({
         </div>
       </DetailSheetContent>
     </Sheet>
+  );
+}
+
+/** Time on the page, for either basis: the mean, and how many views it is over. */
+function TimeOnPage({ detail, hint, loading }: { detail: PageDetail | undefined; hint: string; loading?: boolean }) {
+  return (
+    <DetailStat
+      label={<MetricLabel hint={hint}>Time on page</MetricLabel>}
+      value={formatDuration(detail?.avg_engagement_ms)}
+      sub={detail && (detail.measured_views ? `${formatNumber(detail.measured_views)} measured views` : "Nothing measured")}
+      loading={loading}
+    />
   );
 }

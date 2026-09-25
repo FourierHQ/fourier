@@ -311,6 +311,109 @@ export function channelSql(c: {
     'Direct')`;
 }
 
+// ---------- referrers ----------
+
+/**
+ * The names a site or app goes by, so the level beneath a channel reads "X" and
+ * "LinkedIn" rather than every spelling of them.
+ *
+ * One network reaches a site several ways, and each is recorded differently: a tagged
+ * link says utm_source=x, an untagged one arrives from t.co, and the same click inside
+ * the app arrives from com.twitter.android. Group by either raw column and X is split
+ * across rows — worse, the untagged share lands under "(none)" beside the tagged share,
+ * which reads as two different sources. Naming them once is what makes "which network?"
+ * answerable at all.
+ *
+ * Matched in order, first hit wins, against the utm_source and then the referrer host:
+ * a whole value or one dot-separated label of it (so "com.linkedin.android",
+ * "www.linkedin.com" and "linkedin" all hit "linkedin"), or a whole host in `hosts`,
+ * for the shorteners whose one short label would match far too much — "t" is t.co, and
+ * also t.me, which is Telegram. More specific names come before the ones they sit
+ * inside: Gemini and Gmail before Google.
+ */
+export const REFERRER_NAMES: readonly { name: string; labels: readonly string[]; hosts?: readonly string[] }[] = [
+  { name: "X", labels: ["twitter", "x"], hosts: ["t.co"] },
+  { name: "LinkedIn", labels: ["linkedin", "lnkd"] },
+  { name: "Facebook", labels: ["facebook", "fb"] },
+  { name: "Instagram", labels: ["instagram"] },
+  { name: "Threads", labels: ["threads"] },
+  { name: "Reddit", labels: ["reddit"] },
+  { name: "YouTube", labels: ["youtube", "youtu"] },
+  { name: "TikTok", labels: ["tiktok"] },
+  { name: "Pinterest", labels: ["pinterest"] },
+  { name: "Bluesky", labels: ["bsky", "bluesky"] },
+  { name: "Telegram", labels: ["telegram"], hosts: ["t.me"] },
+  { name: "WhatsApp", labels: ["whatsapp"] },
+  { name: "Discord", labels: ["discord"] },
+  { name: "Slack", labels: ["slack"] },
+  { name: "Hacker News", labels: ["ycombinator"] },
+  { name: "Medium", labels: ["medium"] },
+  { name: "Substack", labels: ["substack"] },
+  { name: "Quora", labels: ["quora"] },
+  { name: "Product Hunt", labels: ["producthunt"] },
+  { name: "GitHub", labels: ["github"] },
+  { name: "ChatGPT", labels: ["chatgpt", "openai"] },
+  { name: "Claude", labels: ["claude"] },
+  { name: "Perplexity", labels: ["perplexity"] },
+  { name: "Gemini", labels: ["gemini"] },
+  { name: "Copilot", labels: ["copilot"] },
+  { name: "Gmail", labels: [], hosts: ["mail.google.com", "com.google.android.gm"] },
+  { name: "Google", labels: ["google"] },
+  { name: "Bing", labels: ["bing"] },
+  { name: "DuckDuckGo", labels: ["duckduckgo"] },
+  { name: "Yahoo", labels: ["yahoo"] },
+  { name: "Baidu", labels: ["baidu"] },
+  { name: "Yandex", labels: ["yandex"] },
+  { name: "Ecosia", labels: ["ecosia"] },
+  { name: "Brave", labels: ["brave"] },
+];
+
+/** The known name for a utm_source or host, or "" when it is not one of REFERRER_NAMES. */
+function referrerName(value: string): string {
+  const v = lc(value);
+  if (!v) return "";
+  const parts = [v, ...labels(v)];
+  for (const r of REFERRER_NAMES) {
+    if (r.hosts?.includes(v) || parts.some((p) => r.labels.includes(p))) return r.name;
+  }
+  return "";
+}
+
+/**
+ * The site or app that sent a visit — the level beneath its channel.
+ *
+ * The campaign tag's source when the link carried one, because that is the claim the
+ * marketer made, and the same order the channel follows. Otherwise the referrer, when
+ * it is another site: a visit that arrived from the site's own pages has no referrer to
+ * report, which is exactly how the channel calls it Direct. Either way a known network
+ * is given its name; anything else is shown as it arrived — the tag as typed, the host
+ * without its "www.". Empty when there is nothing to name.
+ */
+export function classifyReferrer(e: Pick<Entry, "utm_source" | "referrer_host" | "entry_host">): string {
+  const source = (e.utm_source ?? "").trim();
+  if (source) return referrerName(source) || source;
+  const refHost = lc(e.referrer_host);
+  if (refHost && refHost !== lc(e.entry_host)) return referrerName(refHost) || refHost.replace(/^www\./, "");
+  return "";
+}
+
+/** ClickHouse expression returning classifyReferrer's answer over the three columns it reads. */
+export function referrerSql(c: { utm_source: string; referrer_host: string; entry_host: string }): string {
+  const names = sqlArray(REFERRER_NAMES.map((r) => r.name));
+  const labelLists = `[${REFERRER_NAMES.map((r) => sqlArray(r.labels)).join(", ")}]`;
+  const hostLists = `[${REFERRER_NAMES.map((r) => sqlArray(r.hosts ?? [])).join(", ")}]`;
+  // The first name whose hosts or labels match, or '' — one pass over the list per value,
+  // written as array functions so the expression stays one expression per column.
+  const nameOf = (v: string) =>
+    `arrayFirst(n -> n != '', arrayMap((n, ls, hs) -> if(has(hs, ${v}) OR hasAny(ls, arrayPushBack(splitByChar('.', ${v}), ${v})), n, ''), ${names}, ${labelLists}, ${hostLists}))`;
+  const source = `trimBoth(${c.utm_source})`;
+  const ref = `lower(trimBoth(${c.referrer_host}))`;
+  return `multiIf(
+    ${source} != '', ifNull(nullIf(${nameOf(`lower(${source})`)}, ''), ${source}),
+    ${ref} != '' AND ${ref} != lower(trimBoth(${c.entry_host})), ifNull(nullIf(${nameOf(ref)}, ''), replaceRegexpOne(${ref}, '^www\\\\.', '')),
+    '')`;
+}
+
 // ---------- device and browser ----------
 //
 // Filter dimensions only. Fourier deliberately has no device or browser report — that
