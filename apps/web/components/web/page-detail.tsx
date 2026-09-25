@@ -5,13 +5,16 @@ import { Sheet, SheetDescription, SheetHeader, SheetTitle } from "@/components/u
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { ChannelStack, DurationChart, HorizontalBars, RateChart, TrendChart, stackColors } from "@/components/web/charts";
+import { ChannelStack, DurationChart, RateChart, TrendChart, stackColors } from "@/components/web/charts";
+import { ActiveFilters } from "@/components/web/controls";
 import { DetailSheetContent, DetailStat } from "@/components/web/detail-sheet";
 import { DeltaBadge, MetricLabel, RateCell } from "@/components/web/metric";
+import { SourceTree, type SourcePath } from "@/components/web/source-tree";
 import { Panel, QueryError } from "@/components/web/states";
 import { WENT_ON_HINT, WentOnPanel } from "@/components/web/went-on";
 import { formatDuration, formatNumber, formatRate, formatRatio } from "@/lib/format";
 import { errorOf, unwrap, useWebPageDetail, type PageDetail, type PageTimePoint, type RateValue } from "@/lib/web-api";
+import { P, useWebState } from "@/lib/web-state";
 
 type Basis = "landing" | "viewers";
 
@@ -25,7 +28,7 @@ const COPY: Record<Basis, { scope: string; trendLabel: string; time: string; sou
     trendLabel: "Landing sessions",
     time:
       "Average foreground time the SDK measured on this page, per view — here, only in visits that started on it. Views that never reported leaving are left out rather than counted as zero, so the measured views can be fewer than the visits.",
-    sources: "Acquisition of the visits that landed on this page.",
+    sources: "Acquisition of the visits that landed on this page. Open a channel for the sites and campaigns inside it.",
     next:
       "The page viewed after landing here, once per visit — so “Left the site” is a bounce. Observed navigation, not intent, and a visit still in progress is not counted as having left.",
     subject: "people who landed here",
@@ -36,7 +39,8 @@ const COPY: Record<Basis, { scope: string; trendLabel: string; time: string; sou
     trendLabel: "Unique viewers",
     time:
       "Average foreground time the SDK measured on this page, per view — the All pages row's Avg. engagement. Views that never reported leaving are left out rather than counted as zero, which is why the measured views can be fewer than the page views.",
-    sources: "How each visit that included this page began — the channel that brought the visit, not the link that led to the page.",
+    sources:
+      "How each visit that included this page began — the channel that brought the visit, not the link that led to the page. Open a channel for the sites and campaigns inside it.",
     next:
       "The next page view after each view of this page, in the same visit. Observed navigation, not intent, and a visit still in progress is not counted as having left.",
     subject: "people who viewed this page",
@@ -127,6 +131,16 @@ export function PageDetailSheet({
   const points = detail?.over_time;
   const colorOf = stackColors(detail?.channels_over_time.channels);
 
+  // Narrowing to a row of the source tree is a filter like any other: it goes in the URL,
+  // the chips below the header show it, and every section re-reads under it. A row sets
+  // its whole path and clears anything deeper, so choosing X after a campaign of X
+  // widens back out to all of X.
+  const { get, set } = useWebState();
+  const activeSource: SourcePath | null = get(P.channel)
+    ? { channel: get(P.channel)!, referrer: get(P.referrer) ?? undefined, campaign: get(P.utmCampaign) ?? undefined }
+    : null;
+  const filterTo = (p: SourcePath) => set({ [P.channel]: p.channel, [P.referrer]: p.referrer ?? null, [P.utmCampaign]: p.campaign ?? null });
+
   return (
     <Sheet open={Boolean(path)} onOpenChange={(open) => !open && onClose()}>
       <DetailSheetContent>
@@ -145,6 +159,11 @@ export function PageDetailSheet({
               </TabsList>
             </Tabs>
             <span className="text-xs text-muted-foreground">{copy.scope}</span>
+          </div>
+          {/* The control bar is behind the drawer, so what the drawer is narrowed to has
+              to be said in it — and undone from it. */}
+          <div className="pt-1 empty:hidden">
+            <ActiveFilters scope={scope} />
           </div>
         </SheetHeader>
 
@@ -279,9 +298,9 @@ export function PageDetailSheet({
                 <h3 className="mb-2 text-sm font-medium">Where visitors came from</h3>
                 <p className="mb-2 text-xs text-muted-foreground">{copy.sources}</p>
                 <div className="rounded-md border">
-                  {/* The same visits over time, above the ranking of them. The list is
-                      keyed to the bands by colour, so it stands in for the legend. */}
-                  {(loading || Boolean(detail?.sources.length)) && (
+                  {/* The same visits over time, above the tree of them. The channel rows
+                      are keyed to the bands by colour, so they stand in for the legend. */}
+                  {(loading || Boolean(detail?.source_tree.length)) && (
                     <div className="border-b px-2 pt-3 pb-1">
                       <ChannelStack
                         channels={detail?.channels_over_time.channels}
@@ -293,10 +312,14 @@ export function PageDetailSheet({
                       />
                     </div>
                   )}
-                  <HorizontalBars
+                  <SourceTree
+                    nodes={detail?.source_tree}
+                    basis={shown}
+                    colorOf={colorOf}
                     loading={loading}
+                    active={activeSource}
+                    onFilter={filterTo}
                     emptyLabel={shown === "landing" ? "No visits started on this page in the selected period." : "Nobody viewed this page in the selected period."}
-                    rows={(detail?.sources ?? []).map((s) => ({ key: s.key, value: s.sessions.current, sub: formatRate(s.share), color: colorOf(s.key) }))}
                   />
                 </div>
               </section>

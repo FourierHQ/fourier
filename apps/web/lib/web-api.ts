@@ -62,6 +62,7 @@ export type {
   PageGroup,
   PageRow,
   PageTimePoint,
+  SourceNode,
   RateValue,
   RateDelta,
   RatePoint,

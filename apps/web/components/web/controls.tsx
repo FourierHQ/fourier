@@ -167,6 +167,7 @@ function CompareControl({ scope }: { scope?: ScopeEcho }) {
 
 const FILTER_LABELS: Record<string, string> = {
   [P.channel]: "Channel",
+  [P.referrer]: "Referrer",
   [P.utmSource]: "Campaign source",
   [P.utmMedium]: "Campaign medium",
   [P.utmCampaign]: "Campaign",
@@ -282,6 +283,10 @@ function FilterMenu({ scope }: { scope?: ScopeEcho }) {
         <GoalSection scope={scope} />
         {group(P.visitor, "Visitor", ["new", "returning"], (o) => (o === "new" ? "New" : "Returning"))}
         {group(P.channel, "Channel", v?.channels ?? [])}
+        {/* The site or app that sent the visit, with a network's many addresses named
+            once: X, not t.co and x and the X app. Beside Campaign source, which is the
+            tag exactly as typed. */}
+        {group(P.referrer, "Referrer", v?.referrers ?? [])}
         {group(P.utmSource, "Campaign source", v?.sources ?? [])}
         {group(P.utmMedium, "Campaign medium", v?.mediums ?? [])}
         {group(P.utmCampaign, "Campaign", v?.campaigns ?? [])}

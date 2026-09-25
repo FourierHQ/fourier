@@ -22,11 +22,13 @@ import {
   channelSql,
   classifyBrowser,
   classifyChannel,
+  classifyReferrer,
   classifyDevice,
   configFromEnv,
   deviceSql,
   getAdminClient,
   isBot,
+  referrerSql,
   type Entry,
 } from "../src/index";
 
@@ -116,6 +118,53 @@ test("channel classification: the answers are the ones intended", async () => {
     [{ pageviews: 0, entry_host: "example.com" }, "Unattributed"],
   ];
   for (const [entry, want] of expect) assert.equal(classifyChannel(entry), want, JSON.stringify(entry));
+});
+
+// ---------- referrers ----------
+
+// The shapes a single network actually arrives in, taken from production traffic.
+const REFERRER_CASES: [Entry, string][] = [
+  [{ pageviews: 1, referrer_host: "t.co", entry_host: "example.com" }, "X"],
+  [{ pageviews: 1, utm_source: "x", utm_medium: "social", referrer_host: "t.co", entry_host: "example.com" }, "X"],
+  [{ pageviews: 1, utm_source: "x", utm_medium: "social", entry_host: "example.com" }, "X"],
+  [{ pageviews: 1, referrer_host: "com.twitter.android", entry_host: "example.com" }, "X"],
+  [{ pageviews: 1, utm_source: "Twitter", entry_host: "example.com" }, "X"],
+  [{ pageviews: 1, referrer_host: "www.linkedin.com", entry_host: "example.com" }, "LinkedIn"],
+  [{ pageviews: 1, referrer_host: "com.linkedin.android", entry_host: "example.com" }, "LinkedIn"],
+  [{ pageviews: 1, referrer_host: "lnkd.in", entry_host: "example.com" }, "LinkedIn"],
+  [{ pageviews: 1, utm_source: "linkedin", referrer_host: "lnkd.in", entry_host: "example.com" }, "LinkedIn"],
+  // t.me is Telegram, not X: the shortener is matched as a whole host, never as "t".
+  [{ pageviews: 1, referrer_host: "t.me", entry_host: "example.com" }, "Telegram"],
+  [{ pageviews: 1, referrer_host: "org.telegram.messenger", entry_host: "example.com" }, "Telegram"],
+  [{ pageviews: 1, referrer_host: "news.ycombinator.com", entry_host: "example.com" }, "Hacker News"],
+  [{ pageviews: 1, referrer_host: "www.producthunt.com", entry_host: "example.com" }, "Product Hunt"],
+  [{ pageviews: 1, utm_source: "producthunt", utm_medium: "social", entry_host: "example.com" }, "Product Hunt"],
+  [{ pageviews: 1, referrer_host: "www.google.co.uk", entry_host: "example.com" }, "Google"],
+  [{ pageviews: 1, referrer_host: "com.google.android.googlequicksearchbox", entry_host: "example.com" }, "Google"],
+  [{ pageviews: 1, referrer_host: "gemini.google.com", entry_host: "example.com" }, "Gemini"],
+  [{ pageviews: 1, referrer_host: "com.google.android.gm", entry_host: "example.com" }, "Gmail"],
+  [{ pageviews: 1, utm_source: "chatgpt.com", referrer_host: "chatgpt.com", entry_host: "example.com" }, "ChatGPT"],
+  [{ pageviews: 1, utm_source: "google", utm_medium: "cpc", referrer_host: "www.google.com", entry_host: "example.com" }, "Google"],
+  // The tag is the claim the marketer made, so it wins over where the click happened.
+  [{ pageviews: 1, utm_source: "newsletter", referrer_host: "t.co", entry_host: "example.com" }, "newsletter"],
+  // Unknown values arrive as they were: the tag as typed, the host without its www.
+  [{ pageviews: 1, utm_source: "hs_email", utm_medium: "email", entry_host: "example.com" }, "hs_email"],
+  [{ pageviews: 1, utm_source: " Partner Site ", entry_host: "example.com" }, "Partner Site"],
+  [{ pageviews: 1, referrer_host: "www.someblog.dev", entry_host: "example.com" }, "someblog.dev"],
+  // No tag and no other site: nothing to name. The site's own pages are not a referrer.
+  [{ pageviews: 1, referrer_host: "example.com", entry_host: "example.com" }, ""],
+  [{ pageviews: 1, entry_host: "example.com" }, ""],
+  [{ pageviews: 0, entry_host: "example.com" }, ""],
+];
+
+test("referrers: SQL and TypeScript return the same answer, and it is the intended one", async () => {
+  const cols = ["utm_source", "referrer_host", "entry_host"];
+  const rows = REFERRER_CASES.map(([c]) => ({ utm_source: c.utm_source ?? "", referrer_host: c.referrer_host ?? "", entry_host: c.entry_host ?? "" }));
+  const fromSql = await evaluate<string>(referrerSql({ utm_source: "utm_source", referrer_host: "referrer_host", entry_host: "entry_host" }), rows, cols);
+  REFERRER_CASES.forEach(([c, want], i) => {
+    assert.equal(classifyReferrer(c), want, `TypeScript, case ${i}: ${JSON.stringify(c)}`);
+    assert.equal(fromSql[i], want, `SQL, case ${i}: ${JSON.stringify(c)}`);
+  });
 });
 
 // ---------- bots ----------

@@ -22,7 +22,7 @@
  */
 
 import { getDataClient } from "./client";
-import { browserSql, channelSql, deviceSql } from "./classify";
+import { browserSql, channelSql, deviceSql, referrerSql } from "./classify";
 import {
   type Goal,
   type GoalConfig,
@@ -150,6 +150,8 @@ export interface WebFilters {
   utmSource?: string | null;
   utmMedium?: string | null;
   utmCampaign?: string | null;
+  /** The site or app that sent the visit, as classifyReferrer names it: "X", "LinkedIn", "someblog.dev". */
+  referrer?: string | null;
   country?: string | null;
   device?: string | null;
   browser?: string | null;
@@ -252,6 +254,7 @@ function sessionBase(w: WebScope): Base {
   eq("s.utm_source", filters.utmSource);
   eq("s.utm_medium", filters.utmMedium);
   eq("s.utm_campaign", filters.utmCampaign);
+  eq(referrerSql({ utm_source: "s.utm_source", referrer_host: "s.referrer_host", entry_host: "s.entry_host" }), filters.referrer);
   eq("s.country", filters.country);
   eq(deviceSql("s.user_agent"), filters.device);
   eq(browserSql("s.user_agent"), filters.browser);
@@ -314,6 +317,7 @@ function sessionBase(w: WebScope): Base {
       s.utm_medium AS utm_medium,
       s.utm_campaign AS utm_campaign,
       s.referrer_host AS referrer_host,
+      ${referrerSql({ utm_source: "s.utm_source", referrer_host: "s.referrer_host", entry_host: "s.entry_host" })} AS referrer,
       s.country AS country,
       ${deviceSql("s.user_agent")} AS device,
       ${browserSql("s.user_agent")} AS browser,
@@ -1262,7 +1266,8 @@ export interface PageDetail {
   title: string;
   basis: PageBasis;
   trend: SeriesPoint[];
-  sources: BreakdownRow[];
+  /** Channel, then referrer, then campaign, each with the quality figures for its own visits. */
+  source_tree: SourceNode[];
   next_pages: NextPageRow[];
   actions: PageActionRow[];
   /**
@@ -1307,7 +1312,8 @@ export interface PageDetail {
 }
 
 /**
- * One bucket of the drawer's quality figures.
+ * The drawer's quality figures for one slice of the visits on a basis: a bucket of the
+ * chart, or a channel, referrer or campaign in the source tree.
  *
  * Each rate is present only on the basis it is honest for, and null on the other:
  *
@@ -1323,14 +1329,10 @@ export interface PageDetail {
  *
  * Bounce and exit count only visits that have gone quiet for SESSION_SETTLED_MS, on both
  * sides of the division — someone still reading the page has not left it — so in a live
- * bucket their denominators are smaller than the visit count beside them.
- *
- * A visit belongs to the bucket it started in, as it belongs to the period it started
- * in, so every count here is additive across buckets and the totals are their sums.
+ * slice their denominators are smaller than the visit count beside them.
  */
-export interface PageTimePoint {
-  bucket: string;
-  /** Null where nothing was measured in the bucket: a gap in the line, not a zero. */
+export interface PageQualityFigures {
+  /** Null where nothing was measured: a gap in the line, not a zero. */
   avg_engagement_ms: number | null;
   measured_views: number;
   engagement_rate: RateValue | null;
@@ -1340,11 +1342,33 @@ export interface PageTimePoint {
   conversion_rate: RateValue | null;
 }
 
+/**
+ * One bucket of the chart. A visit belongs to the bucket it started in, as it belongs to
+ * the period it started in, so every count is additive across buckets and the headline
+ * figures are their sums.
+ */
+export interface PageTimePoint extends PageQualityFigures {
+  bucket: string;
+}
+
+/** One row of the source tree: a channel, a referrer within it, or a campaign within that. */
+export interface SourceNode extends PageQualityFigures {
+  /** The channel, referrer or campaign. Empty where the visits had none: no referrer to name, an untagged link. */
+  key: string;
+  level: "channel" | "referrer" | "campaign";
+  visits: number;
+  /** Of every visit on the basis, 0-100. */
+  share: number;
+  /** The row summing whatever is past the biggest few at its level. Not a value, so not one to filter by. */
+  rest: boolean;
+  children: SourceNode[];
+}
+
 export async function pageDetail(w: WebScope, path: string, opts: { basis?: PageBasis } = {}): Promise<PageDetail> {
   const basis = opts.basis ?? "landing";
-  const [trendPoints, sources, nextPages, actions, totals, went, baseline, quality, channels] = await Promise.all([
+  const [trendPoints, sourceTree, nextPages, actions, totals, went, baseline, quality, channels] = await Promise.all([
     pageTrend(w, path, basis),
-    pageSources(w, path, basis),
+    pageSourceTree(w, path, basis),
     nextPagesAfter(w, path, basis),
     pageActions(w, path, basis),
     pageTotals(w, path),
@@ -1358,7 +1382,7 @@ export async function pageDetail(w: WebScope, path: string, opts: { basis?: Page
     title: totals.title,
     basis,
     trend: trendPoints,
-    sources,
+    source_tree: sourceTree,
     next_pages: nextPages,
     actions,
     click_rate_basis: "page_viewers",
@@ -1519,50 +1543,69 @@ async function pageTrend(w: WebScope, path: string, basis: PageBasis): Promise<S
   return rows.map((r) => ({ bucket: String(r.bucket), value: num(r.value), previous: hasPrev(w) ? num(r.previous) : null }));
 }
 
-/** Where the visits on this basis came from. */
-async function pageSources(w: WebScope, path: string, basis: PageBasis): Promise<BreakdownRow[]> {
-  const { cte, params, project, scanFrom, scanTo } = sessionBase(w);
-  const p = new Params("ps");
-  const target = `{${p.add(path)}:String}`;
-  const rows = await q<Row>(
-    w.scope,
-    `${cte},
-     ${pageSessionsCte(basis, target, project, scanFrom, scanTo)},
-     on_page AS (SELECT * FROM scoped WHERE session_id IN (SELECT session_id FROM page_sessions)),
-     totals AS (SELECT uniqExactIf(session_id, period = 'current') AS total FROM on_page)
-     SELECT
-       if(channel = '', '(none)', channel) AS key,
-       uniqExactIf(session_id, period = 'current') AS sessions,
-       uniqExactIf(session_id, period = 'previous') AS prev_sessions,
-       uniqExactIf(session_id, period = 'current' AND engaged = 1) AS engaged_sessions,
-       uniqExactIf(session_id, period = 'current' AND converted = 1) AS converting,
-       if((SELECT total FROM totals) > 0, uniqExactIf(session_id, period = 'current') / (SELECT total FROM totals) * 100, 0) AS share
-     FROM on_page
-     GROUP BY key HAVING sessions > 0 ORDER BY sessions DESC LIMIT 10`,
-    { ...params, ...p.values },
-  );
-  return rows.map((r) => {
-    const sessions = num(r.sessions);
-    return {
-      key: String(r.key),
-      sessions: delta(sessions, prevOr(w, num(r.prev_sessions))),
-      share: num(r.share),
-      engagement_rate: rate(num(r.engaged_sessions), sessions),
-      converting_sessions: num(r.converting),
-      conversion_rate: rate(num(r.converting), sessions),
-    };
-  });
-}
-
 type PageQuality = Pick<PageDetail, "avg_engagement_ms" | "measured_views" | "bounce_rate" | "exit_rate" | "over_time">;
 
 /**
- * Time on the page, engagement, bounce and exit, per bucket and in total, for the visits
- * on the basis on screen. See PageTimePoint for which rate belongs to which basis.
- *
- * One scan, counted per visit and then per bucket, with the totals summed from the
- * buckets in TypeScript rather than asked for separately: a headline that is the sum of
- * the chart beneath it cannot disagree with it.
+ * The counts every quality figure is divided out of. Each is a count of visits, or a sum
+ * over visits, and a visit belongs to exactly one bucket and one channel, referrer and
+ * campaign — so every one of them is additive: a total is the sum of its buckets, and a
+ * channel the sum of its referrers.
+ */
+interface QualityCounts {
+  visits: number;
+  engaged: number;
+  converting: number;
+  /** Visits that have gone quiet for SESSION_SETTLED_MS: the bounce denominator. */
+  finished: number;
+  bounced: number;
+  exits: number;
+  /** This page's views in finished visits: the exit denominator. */
+  finished_views: number;
+  eng_total: number;
+  measured: number;
+}
+
+/**
+ * How each count is taken over `quality_visits`. Prefixed so that none shares a name
+ * with a column its own -If condition reads: ClickHouse resolves those against the
+ * SELECT's aliases first.
+ */
+const QUALITY_COUNTS: [keyof QualityCounts, string, string][] = [
+  ["visits", "n_visits", "uniqExact(session_id)"],
+  ["engaged", "n_engaged", "uniqExactIf(session_id, engaged = 1)"],
+  ["converting", "n_converting", "uniqExactIf(session_id, converted = 1)"],
+  ["finished", "n_finished", "uniqExactIf(session_id, is_settled = 1)"],
+  ["bounced", "n_bounced", "uniqExactIf(session_id, is_bounce = 1)"],
+  ["exits", "n_exits", "uniqExactIf(session_id, is_exit = 1)"],
+  ["finished_views", "n_finished_views", "sum(finished_views)"],
+  ["eng_total", "n_eng_total", "sum(eng_total)"],
+  ["measured", "n_measured", "sum(measured)"],
+];
+const qualityCountsSql = QUALITY_COUNTS.map(([, name, expr]) => `${expr} AS ${name}`).join(",\n       ");
+const countsOf = (r: Row): QualityCounts =>
+  Object.fromEntries(QUALITY_COUNTS.map(([key, name]) => [key, num(r[name])])) as unknown as QualityCounts;
+const addCounts = (a: QualityCounts, b: QualityCounts, sign = 1): QualityCounts =>
+  Object.fromEntries(QUALITY_COUNTS.map(([key]) => [key, a[key] + sign * b[key]])) as unknown as QualityCounts;
+const NO_COUNTS = Object.fromEntries(QUALITY_COUNTS.map(([key]) => [key, 0])) as unknown as QualityCounts;
+
+/** The figures for one slice of the visits, each on the basis it is honest for. See PageQualityFigures. */
+function qualityOf(c: QualityCounts, basis: PageBasis, withGoal: boolean): PageQualityFigures {
+  const landing = basis === "landing";
+  return {
+    avg_engagement_ms: c.measured > 0 ? c.eng_total / c.measured : null,
+    measured_views: c.measured,
+    engagement_rate: landing ? rate(c.engaged, c.visits) : null,
+    bounce_rate: landing ? rate(c.bounced, c.finished) : null,
+    exit_rate: landing ? null : rate(c.exits, c.finished_views),
+    conversion_rate: landing && withGoal ? rate(c.converting, c.visits) : null,
+  };
+}
+
+/**
+ * The visits on a basis, one row each, carrying everything the quality figures count
+ * and everything they are sliced by. Ends in a CTE named `quality_visits`; the chart
+ * groups it by bucket and the source tree by channel, referrer and campaign, so both
+ * count the same visits the same way.
  *
  * Each measure is counted the way the row it matches counts it. A bounce is a finished
  * visit that saw one page — the "Left the site" row of the landing basis's next pages,
@@ -1571,23 +1614,14 @@ type PageQuality = Pick<PageDetail, "avg_engagement_ms" | "measured_views" | "bo
  * pages row, restricted to nothing. Time on the page is summed out of this page's own
  * $page_leave measurements, averaged over the views that reported one, as All pages does.
  */
-async function pageQuality(w: WebScope, path: string, basis: PageBasis): Promise<PageQuality> {
-  const { cte, params, project, scanFrom, scanTo } = sessionBase(w);
-  const p = new Params("pq");
-  const target = `{${p.add(path)}:String}`;
-  const landing = basis === "landing";
-  const withGoal = hasGoal(w);
-  const rows = await q<Row>(
-    w.scope,
-    `${cte},
-     ${denseBuckets(w, p)},
-     ${pageSessionsCte(basis, target, project, scanFrom, scanTo)},
+function qualityVisitsCtes(basis: PageBasis, target: string, project: string, scanFrom: string, scanTo: string): string {
+  return `${pageSessionsCte(basis, target, project, scanFrom, scanTo)},
      settled AS (
        SELECT session_id FROM scoped WHERE period = 'current'
        GROUP BY session_id HAVING max(ended_at) < now64(3) - toIntervalMillisecond({settled:Int64})
      ),
      page_visits AS (
-       SELECT session_id, started_at, engaged, converted, pageviews, exit_path,
+       SELECT session_id, started_at, engaged, converted, pageviews, exit_path, channel, referrer, utm_campaign,
               toUInt8(session_id IN (SELECT session_id FROM settled)) AS is_settled
        FROM scoped
        WHERE period = 'current' AND session_id IN (SELECT session_id FROM page_sessions)
@@ -1606,89 +1640,182 @@ async function pageQuality(w: WebScope, path: string, basis: PageBasis): Promise
          AND ${normalizedPath("e.path")} = ${target}
          AND e.session_id IN (SELECT session_id FROM page_visits)
        GROUP BY session_id
-     )
-     -- The counts are prefixed so that none shares a name with a column its own -If
-     -- condition reads: ClickHouse resolves those against the SELECT's aliases first.
+     ),
+     quality_visits AS (
+       SELECT
+         v.session_id AS session_id,
+         v.started_at AS started_at,
+         -- Labelled as the channel chart labels them, so a band and a row agree.
+         if(v.channel = '', '(none)', v.channel) AS k_channel,
+         v.referrer AS k_referrer,
+         v.utm_campaign AS k_campaign,
+         v.engaged AS engaged,
+         v.converted AS converted,
+         v.is_settled AS is_settled,
+         toUInt8(v.is_settled = 1 AND v.pageviews <= 1) AS is_bounce,
+         toUInt8(v.is_settled = 1 AND v.exit_path = ${target}) AS is_exit,
+         if(v.is_settled = 1, o.views, 0) AS finished_views,
+         o.eng_total AS eng_total,
+         o.measured AS measured
+       FROM page_visits AS v
+       LEFT JOIN on_page AS o ON o.session_id = v.session_id
+     )`;
+}
+
+/**
+ * Time on the page, engagement, bounce and exit, per bucket and in total, for the visits
+ * on the basis on screen. See PageQualityFigures for which rate belongs to which basis.
+ *
+ * One scan, counted per bucket, with the totals summed from the buckets in TypeScript
+ * rather than asked for separately: a headline that is the sum of the chart beneath it
+ * cannot disagree with it.
+ */
+async function pageQuality(w: WebScope, path: string, basis: PageBasis): Promise<PageQuality> {
+  const { cte, params, project, scanFrom, scanTo } = sessionBase(w);
+  const p = new Params("pq");
+  const target = `{${p.add(path)}:String}`;
+  const withGoal = hasGoal(w);
+  const rows = await q<Row>(
+    w.scope,
+    `${cte},
+     ${denseBuckets(w, p)},
+     ${qualityVisitsCtes(basis, target, project, scanFrom, scanTo)}
      SELECT
        b.bucket AS bucket,
-       ifNull(a.n_visits, 0) AS n_visits,
-       ifNull(a.n_engaged, 0) AS n_engaged,
-       ifNull(a.n_converting, 0) AS n_converting,
-       ifNull(a.n_finished, 0) AS n_finished,
-       ifNull(a.n_bounced, 0) AS n_bounced,
-       ifNull(a.n_exits, 0) AS n_exits,
-       ifNull(a.n_finished_views, 0) AS n_finished_views,
-       ifNull(a.n_eng_total, 0) AS n_eng_total,
-       ifNull(a.n_measured, 0) AS n_measured
+       ${QUALITY_COUNTS.map(([, name]) => `ifNull(a.${name}, 0) AS ${name}`).join(", ")}
      FROM buckets AS b
      LEFT JOIN (
        SELECT
-         ${bucketSql("v.started_at", w.range.interval, w.range.timezone)} AS bucket,
-         uniqExact(v.session_id) AS n_visits,
-         uniqExactIf(v.session_id, v.engaged = 1) AS n_engaged,
-         uniqExactIf(v.session_id, v.converted = 1) AS n_converting,
-         uniqExactIf(v.session_id, v.is_settled = 1) AS n_finished,
-         uniqExactIf(v.session_id, v.is_settled = 1 AND v.pageviews <= 1) AS n_bounced,
-         uniqExactIf(v.session_id, v.is_settled = 1 AND v.exit_path = ${target}) AS n_exits,
-         sumIf(o.views, v.is_settled = 1) AS n_finished_views,
-         sum(o.eng_total) AS n_eng_total,
-         sum(o.measured) AS n_measured
-       FROM page_visits AS v
-       LEFT JOIN on_page AS o ON o.session_id = v.session_id
+         ${bucketSql("started_at", w.range.interval, w.range.timezone)} AS bucket,
+         ${qualityCountsSql}
+       FROM quality_visits
        GROUP BY bucket
      ) AS a ON a.bucket = b.bucket
      ORDER BY b.bucket`,
     { ...params, ...p.values, tz: w.range.timezone, leave: PAGE_LEAVE, settled: SESSION_SETTLED_MS },
   );
 
-  const counts = rows.map((r) => ({
-    bucket: String(r.bucket),
-    visits: num(r.n_visits),
-    engaged: num(r.n_engaged),
-    converting: num(r.n_converting),
-    finished: num(r.n_finished),
-    bounced: num(r.n_bounced),
-    exits: num(r.n_exits),
-    finished_views: num(r.n_finished_views),
-    eng_total: num(r.n_eng_total),
-    measured: num(r.n_measured),
-  }));
-  const avg = (total: number, measured: number) => (measured > 0 ? total / measured : null);
-  const point = (c: (typeof counts)[number]): PageTimePoint => ({
-    bucket: c.bucket,
-    avg_engagement_ms: avg(c.eng_total, c.measured),
-    measured_views: c.measured,
-    engagement_rate: landing ? rate(c.engaged, c.visits) : null,
-    bounce_rate: landing ? rate(c.bounced, c.finished) : null,
-    exit_rate: landing ? null : rate(c.exits, c.finished_views),
-    conversion_rate: landing && withGoal ? rate(c.converting, c.visits) : null,
-  });
-  const sum = counts.reduce(
-    (t, c) => {
-      for (const k of Object.keys(t) as (keyof typeof t)[]) t[k] += c[k];
-      return t;
-    },
-    { visits: 0, engaged: 0, converting: 0, finished: 0, bounced: 0, exits: 0, finished_views: 0, eng_total: 0, measured: 0 },
-  );
-  const total = point({ bucket: "", ...sum });
+  const buckets = rows.map((r) => ({ bucket: String(r.bucket), counts: countsOf(r) }));
+  const total = qualityOf(buckets.reduce((t, b) => addCounts(t, b.counts), NO_COUNTS), basis, withGoal);
   return {
     avg_engagement_ms: total.avg_engagement_ms,
     measured_views: total.measured_views,
     bounce_rate: total.bounce_rate,
     exit_rate: total.exit_rate,
-    over_time: counts.map(point),
+    over_time: buckets.map((b) => ({ bucket: b.bucket, ...qualityOf(b.counts, basis, withGoal) })),
   };
 }
 
+/** How many referrers under a channel, and campaigns under a referrer, before the rest are summed into one row. */
+const SOURCE_TREE_BRANCHES = 8;
+
 /**
- * Where the visits on the basis came from, over time — the sources list below it, spread
+ * Where the visits on the basis came from, as a tree: channel, then the site or app
+ * that sent them (classifyReferrer), then the campaign they were tagged with.
+ *
+ * The three levels nest, which is what lets one list answer "which network?" and "which
+ * campaign?" without a second control to choose between them. The medium is left out
+ * because it is what the channel is already made of; the referrer and the tag's source
+ * are two answers to one question and classifyReferrer has already merged them.
+ *
+ * Every node carries the drawer's quality figures for its own visits, so X can be read
+ * against LinkedIn on bounce or time on page, not only on volume. They are counted from
+ * the same per-visit rows as the chart and the headline (qualityVisitsCtes), so the
+ * channels sum to the headline and each node to its children.
+ *
+ * A node's children are its biggest few, then one row summing the rest — derived by
+ * subtraction, which the counts being additive makes exact. A node whose only child has
+ * no name has no children: Direct has no referrer beneath it, and a referrer none of
+ * whose visits were tagged has no campaigns, and a single "(none)" row would say only
+ * that.
+ */
+async function pageSourceTree(w: WebScope, path: string, basis: PageBasis): Promise<SourceNode[]> {
+  const { cte, params, project, scanFrom, scanTo } = sessionBase(w);
+  const p = new Params("px");
+  const target = `{${p.add(path)}:String}`;
+  const withGoal = hasGoal(w);
+  const rows = await q<Row>(
+    w.scope,
+    `${cte},
+     ${qualityVisitsCtes(basis, target, project, scanFrom, scanTo)}
+     SELECT 'channel' AS level, k_channel AS k1, '' AS k2, '' AS k3, ${qualityCountsSql}
+     FROM quality_visits GROUP BY k1
+     UNION ALL
+     SELECT * FROM (
+       SELECT 'referrer' AS level, k_channel AS k1, k_referrer AS k2, '' AS k3, ${qualityCountsSql}
+       FROM quality_visits GROUP BY k1, k2
+       ORDER BY n_visits DESC, k2 ASC LIMIT ${SOURCE_TREE_BRANCHES} BY k1
+     )
+     UNION ALL
+     SELECT * FROM (
+       SELECT 'campaign' AS level, k_channel AS k1, k_referrer AS k2, k_campaign AS k3, ${qualityCountsSql}
+       FROM quality_visits GROUP BY k1, k2, k3
+       ORDER BY n_visits DESC, k3 ASC LIMIT ${SOURCE_TREE_BRANCHES} BY k1, k2
+     )`,
+    { ...params, ...p.values, leave: PAGE_LEAVE, settled: SESSION_SETTLED_MS },
+  );
+
+  type Level = SourceNode["level"];
+  const at = (level: Level) =>
+    rows
+      .filter((r) => r.level === level)
+      .map((r) => ({ k1: String(r.k1), k2: String(r.k2), k3: String(r.k3), counts: countsOf(r) }))
+      .sort((a, b) => b.counts.visits - a.counts.visits || (a.k1 + a.k2 + a.k3).localeCompare(b.k1 + b.k2 + b.k3));
+  const channels = at("channel");
+  const referrers = at("referrer");
+  const campaigns = at("campaign");
+  const total = channels.reduce((n, c) => n + c.counts.visits, 0);
+
+  const node = (level: Level, key: string, counts: QualityCounts, rest = false, children: SourceNode[] = []): SourceNode => ({
+    key,
+    level,
+    visits: counts.visits,
+    share: total > 0 ? (counts.visits / total) * 100 : 0,
+    rest,
+    children,
+    ...qualityOf(counts, basis, withGoal),
+  });
+  const branch = (level: Level, parent: QualityCounts, kids: { key: string; counts: QualityCounts; children?: SourceNode[] }[]): SourceNode[] => {
+    const nodes = kids.map((k) => node(level, k.key, k.counts, false, k.children));
+    const rest = kids.reduce((t, k) => addCounts(t, k.counts, -1), parent);
+    if (rest.visits > 0) nodes.push(node(level, "", rest, true));
+    return nodes.length === 1 && nodes[0].key === "" && !nodes[0].rest ? [] : nodes;
+  };
+
+  return channels.map((c) =>
+    node(
+      "channel",
+      c.k1,
+      c.counts,
+      false,
+      branch(
+        "referrer",
+        c.counts,
+        referrers
+          .filter((r) => r.k1 === c.k1)
+          .map((r) => ({
+            key: r.k2,
+            counts: r.counts,
+            children: branch(
+              "campaign",
+              r.counts,
+              campaigns.filter((m) => m.k1 === c.k1 && m.k2 === r.k2).map((m) => ({ key: m.k3, counts: m.counts })),
+            ),
+          })),
+      ),
+    ),
+  );
+}
+
+/**
+ * Where the visits on the basis came from, over time — the source tree below it, spread
  * across the period.
  *
  * Banded the way the Acquisition chart bands the whole site: the five biggest channels
  * over the period, chosen once rather than per bucket, and everything else as "Other
  * channels". Every bucket in the period is present, empty or not, so this lines up with
  * the chart above it and a quiet week reads as a quiet week rather than as no week.
- * Channels are listed biggest first, which is the order of the list beneath.
+ * Channels are listed biggest first, which is the order of the tree beneath.
  */
 async function pageChannels(w: WebScope, path: string, basis: PageBasis): Promise<{ channels: string[]; points: StackedPoint[] }> {
   const { cte, params, project, scanFrom, scanTo } = sessionBase(w);
@@ -1700,7 +1827,7 @@ async function pageChannels(w: WebScope, path: string, basis: PageBasis): Promis
      ${denseBuckets(w, p)},
      ${pageSessionsCte(basis, target, project, scanFrom, scanTo)},
      visits AS (
-       -- Labelled exactly as the sources list labels them, so a band and a row agree.
+       -- Labelled exactly as the source tree labels them, so a band and a row agree.
        SELECT session_id, started_at, if(channel = '', '(none)', channel) AS channel
        FROM scoped
        WHERE period = 'current' AND session_id IN (SELECT session_id FROM page_sessions)
@@ -2119,6 +2246,7 @@ export async function availability(w: WebScope): Promise<Availability> {
 
 export interface FilterValues {
   sources: string[];
+  referrers: string[];
   campaigns: string[];
   mediums: string[];
   countries: string[];
@@ -2144,7 +2272,7 @@ export async function filterValues(w: WebScope): Promise<FilterValues> {
   const [r] = await q<Row>(
     w.scope,
     `${cte}
-     SELECT ${pick("utm_source")} AS sources, ${pick("utm_campaign")} AS campaigns,
+     SELECT ${pick("utm_source")} AS sources, ${pick("referrer")} AS referrers, ${pick("utm_campaign")} AS campaigns,
             ${pick("utm_medium")} AS mediums, ${pick("country")} AS countries
      FROM scoped`,
     params,
@@ -2152,6 +2280,7 @@ export async function filterValues(w: WebScope): Promise<FilterValues> {
   const list = (v: unknown): string[] => (Array.isArray(v) ? v.map(String) : []);
   return {
     sources: list(r?.sources),
+    referrers: list(r?.referrers),
     campaigns: list(r?.campaigns),
     mediums: list(r?.mediums),
     countries: list(r?.countries),
