@@ -1,4 +1,5 @@
 import { getDataClient } from "./client";
+import { Params, propertyFilterSql, type PropertyFilter } from "./definitions";
 import type { Scope } from "./environments";
 import { assertReadOnlySql } from "./sql-guard";
 
@@ -211,12 +212,35 @@ export interface EventsFilter {
   before?: string;
   after?: string;
   search?: string;
+  /**
+   * Only events whose properties satisfy every one of these — the same rule a goal
+   * narrowed by its properties uses, compiled by the same function, so "form_name is
+   * the hero form" here and on the Conversions page are one question with one answer.
+   */
+  properties?: PropertyFilter[];
   limit?: number;
 }
 
-export async function listEvents(scope: Scope, f: EventsFilter = {}): Promise<EventRecord[]> {
+/** Push one predicate per property filter onto a WHERE list. Every one must hold. */
+function filterProperties(filters: PropertyFilter[] | undefined, where: string[], params: Record<string, unknown>): void {
+  if (!filters?.length) return;
+  // Named apart from every other placeholder in these queries, which are all spelled out.
+  const pp = new Params("pf");
+  for (const f of filters) where.push(propertyFilterSql(f, pp));
+  Object.assign(params, pp.values);
+}
+
+/** Free-text search: the event name, anywhere in its properties, or its sender's id. */
+const searchSql = "(positionCaseInsensitive(event, {s:String}) > 0 OR positionCaseInsensitive(properties, {s:String}) > 0 OR positionCaseInsensitive(distinct_id, {s:String}) > 0)";
+
+/**
+ * The WHERE list for "the events that match this filter". The feed and its totals both
+ * read it, so a count above a list is always the count of that list, not of a
+ * near-identical query that drifted.
+ */
+function eventsWhere(scope: Scope, f: Omit<EventsFilter, "limit">): { where: string[]; params: Record<string, unknown> } {
   const where = ["project_id = {p:String}"];
-  const params: Record<string, unknown> = { p: scope.projectId, limit: Math.min(Math.max(f.limit ?? 50, 1), 1000) };
+  const params: Record<string, unknown> = { p: scope.projectId };
   // Asking for a hidden event by name still returns nothing: the feed, the chart and
   // the totals have to agree, and a deep link to an event that is hidden is a link to
   // something this project has said it does not count.
@@ -255,9 +279,16 @@ export async function listEvents(scope: Scope, f: EventsFilter = {}): Promise<Ev
     params.after = f.after;
   }
   if (f.search) {
-    where.push("(positionCaseInsensitive(event, {s:String}) > 0 OR positionCaseInsensitive(properties, {s:String}) > 0 OR positionCaseInsensitive(distinct_id, {s:String}) > 0)");
+    where.push(searchSql);
     params.s = f.search;
   }
+  filterProperties(f.properties, where, params);
+  return { where, params };
+}
+
+export async function listEvents(scope: Scope, f: EventsFilter = {}): Promise<EventRecord[]> {
+  const { where, params } = eventsWhere(scope, f);
+  params.limit = Math.min(Math.max(f.limit ?? 50, 1), 1000);
   const rows = await q<Row>(scope, `SELECT message_id, source_id, person_id, type, event, name, distinct_id, anonymous_id, user_id, group_id,
             timestamp, received_at, properties, traits, context, url, path, referrer, title, user_agent, locale, library_name,
             country, region, city, latitude, longitude
@@ -275,6 +306,36 @@ export async function listEvents(scope: Scope, f: EventsFilter = {}): Promise<Ev
     latitude: Number(r.latitude ?? 0),
     longitude: Number(r.longitude ?? 0),
   }));
+}
+
+export interface EventTotals {
+  /** Matching events, each message once. */
+  events: number;
+  /** Browser visits they happened in. A server-side message belongs to none, so adds nothing here. */
+  sessions: number;
+  /**
+   * People, by resolved identity: an anonymous visitor who later identified is one
+   * person, and one who never did is one person per browser.
+   */
+  people: number;
+}
+
+/**
+ * How much a filtered feed amounts to. The feed is a page of rows, newest first; this
+ * is all of them. Events against sessions and people is the difference between "95
+ * submissions" and "81 visitors submitted", which a list cannot show at any length.
+ *
+ * Exact counts, as Web Analytics counts visitors: these get held up against other
+ * tools' numbers, and an estimate that is off by one reads as a discrepancy to chase.
+ */
+export async function eventTotals(scope: Scope, f: Omit<EventsFilter, "limit"> = {}): Promise<EventTotals> {
+  const { where, params } = eventsWhere(scope, f);
+  const [r] = await q<Row>(scope, `SELECT count() AS events, uniqExactIf(session_id, session_id != '') AS sessions, uniqExact(person_id) AS people
+     FROM events_resolved
+     WHERE ${where.join(" AND ")}`,
+    params,
+  );
+  return { events: Number(r?.events ?? 0), sessions: Number(r?.sessions ?? 0), people: Number(r?.people ?? 0) };
 }
 
 export interface EventName {
@@ -319,7 +380,16 @@ export interface TimeseriesPoint {
 
 export async function eventTimeseries(
   scope: Scope,
-  opts: { event?: string; interval?: "hour" | "day" | "week" | "month"; from?: string; to?: string; groupId?: string; sourceId?: string } = {},
+  opts: {
+    event?: string;
+    interval?: "hour" | "day" | "week" | "month";
+    from?: string;
+    to?: string;
+    groupId?: string;
+    sourceId?: string;
+    search?: string;
+    properties?: PropertyFilter[];
+  } = {},
 ): Promise<TimeseriesPoint[]> {
   const interval = opts.interval ?? "day";
   const fn = { hour: "toStartOfHour", day: "toStartOfDay", week: "toStartOfWeek", month: "toStartOfMonth" }[interval];
@@ -338,6 +408,13 @@ export async function eventTimeseries(
     where.push("source_id = {src:String}");
     params.src = opts.sourceId;
   }
+  // The same narrowing the feed applies, so a chart above a filtered list is a chart of
+  // that list rather than of everything the list was filtered out of.
+  if (opts.search) {
+    where.push(searchSql);
+    params.s = opts.search;
+  }
+  filterProperties(opts.properties, where, params);
   if (opts.from) {
     where.push("timestamp >= parseDateTime64BestEffort({from:String}, 3)");
     params.from = opts.from;
@@ -356,22 +433,34 @@ export async function eventTimeseries(
   return rows.map((r) => ({ bucket: String(r.bucket), count: Number(r.count), users: Number(r.users) }));
 }
 
-export async function propertyKeys(scope: Scope, event: string): Promise<{ key: string; count: number }[]> {
+/**
+ * The property keys events carry, most common first. With an event, that event's; with
+ * none, every event's — which is what a filter across the whole feed needs to offer,
+ * and still leaves hidden events out of it.
+ */
+export async function propertyKeys(scope: Scope, event?: string): Promise<{ key: string; count: number }[]> {
   // A hidden event has no properties to offer: it is not selectable anywhere that
   // would lead here, and answering would be the one place its rows leaked back out.
-  if (scope.hiddenEvents.includes(event)) return [];
+  if (event && scope.hiddenEvents.includes(event)) return [];
+  const where = ["project_id = {p:String}", "timestamp > now64(3) - INTERVAL 30 DAY"];
+  const params: Record<string, unknown> = { p: scope.projectId };
+  if (event) {
+    where.push("event = {e:String}");
+    params.e = event;
+  } else excludeHidden(scope, where, params);
   const rows = await q<Row>(scope, `SELECT key, count() AS count
      FROM events ARRAY JOIN JSONExtractKeys(properties) AS key
-     WHERE project_id = {p:String} AND event = {e:String} AND timestamp > now64(3) - INTERVAL 30 DAY
+     WHERE ${where.join(" AND ")}
      GROUP BY key ORDER BY count DESC LIMIT 100`,
-    { p: scope.projectId, e: event },
+    params,
   );
   return rows.map((r) => ({ key: String(r.key), count: Number(r.count) }));
 }
 
 /**
  * The values a property actually takes, so narrowing a goal to `plan = free` is a
- * choice from the data rather than a guess at the spelling.
+ * choice from the data rather than a guess at the spelling. `event` narrows it to one
+ * event's values, and is optional for the same reason it is in propertyKeys.
  *
  * Read as strings whatever the property's JSON type is, because that is how
  * `propertyFilterSql` compares them — a number written as `2` in the payload has to
@@ -381,16 +470,26 @@ export async function propertyKeys(scope: Scope, event: string): Promise<{ key: 
  * that way is indistinguishable here from one that does not carry it at all, and
  * `exists` is the operator for that question.
  */
-export async function propertyValues(scope: Scope, event: string, key: string, limit = 200): Promise<{ value: string; count: number }[]> {
+export async function propertyValues(scope: Scope, event: string | undefined, key: string, limit = 200): Promise<{ value: string; count: number }[]> {
   // Hidden for the same reason its keys are: an event left out of the reports does not
   // get to hand back its rows one property at a time.
-  if (scope.hiddenEvents.includes(event)) return [];
+  if (event && scope.hiddenEvents.includes(event)) return [];
+  const where = [
+    "project_id = {p:String}",
+    "timestamp > now64(3) - INTERVAL 30 DAY",
+    "JSONHas(properties, {k:String})",
+    "JSONExtractString(properties, {k:String}) != ''",
+  ];
+  const params: Record<string, unknown> = { p: scope.projectId, k: key, lim: Math.min(Math.max(limit, 1), 1000) };
+  if (event) {
+    where.push("event = {e:String}");
+    params.e = event;
+  } else excludeHidden(scope, where, params);
   const rows = await q<Row>(scope, `SELECT JSONExtractString(properties, {k:String}) AS value, count() AS count
      FROM events
-     WHERE project_id = {p:String} AND event = {e:String} AND timestamp > now64(3) - INTERVAL 30 DAY
-       AND JSONHas(properties, {k:String}) AND JSONExtractString(properties, {k:String}) != ''
+     WHERE ${where.join(" AND ")}
      GROUP BY value ORDER BY count DESC LIMIT {lim:UInt32}`,
-    { p: scope.projectId, e: event, k: key, lim: Math.min(Math.max(limit, 1), 1000) },
+    params,
   );
   return rows.map((r) => ({ value: String(r.value), count: Number(r.count) }));
 }

@@ -559,7 +559,7 @@ export function pathRuleSql(rule: PathRule, col: string, params: Params): string
  * repeats all of this in the browser, and goal-match.integration.mts holds the two to
  * the same answers; a change here is a change there.
  */
-function propertyFilterSql(f: PropertyFilter, params: Params): string {
+export function propertyFilterSql(f: PropertyFilter, params: Params): string {
   const key = `{${params.add(f.key)}:String}`;
   const extracted = `JSONExtractString(properties, ${key})`;
   switch (f.op) {

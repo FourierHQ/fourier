@@ -114,6 +114,13 @@ const propertyFilterArg = z.object({
   value: z.string().max(1000).optional().describe("Required for eq, neq and contains. Omitted for exists."),
 });
 
+/** Narrowing a read to events with certain properties: the same filters a goal takes. */
+const eventPropertiesArg = z
+  .array(propertyFilterArg)
+  .max(10)
+  .optional()
+  .describe("Only events carrying these properties; every filter must hold. Use event_property_values to spell a value exactly.");
+
 /**
  * Either half of a match, in one flat object. Which half applies is inferred from
  * whichever of `event` and `path` was given, so the common cases need no `match` at all.
@@ -378,7 +385,7 @@ export function registerFourierTools(server: McpServer) {
     "list_events",
     {
       title: "List events",
-      description: "Recent raw events, newest first, with full properties. Filter by event name, user, company, time window or free-text search.",
+      description: "Recent raw events, newest first, with full properties. Filter by event name, user, company, time window, free-text search, or event properties.",
       inputSchema: z.object({
         project_id: projectArg, environment: environmentArg,
         event: z.string().optional().describe("Exact event name, e.g. 'Signed Up'. Page views are '$page'."),
@@ -389,19 +396,29 @@ export function registerFourierTools(server: McpServer) {
         after: z.string().optional().describe("ISO timestamp lower bound"),
         before: z.string().optional().describe("ISO timestamp upper bound (use for pagination)"),
         q: z.string().optional().describe("Free text search across event name, properties and ids"),
+        properties: eventPropertiesArg,
         limit: z.number().int().min(1).max(500).optional(),
       }),
       annotations: readOnly,
     },
-    async ({ project_id, environment, distinct_id, group_id, source_id, q, ...rest }) =>
-      text(await listEvents(await scopeFor(project_id, environment), { ...rest, distinctId: distinct_id, groupId: group_id, sourceId: source_id, search: q })),
+    async ({ project_id, environment, distinct_id, group_id, source_id, q, properties, ...rest }) =>
+      text(
+        await listEvents(await scopeFor(project_id, environment), {
+          ...rest,
+          distinctId: distinct_id,
+          groupId: group_id,
+          sourceId: source_id,
+          search: q,
+          properties: properties?.map((f, i) => propertyFilter(f, `property filter ${i + 1}`)),
+        }),
+      ),
   );
 
   server.registerTool(
     "event_timeseries",
     {
       title: "Event time series",
-      description: "Counts and unique users per hour/day/week/month, optionally for one event or one company.",
+      description: "Counts and unique users per hour/day/week/month, optionally for one event, one company or events with certain properties.",
       inputSchema: z.object({
         project_id: projectArg, environment: environmentArg,
         event: z.string().optional(),
@@ -410,10 +427,19 @@ export function registerFourierTools(server: McpServer) {
         interval: z.enum(["hour", "day", "week", "month"]).optional(),
         from: z.string().optional().describe("ISO timestamp"),
         to: z.string().optional().describe("ISO timestamp"),
+        properties: eventPropertiesArg,
       }),
       annotations: readOnly,
     },
-    async ({ project_id, environment, group_id, source_id, ...rest }) => text(await eventTimeseries(await scopeFor(project_id, environment), { ...rest, groupId: group_id, sourceId: source_id })),
+    async ({ project_id, environment, group_id, source_id, properties, ...rest }) =>
+      text(
+        await eventTimeseries(await scopeFor(project_id, environment), {
+          ...rest,
+          groupId: group_id,
+          sourceId: source_id,
+          properties: properties?.map((f, i) => propertyFilter(f, `property filter ${i + 1}`)),
+        }),
+      ),
   );
 
   server.registerTool(

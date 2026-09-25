@@ -1,5 +1,6 @@
 "use client";
 
+import { ListFilterPlus } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
@@ -29,7 +30,30 @@ function Value({ v }: { v: unknown }) {
   return <span>{String(v)}</span>;
 }
 
-export function JsonView({ data, className, nested }: { data: Record<string, unknown>; className?: string; nested?: boolean }) {
+/**
+ * A value as a property filter compares it, or null when it cannot be one. Filters read
+ * a property as text — 42 as "42", true as "true" — so those offer themselves; an
+ * object or array would have to be matched as its exact JSON, which nobody means, and
+ * null reads the same as a property that was never sent.
+ */
+function filterable(v: unknown): string | null {
+  if (typeof v === "string") return v === "" ? null : v;
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  return null;
+}
+
+export function JsonView({
+  data,
+  className,
+  nested,
+  onFilter,
+}: {
+  data: Record<string, unknown>;
+  className?: string;
+  nested?: boolean;
+  /** Offer "only events like this" beside each top-level value that a filter can match. */
+  onFilter?: (key: string, value: string) => void;
+}) {
   // A key set to undefined is a field this event does not have, not a field whose value is
   // the word "undefined" — callers write `x || undefined` meaning "leave it out".
   const entries = Object.entries(data ?? {}).filter(([, v]) => v !== undefined);
@@ -38,14 +62,34 @@ export function JsonView({ data, className, nested }: { data: Record<string, unk
     <div className={cn("font-mono text-xs leading-relaxed", !nested && "rounded-md bg-muted/40 p-3", className)}>
       {nested && "{"}
       <div className={cn(nested && "ml-4")}>
-        {entries.map(([k, v]) => (
-          <div key={k} className="flex gap-1.5">
-            <span className="shrink-0 text-muted-foreground">{k}:</span>
-            <span className="min-w-0 break-all">
-              <Value v={v} />
-            </span>
-          </div>
-        ))}
+        {entries.map(([k, v]) => {
+          const value = onFilter ? filterable(v) : null;
+          return (
+            <div key={k} className="group/row flex gap-1.5">
+              <span className="shrink-0 text-muted-foreground">{k}:</span>
+              <span className="min-w-0 break-all">
+                <Value v={v} />
+              </span>
+              {value !== null && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    {/* Shown on hover and on focus, so it is findable without cluttering
+                        every line of a payload someone is only trying to read. */}
+                    <button
+                      type="button"
+                      onClick={() => onFilter!(k, value)}
+                      className="shrink-0 self-start rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-foreground focus-visible:opacity-100 group-hover/row:opacity-100"
+                      aria-label={`Only events where ${k} is ${value}`}
+                    >
+                      <ListFilterPlus className="size-3" />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent>Only events where {k} is this</TooltipContent>
+                </Tooltip>
+              )}
+            </div>
+          );
+        })}
       </div>
       {nested && "}"}
     </div>

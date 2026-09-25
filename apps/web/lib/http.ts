@@ -1,4 +1,6 @@
 import { NextResponse } from "next/server";
+import { z } from "zod";
+import { propertyFilterSchema, type PropertyFilter } from "@fourierhq/core";
 import { isMissingSchemaError, resetReady } from "./db";
 
 const BASE_CORS: Record<string, string> = {
@@ -122,4 +124,30 @@ async function run<T extends unknown[]>(fn: (...args: T) => Promise<Response>, a
 export function int(v: string | null, fallback: number): number {
   const n = v == null ? NaN : Number(v);
   return Number.isFinite(n) ? n : fallback;
+}
+
+const propertyFiltersSchema = z
+  .array(propertyFilterSchema)
+  .max(10)
+  .refine((fs) => fs.every((f) => f.op === "exists" || f.op === "not_in" || f.value !== undefined), {
+    message: "eq, neq and contains need a value; use op 'exists' to ask only whether the property is set",
+  });
+
+/**
+ * `properties=` on the read endpoints: a JSON array of property filters, in the shape a
+ * goal stores them — `[{"key":"plan","op":"eq","value":"pro"}]`. Malformed input is an
+ * error rather than ignored, because a filter that quietly drops out answers with every
+ * event, and that looks exactly like an answer.
+ */
+export function propertyFilters(v: string | null): { ok: true; value: PropertyFilter[] | undefined } | { ok: false; error: string } {
+  if (!v) return { ok: true, value: undefined };
+  let raw: unknown;
+  try {
+    raw = JSON.parse(v);
+  } catch {
+    return { ok: false, error: "properties must be a JSON array of {key, op, value} filters" };
+  }
+  const parsed = propertyFiltersSchema.safeParse(raw);
+  if (!parsed.success) return { ok: false, error: `properties: ${parsed.error.issues.map((i) => i.message).join("; ")}` };
+  return { ok: true, value: parsed.data.length ? parsed.data : undefined };
 }
