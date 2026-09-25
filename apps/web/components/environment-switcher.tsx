@@ -1,6 +1,6 @@
 "use client";
 
-import { Check, ChevronsUpDown, FlaskConical, Hammer, Rocket } from "lucide-react";
+import { Check, ChevronsUpDown, FlaskConical, Hammer, Import, Rocket } from "lucide-react";
 import { ENVIRONMENT_LABELS, type Environment } from "@fourierhq/core/environments";
 import {
   DropdownMenu,
@@ -21,6 +21,7 @@ const ICONS: Record<Environment, typeof Rocket> = {
   production: Rocket,
   preview: FlaskConical,
   development: Hammer,
+  test: Import,
 };
 
 type Tone = "live" | "idle" | "down" | "unknown";
@@ -48,13 +49,16 @@ const DOT: Record<Tone, string> = {
  * wrong, and both want fixing rather than waiting out. Amber is the softer case
  * — this worked once and has gone quiet, which may well be the weekend.
  */
-function useIngestStatus(): { tone: Tone; summary: string } {
+function useIngestStatus(environment: Environment): { tone: Tone; summary: string } {
   const health = useHealth();
   const overview = useOverview();
   const o = overview.data?.overview;
 
   if (health.isError || health.data?.ok === false || overview.isError) return { tone: "down", summary: "ClickHouse unreachable" };
   if (!o) return { tone: "unknown", summary: "Checking…" };
+  // Test has no write key, so nothing is ever "receiving" there and an empty Test is
+  // not broken. Grey either way; the summary says whether an import has filled it.
+  if (environment === "test") return { tone: "unknown", summary: o.total_events > 0 ? "Imported data, no live traffic" : "Empty — import from Settings" };
   if (o.events_24h > 0) return { tone: "live", summary: "Receiving events" };
   // Quiet. How long it has been quiet is the thing you go looking for the moment
   // the dot turns amber, so say that rather than "no events in the last 24 hours".
@@ -73,7 +77,7 @@ function useIngestStatus(): { tone: Tone; summary: string } {
  */
 export function EnvironmentSwitcher() {
   const { environment, setEnvironment } = useEnvironment();
-  const status = useIngestStatus();
+  const status = useIngestStatus(environment);
 
   return (
     <DropdownMenu>

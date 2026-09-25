@@ -1,8 +1,8 @@
 /**
  * Environments.
  *
- * An environment is a hard boundary: production, preview and development each get
- * their own ClickHouse database, and nothing joins across them. That is deliberate.
+ * An environment is a hard boundary: production, preview, development and test each
+ * get their own ClickHouse database, and nothing joins across them. That is deliberate.
  * Sources share a person graph by design — `identify("user_123")` on the marketing
  * site and in the app are the same human — so a preview deployment calling
  * `identify("user_123")` would merge test traits into a real person if environments
@@ -13,9 +13,28 @@
  * is already the production environment and needs no migration.
  */
 
-export const ENVIRONMENTS = ["production", "preview", "development"] as const;
+export const ENVIRONMENTS = ["production", "preview", "development", "test"] as const;
 
 export type Environment = (typeof ENVIRONMENTS)[number];
+
+/**
+ * The environments an SDK can write to, each through a write key of its own.
+ *
+ * Test is not one of them. Data reaches it only by import, so it can be emptied and
+ * filled again as often as a trial run needs without anything live depending on it.
+ * Giving it no key is what makes that safe: nothing deployed can be pointed at it by
+ * mistake, and nothing an import writes there can be mistaken for real traffic.
+ */
+export const KEYED_ENVIRONMENTS = ["production", "preview", "development"] as const satisfies readonly Environment[];
+
+export type KeyedEnvironment = (typeof KEYED_ENVIRONMENTS)[number];
+
+export function isKeyedEnvironment(value: unknown): value is KeyedEnvironment {
+  return typeof value === "string" && (KEYED_ENVIRONMENTS as readonly string[]).includes(value);
+}
+
+/** Where imports land. The only environment an operator can empty from the dashboard. */
+export const IMPORT_ENVIRONMENT = "test" satisfies Environment;
 
 export const DEFAULT_ENVIRONMENT: Environment = "production";
 
@@ -38,8 +57,8 @@ export function parseEnvironment(value: unknown, fallback: Environment = DEFAULT
  * Map Vercel's VERCEL_ENV onto ours. The names already line up; this exists so the
  * mapping is stated in one place rather than assumed at each call site.
  */
-export function environmentFromVercel(vercelEnv: unknown): Environment | null {
-  return isEnvironment(vercelEnv) ? vercelEnv : null;
+export function environmentFromVercel(vercelEnv: unknown): KeyedEnvironment | null {
+  return isKeyedEnvironment(vercelEnv) ? vercelEnv : null;
 }
 
 /**
@@ -55,6 +74,7 @@ export const ENVIRONMENT_LABELS: Record<Environment, string> = {
   production: "Production",
   preview: "Preview",
   development: "Development",
+  test: "Test",
 };
 
 /**

@@ -339,6 +339,64 @@ export function useSetEventHidden() {
   });
 }
 
+// ---------- import ----------
+
+export interface ImportStatus {
+  environment: Environment;
+  events: number;
+  imported: number;
+  first: string | null;
+  last: string | null;
+}
+
+export interface AmplitudeDayResult {
+  day: string;
+  fetched: number;
+  imported: number;
+  existing: number;
+  skipped: Record<string, number>;
+  rejected: number;
+}
+
+export interface AmplitudeDayInput {
+  apiKey: string;
+  secretKey: string;
+  region: "us" | "eu";
+  day: string;
+  sourceId: string;
+  skipInstrumentation: boolean;
+}
+
+/**
+ * What the Test environment holds. Carries no environment key: it always describes
+ * Test, whichever environment the dashboard happens to be showing.
+ */
+export function useImportStatus() {
+  return useQuery({
+    queryKey: ["import-status"],
+    queryFn: () => api<{ status: ImportStatus; instrumentation: string[] }>(`/api/projects/${PROJECT}/import/amplitude`),
+  });
+}
+
+/** One day per call; the caller walks the range so progress is visible and a failure costs one day. */
+export function importAmplitudeDay(input: AmplitudeDayInput, signal?: AbortSignal) {
+  return api<{ result: AmplitudeDayResult }>(`/api/projects/${PROJECT}/import/amplitude`, {
+    method: "POST",
+    body: JSON.stringify(input),
+    signal,
+  }).then((r) => r.result);
+}
+
+export function useEmptyTestEnvironment() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api<{ environment: string; tables: string[] }>(`/api/environments/test/empty`, { method: "POST" }),
+    // Every Test query is now wrong, and so is the status line; nothing else changed,
+    // but telling them apart is not worth a stale number on screen.
+    onSuccess: () => qc.invalidateQueries(),
+  });
+}
+
 export interface EventsParams {
   event?: string;
   type?: string;
