@@ -10,11 +10,13 @@ import type {
   Environment,
   EventName,
   EventRecord,
+  EventTotals,
   GroupDetail,
   GroupRecord,
   Overview,
   Project,
   GroupAttribution,
+  PropertyFilter,
   Source,
   SqlResult,
   TimeseriesPoint,
@@ -32,11 +34,13 @@ export type {
   Environment,
   EventName,
   EventRecord,
+  EventTotals,
   GroupAttribution,
   GroupDetail,
   GroupRecord,
   Overview,
   Project,
+  PropertyFilter,
   Source,
   SqlResult,
   TimeseriesPoint,
@@ -282,20 +286,20 @@ export function useEventNames(days?: number, source?: string, includeHidden = fa
  * Both are suggestions rather than a closed set: they describe the last 30 days of the
  * environment on screen, while a goal is a rule about all of history. So neither is
  * allowed to be the only way to name a property, and both stay disabled until there is
- * an event to ask about.
+ * an event to ask about — unless `anyEvent`, where no event means every event's.
  */
-export function useEventPropertyKeys(event: string | null | undefined) {
+export function useEventPropertyKeys(event: string | null | undefined, opts: { anyEvent?: boolean } = {}) {
   const environment = useEnvironmentValue();
   const name = event?.trim() ?? "";
   return useQuery({
     queryKey: ["property-keys", environment, name],
     queryFn: () => api<{ keys: { key: string; count: number }[] }>(`/api/projects/${PROJECT}/properties${qs({ event: name, environment })}`).then((r) => r.keys),
-    enabled: Boolean(name),
+    enabled: Boolean(name) || Boolean(opts.anyEvent),
     staleTime: 60_000,
   });
 }
 
-export function useEventPropertyValues(event: string | null | undefined, key: string | null | undefined) {
+export function useEventPropertyValues(event: string | null | undefined, key: string | null | undefined, opts: { anyEvent?: boolean } = {}) {
   const environment = useEnvironmentValue();
   const name = event?.trim() ?? "";
   const prop = key?.trim() ?? "";
@@ -303,7 +307,7 @@ export function useEventPropertyValues(event: string | null | undefined, key: st
     queryKey: ["property-values", environment, name, prop],
     queryFn: () =>
       api<{ values: { value: string; count: number }[] }>(`/api/projects/${PROJECT}/properties${qs({ event: name, key: prop, environment })}`).then((r) => r.values),
-    enabled: Boolean(name && prop),
+    enabled: Boolean((name || opts.anyEvent) && prop),
     staleTime: 60_000,
   });
 }
@@ -346,27 +350,54 @@ export interface EventsParams {
   distinct_id?: string;
   group_id?: string;
   q?: string;
+  properties?: PropertyFilter[];
   before?: string;
   after?: string;
   limit?: number;
+}
+
+/** The query string for an events read: property filters travel as one JSON array. */
+function eventsQs(params: { properties?: PropertyFilter[] } & Record<string, unknown>, environment: Environment): string {
+  const { properties, ...rest } = params;
+  return qs({ ...rest, properties: properties?.length ? JSON.stringify(properties) : undefined, environment });
 }
 
 export function useEvents(params: EventsParams, opts?: Opts<{ events: EventRecord[]; next_before: string | null }>) {
   const environment = useEnvironmentValue();
   return useQuery({
     queryKey: ["events", environment, params],
-    queryFn: () => api<{ events: EventRecord[]; next_before: string | null }>(`/api/projects/${PROJECT}/events${qs({ ...params, environment })}`),
+    queryFn: () => api<{ events: EventRecord[]; next_before: string | null }>(`/api/projects/${PROJECT}/events${eventsQs({ ...params }, environment)}`),
     refetchInterval: LIVE_INTERVAL,
     placeholderData: (prev) => prev,
     ...opts,
   });
 }
 
-export function useTimeseries(params: { event?: string; group_id?: string; source?: string; interval?: "hour" | "day" | "week" | "month"; from?: string; to?: string }) {
+/** Everything the feed for these params amounts to, not only the page of it on screen. */
+export function useEventTotals(params: Omit<EventsParams, "limit">) {
+  const environment = useEnvironmentValue();
+  return useQuery({
+    queryKey: ["event-totals", environment, params],
+    queryFn: () => api<EventTotals>(`/api/projects/${PROJECT}/events/totals${eventsQs({ ...params }, environment)}`),
+    refetchInterval: LIVE_INTERVAL * 6,
+    placeholderData: (prev) => prev,
+  });
+}
+
+export function useTimeseries(params: {
+  event?: string;
+  group_id?: string;
+  source?: string;
+  q?: string;
+  properties?: PropertyFilter[];
+  interval?: "hour" | "day" | "week" | "month";
+  from?: string;
+  to?: string;
+}) {
   const environment = useEnvironmentValue();
   return useQuery({
     queryKey: ["timeseries", environment, params],
-    queryFn: () => api<{ interval: string; series: TimeseriesPoint[] }>(`/api/projects/${PROJECT}/timeseries${qs({ ...params, environment })}`).then((r) => r.series),
+    queryFn: () => api<{ interval: string; series: TimeseriesPoint[] }>(`/api/projects/${PROJECT}/timeseries${eventsQs({ ...params }, environment)}`).then((r) => r.series),
     refetchInterval: LIVE_INTERVAL * 6,
     placeholderData: (prev) => prev,
   });
