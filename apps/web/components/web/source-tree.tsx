@@ -46,6 +46,7 @@ export function SourceTree({
   emptyLabel,
   active,
   onFilter,
+  noun = "this page",
 }: {
   nodes: SourceNode[] | undefined;
   basis: "landing" | "viewers";
@@ -56,6 +57,8 @@ export function SourceTree({
   /** The filters in force, so the row they select can say so. */
   active: SourcePath | null;
   onFilter: (path: SourcePath) => void;
+  /** What the column hints call what the drawer is about. */
+  noun?: string;
 }) {
   const [open, setOpen] = useState<Set<string>>(new Set());
   if (loading && !nodes) {
@@ -82,8 +85,8 @@ export function SourceTree({
   const columns = basis === "landing" ? (["bounce", "time"] as const) : (["time", "exit"] as const);
   const heading = {
     bounce: <MetricLabel hint="Of each row's finished visits, the share that saw no other page. Visits still in progress are on neither side.">Bounce rate</MetricLabel>,
-    time: <MetricLabel hint="Average foreground time measured on this page per view, over the views that reported a measurement.">Time on page</MetricLabel>,
-    exit: <MetricLabel hint="Of each row's views of this page in finished visits, the share that were the visit's last page.">Exit rate</MetricLabel>,
+    time: <MetricLabel hint={`Average foreground time measured on ${noun} per view, over the views that reported a measurement.`}>Time on page</MetricLabel>,
+    exit: <MetricLabel hint={`Of each row's views of ${noun} in finished visits, the share that were the visit's last page.`}>Exit rate</MetricLabel>,
   };
   const idFor = (n: SourceNode, path: string[]) => idOf([...path, n.rest ? "\u0000rest" : n.key]);
   // A node alone at its level opens by itself: there is nothing to choose between.

@@ -29,6 +29,11 @@ const OP_LABEL: Record<Rule["op"], string> = {
   contains: "contains",
 };
 
+/** A group's rules as one line: "starts with /blog · is exactly /pricing". */
+export function describeRules(rules: Rule[]): string {
+  return rules.map((r) => `${OP_LABEL[r.op]} ${r.value}`).join(" · ");
+}
+
 function GroupEditor({ group, onDone }: { group?: PageGroup; onDone: () => void }) {
   const [name, setName] = useState(group?.name ?? "");
   const [rules, setRules] = useState<Rule[]>(group?.config.rules ?? [{ op: "prefix", value: "/" }]);
@@ -174,7 +179,7 @@ export function PageGroupsDialog() {
                     {g.name}
                   </p>
                   <p className="truncate font-mono text-xs text-muted-foreground">
-                    {g.config.rules.map((r) => `${OP_LABEL[r.op]} ${r.value}`).join(" · ")}
+                    {describeRules(g.config.rules)}
                   </p>
                 </div>
                 <Button variant="ghost" size="sm" onClick={() => setEditing(g.id)}>

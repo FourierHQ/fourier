@@ -29,6 +29,7 @@ import {
   type GoalSplit,
   type GoalType,
   type PageGroup,
+  type PathRule,
   Params,
   matchSql,
   normalizedPath,
@@ -872,7 +873,109 @@ async function wentOnTotal(w: WebScope, touches: (b: Base) => string, p: Params)
  * one where 10% do — and this is what it has to be read against.
  */
 export function wentOnBaseline(w: WebScope): Promise<WentOn | null> {
-  return wentOnTotal(w, () => `SELECT '' AS key, person_id, session_id, started_at AS reached_at FROM scoped WHERE period = 'current'`, new Params("wb"));
+  return wentOnTotal(w, () => everyVisitTouches, new Params("wb"));
+}
+
+/** Every visit in the period reaches the site when it starts: the baseline's touches. */
+const everyVisitTouches = `SELECT '' AS key, person_id, session_id, started_at AS reached_at FROM scoped WHERE period = 'current'`;
+
+/** The went-on question asked of one goal: for the thing on screen, and for every visitor. */
+export interface GoalWentOn {
+  goal_id: string;
+  name: string;
+  went_on: WentOn;
+  baseline: WentOn;
+}
+
+/**
+ * The goals a by-goal breakdown lists: each primary goal once, a split as its total rather
+ * than as its values, in the operator's order.
+ */
+const breakdownGoals = (w: WebScope) => primaryGoals(w.goals).filter((g) => !g.split || g.split.role === "all");
+
+/**
+ * Went on to convert, one goal at a time — for the touches given, and for every visitor
+ * beside it, in one scan.
+ *
+ * Counted by the same rules as wentOnCtes, person by person: a conversion counts only
+ * at or after the person reached the thing, the same visit wins over a later one, and
+ * the later one is looked for up to now. Each row is exactly what the drawer's went-on
+ * would say with the control bar narrowed to that goal, and the tests hold it to that.
+ *
+ * Only when the reader is counting every goal and there are at least two: narrowed to
+ * one, the headline already is it. The rows do not add up to the headline — someone who
+ * signed up and booked a demo is in both — and the UI says so.
+ */
+async function wentOnByGoal(w: WebScope, touches: (b: Base) => string, p: Params): Promise<GoalWentOn[]> {
+  const goals = breakdownGoals(w);
+  if (w.goal || goals.length < 2) return [];
+  const b = sessionBase(w);
+  const from = `{${p.add(chTime(w.range.current.from))}:DateTime64(3,'UTC')}`;
+  const matches = goals.map((g) => matchSql(g.config, p));
+  // Goals are numbered from 1 so that 0 can mean "not this one" in the array below.
+  const ids = goals.map((_, i) => i + 1);
+  const rows = await q<Row>(
+    w.scope,
+    `${b.cte},
+     touches AS (
+       SELECT 'subject' AS key, person_id, session_id, reached_at FROM (${touches(b)})
+       UNION ALL
+       SELECT 'everyone' AS key, person_id, session_id, reached_at FROM (${everyVisitTouches})
+     ),
+     conv_events AS (
+       -- One row per goal an event completes: an event can complete two, and each of them
+       -- has to see it.
+       SELECT session_id, timestamp AS ts, arrayJoin(arrayFilter(x -> x > 0, [${matches.map((m, i) => `if(${m}, ${ids[i]}, 0)`).join(", ")}])) AS goal
+       FROM events
+       WHERE project_id = ${b.project} AND session_id != '' AND timestamp >= ${from}
+         AND (${matches.join(" OR ")})
+     ),
+     conv_by_session AS (
+       SELECT session_id, goal, max(ts) AS last_at, count() AS n FROM conv_events GROUP BY session_id, goal
+     ),
+     conv_by_person AS (
+       SELECT r.person_id AS person_id, c.goal AS goal, max(c.last_at) AS last_at, sum(c.n) AS n
+       FROM conv_by_session AS c
+       INNER JOIN (
+         SELECT session_id, person_id FROM sessions_resolved
+         WHERE project_id = ${b.project} AND session_id IN (SELECT session_id FROM conv_events)
+       ) AS r ON r.session_id = c.session_id
+       GROUP BY person_id, goal
+     ),
+     reached AS (
+       SELECT key, person_id, min(reached_at) AS first_reached FROM touches GROUP BY key, person_id
+     ),
+     reached_goal AS (
+       -- Every person against every goal, so a goal nobody completed still has its denominator.
+       SELECT r.key AS key, r.person_id AS person_id, r.first_reached AS first_reached, gl.goal AS goal
+       FROM reached AS r
+       CROSS JOIN (SELECT arrayJoin([${ids.join(", ")}]) AS goal) AS gl
+     ),
+     in_visit AS (
+       SELECT t.key AS key, t.person_id AS person_id, cs.goal AS goal, toUInt8(1) AS hit
+       FROM touches AS t
+       INNER JOIN conv_by_session AS cs ON cs.session_id = t.session_id
+       WHERE cs.last_at >= t.reached_at
+       GROUP BY key, person_id, goal
+     )
+     SELECT
+       rg.key AS row_key,
+       rg.goal AS row_goal,
+       uniqExact(rg.person_id) AS wo_people,
+       uniqExactIf(rg.person_id, iv.hit = 1) AS wo_same,
+       -- Guarded on the joins having matched: unmatched rows carry zeroes and the epoch.
+       uniqExactIf(rg.person_id, iv.hit = 0 AND cp.n > 0 AND cp.last_at >= rg.first_reached) AS wo_later
+     FROM reached_goal AS rg
+     LEFT JOIN in_visit AS iv ON iv.key = rg.key AND iv.person_id = rg.person_id AND iv.goal = rg.goal
+     LEFT JOIN conv_by_person AS cp ON cp.person_id = rg.person_id AND cp.goal = rg.goal
+     GROUP BY row_key, row_goal`,
+    { ...b.params, ...p.values },
+  );
+  const at = (key: string, goal: number) => {
+    const r = rows.find((x) => x.row_key === key && num(x.row_goal) === goal);
+    return wentOn(num(r?.wo_people), num(r?.wo_same), num(r?.wo_later));
+  };
+  return goals.map((g, i) => ({ goal_id: g.id, name: g.name, went_on: at("subject", ids[i]), baseline: at("everyone", ids[i]) }));
 }
 
 /**
@@ -976,12 +1079,17 @@ export async function landingPages(
     search?: string | null;
     /** A column the reader sorted by. Takes precedence over `orderBy`, and changes only the order. */
     sort?: TableSort<LandingSort> | null;
+    /** Only the pages of this group — the group drawer's list. Which rows, never what is on them. */
+    withinGroup?: string | null;
   } = {},
 ): Promise<LandingPageRow[]> {
   const { cte, params, project } = sessionBase(w);
   const p = new Params("lp");
   const isGroups = opts.groupBy === "group";
   const key = isGroups ? pageGroupSql(w.pageGroups, "entry_path", p) : "entry_path";
+  // A row is keyed by its page and a page is in exactly one group, so leaving the other
+  // groups' landings out removes their rows and changes nothing on the rows that stay.
+  const within = opts.withinGroup != null ? groupSubject(w.pageGroups, opts.withinGroup)(p).at("entry_path") : "1 = 1";
   const limit = Math.min(Math.max(opts.limit ?? 20, 1), 200);
   // Ranked by conversions, the busiest page is not usually the top row — which is the
   // point of asking. Sessions break the tie so a page with one of each does not outrank
@@ -1021,7 +1129,7 @@ export async function landingPages(
 
   const rows = await q<Row>(
     w.scope,
-    `${cte}${withWent ? `, ${wentOnCtes(w, p, project, landingTouches(key))}` : ""}
+    `${cte}${withWent ? `, ${wentOnCtes(w, p, project, landingTouches(key, within))}` : ""}
      SELECT l.*, l.key AS row_key${withWent ? ", ifNull(g.wo_people, 0) AS wo_people, ifNull(g.wo_same, 0) AS wo_same, ifNull(g.wo_later, 0) AS wo_later" : ""}
      FROM (
        SELECT
@@ -1033,7 +1141,7 @@ export async function landingPages(
          ${AGG.converting} AS converting
          ${titleHit}
        FROM scoped
-       WHERE entry_path != ''
+       WHERE entry_path != '' AND ${within}
        GROUP BY key
        HAVING (${having})${searchHaving}
      ) AS l
@@ -1100,12 +1208,22 @@ export interface PageRow {
  */
 export async function allPages(
   w: WebScope,
-  opts: { limit?: number; groupBy?: "page" | "group"; search?: string | null; sort?: TableSort<PageSort> | null } = {},
+  opts: {
+    limit?: number;
+    groupBy?: "page" | "group";
+    search?: string | null;
+    sort?: TableSort<PageSort> | null;
+    /** Only the pages of this group — the group drawer's list. Which rows, never what is on them. */
+    withinGroup?: string | null;
+  } = {},
 ): Promise<PageRow[]> {
   const { cte, params, project, scanFrom, scanTo } = sessionBase(w);
   const p = new Params("ap");
   const isGroups = opts.groupBy === "group";
   const key = isGroups ? pageGroupSql(w.pageGroups, "e.path", p) : normalizedPath("e.path");
+  // Every event is keyed by the page it happened on, and the exits by the page the visit
+  // stopped on, so narrowing both to one group's pages drops the other rows whole.
+  const group = opts.withinGroup != null ? groupSubject(w.pageGroups, opts.withinGroup)(p) : null;
   const search = pageSearch(opts.search, p);
   // Qualified, because the SELECT this lands in also declares `anyIf(title, …) AS title`,
   // and a bare `title` beside it resolves to that aggregate rather than the column.
@@ -1174,11 +1292,13 @@ export async function allPages(
        INNER JOIN scoped AS b ON b.session_id = e.session_id
        WHERE e.project_id = ${project} AND e.session_id != ''
          AND e.timestamp >= ${scanFrom} AND e.timestamp < ${scanTo}
+         ${group ? `AND ${group.view("e.path")}` : ""}
      ),${withWent ? `\n     ${wentOnCtes(w, p, project, touches)},` : ""}
      exits AS (
        SELECT ${exitKey} AS key, uniqExactIf(session_id, period = 'current') AS exits
        FROM scoped
        WHERE exit_path != '' AND session_id IN (SELECT session_id FROM settled)
+         ${group ? `AND ${group.at("exit_path")}` : ""}
        GROUP BY key
      ),
      totals AS (
@@ -1239,6 +1359,8 @@ export interface NextPageRow {
   sessions: number;
   /** True for the synthetic row counting visits that ended here. */
   is_exit: boolean;
+  /** In a group's drawer, the group the destination belongs to. Absent on a page's, and on the exit row. */
+  group?: string;
 }
 
 export interface PageActionRow {
@@ -1366,16 +1488,17 @@ export interface SourceNode extends PageQualityFigures {
 
 export async function pageDetail(w: WebScope, path: string, opts: { basis?: PageBasis } = {}): Promise<PageDetail> {
   const basis = opts.basis ?? "landing";
+  const subject = pageSubject(path);
   const [trendPoints, sourceTree, nextPages, actions, totals, went, baseline, quality, channels] = await Promise.all([
-    pageTrend(w, path, basis),
-    pageSourceTree(w, path, basis),
-    nextPagesAfter(w, path, basis),
-    pageActions(w, path, basis),
-    pageTotals(w, path),
-    pageWentOn(w, path, basis),
+    pageTrend(w, subject, basis),
+    pageSourceTree(w, subject, basis),
+    nextPagesAfter(w, subject, basis),
+    pageActions(w, subject, basis),
+    pageTotals(w, subject),
+    pageWentOn(w, subject, basis),
     wentOnBaseline(w),
-    pageQuality(w, path, basis),
-    pageChannels(w, path, basis),
+    pageQuality(w, subject, basis),
+    pageChannels(w, subject, basis),
   ]);
   return {
     path,
@@ -1400,22 +1523,155 @@ export async function pageDetail(w: WebScope, path: string, opts: { basis?: Page
 }
 
 /**
- * The visits a basis covers, as a CTE named `page_sessions` over both periods.
+ * One page group, as the page drawer describes one page.
  *
- * Views are matched on the normalised path exactly as the All pages row keys them, and
- * landings on `entry_path` exactly as the Landing pages row does, so the drawer's
- * numbers are the row's numbers rather than a near relation of them.
+ * Every figure the page drawer has is here, counted by the same queries with the group's
+ * rules in place of the page's path — so the strip at the top is the group's row in the
+ * grouped table on either basis, the way the page drawer's is its page's. Three things
+ * are added because a group has insides and a page does not: its pages, the drawer's own
+ * list of which of them the visits reached; where visitors went when they left it rather
+ * than which page they read next, which is mostly another page of the group; and more of
+ * the conversion story, since "is this section of the site working" is the question a
+ * group is made to answer.
  */
-function pageSessionsCte(basis: PageBasis, target: string, project: string, scanFrom: string, scanTo: string): string {
+export interface PageGroupDetail extends Omit<PageDetail, "path" | "title"> {
+  group: string;
+  /** The group's rules, in order. Null for Ungrouped, which is every page no rule claims. */
+  rules: PathRule[] | null;
+  /** Distinct pages of the group the visits on the basis reached, in either period: how many rows `pages` would have unlimited. */
+  page_count: number;
+  /**
+   * The group's pages, as the Pages table's rows on the basis — landing rows for the
+   * visits that landed, all-pages rows for every visit — restricted to this group and
+   * otherwise identical, busiest first.
+   */
+  pages: { basis: "landing"; rows: LandingPageRow[] } | { basis: "viewers"; rows: PageRow[] };
+  /** Went-on per goal, for the group and for every visitor. Empty unless the reader is counting two goals or more. */
+  by_goal: GoalWentOn[];
+  /**
+   * Where the period's conversions happened, relative to this group — the Conversions
+   * report's page credit, grouped. Every visit in the report, not only the basis. Null
+   * with no goal configured.
+   */
+  conversions: { converted_on: number; led_to: number; total: number } | null;
+}
+
+/** How many of the group's pages the drawer lists, busiest first. */
+const PAGE_GROUP_DETAIL_PAGES = 50;
+
+export async function pageGroupDetail(w: WebScope, group: string, opts: { basis?: PageBasis } = {}): Promise<PageGroupDetail> {
+  const basis = opts.basis ?? "landing";
+  const subject = groupSubject(w.pageGroups, group);
+  const pagesOf = async (): Promise<PageGroupDetail["pages"]> =>
+    basis === "landing"
+      ? { basis, rows: await landingPages(w, { limit: PAGE_GROUP_DETAIL_PAGES, withinGroup: group }) }
+      : { basis, rows: await allPages(w, { limit: PAGE_GROUP_DETAIL_PAGES, withinGroup: group }) };
+  const byGoal = () => {
+    const p = new Params("gg");
+    return wentOnByGoal(w, subjectTouches(subject(p), basis), p);
+  };
+  const conversionsOf = async (): Promise<PageGroupDetail["conversions"]> => {
+    if (!hasGoal(w)) return null;
+    const credit = await conversionPages(w, { groupBy: "group", limit: 100 });
+    const row = credit.rows.find((r) => r.path === group);
+    return { converted_on: row?.converted_on ?? 0, led_to: row?.led_to ?? 0, total: credit.total };
+  };
+  const [trendPoints, sourceTree, nextPages, actions, totals, went, baseline, quality, channels, pages, goals, conversions] = await Promise.all([
+    pageTrend(w, subject, basis),
+    pageSourceTree(w, subject, basis),
+    nextPagesAfter(w, subject, basis, { leaving: true, labelGroups: w.pageGroups }),
+    pageActions(w, subject, basis),
+    pageTotals(w, subject),
+    pageWentOn(w, subject, basis),
+    wentOnBaseline(w),
+    pageQuality(w, subject, basis),
+    pageChannels(w, subject, basis),
+    pagesOf(),
+    byGoal(),
+    conversionsOf(),
+  ]);
+  return {
+    group,
+    rules: w.pageGroups.find((g) => g.name === group)?.config.rules ?? null,
+    basis,
+    page_count: basis === "landing" ? totals.pages_landed : totals.pages_viewed,
+    pages,
+    by_goal: goals,
+    conversions,
+    trend: trendPoints,
+    source_tree: sourceTree,
+    next_pages: nextPages,
+    actions,
+    click_rate_basis: "page_viewers",
+    landing_sessions: totals.landing_sessions,
+    unique_viewers: totals.unique_viewers,
+    pageviews: totals.pageviews,
+    sessions: totals.sessions,
+    landing_engagement_rate: totals.landing_engagement_rate,
+    landing_conversion_rate: hasGoal(w) ? totals.landing_conversion_rate : null,
+    went_on: went,
+    went_on_baseline: baseline,
+    ...quality,
+    channels_over_time: channels,
+  };
+}
+
+/**
+ * What a drawer describes — one page, or a group of them — as the predicates that pick
+ * its views and its landings out of the rows every report reads.
+ *
+ * A page is matched on the normalised path exactly as the All pages row keys it, and
+ * its landings on `entry_path` exactly as the Landing pages row does. A group is matched
+ * through the same first-match-wins rules that key the grouped rows. So the drawer for
+ * either is the row it was opened from, not a near relation of it, and every query below
+ * is written once for both.
+ */
+interface Subject {
+  /** True of an event whose raw `path` column is on the subject. */
+  view: (col: string) => string;
+  /**
+   * True of an already-normalised path column — `entry_path`, `exit_path` — being on it.
+   * Never true of the empty path of a visit with no page view, which landed nowhere.
+   */
+  at: (col: string) => string;
+}
+
+/** A subject binds its value into the params of whichever query it lands in. */
+type SubjectOf = (p: Params) => Subject;
+
+function pageSubject(path: string): SubjectOf {
+  return (p) => {
+    const target = `{${p.add(path)}:String}`;
+    return { view: (col) => `${normalizedPath(col)} = ${target}`, at: (col) => `${col} = ${target}` };
+  };
+}
+
+function groupSubject(groups: PageGroup[], name: string): SubjectOf {
+  return (p) => {
+    const target = `{${p.add(name)}:String}`;
+    // The group expression normalises its own operand, so it reads a raw event path and
+    // an already-normalised entry path alike. It does not know that an empty entry path
+    // means "no page": normalised, '' is the root, and would put every event-only visit
+    // in whichever group holds "/".
+    const of = (col: string) => `${pageGroupSql(groups, col, p)} = ${target}`;
+    return { view: of, at: (col) => `(${col} != '' AND ${of(col)})` };
+  };
+}
+
+/**
+ * The visits a basis covers, as a CTE named `page_sessions` over both periods: the ones
+ * that started on the subject, or every one that viewed it.
+ */
+function pageSessionsCte(basis: PageBasis, s: Subject, project: string, scanFrom: string, scanTo: string): string {
   return basis === "landing"
-    ? `page_sessions AS (SELECT session_id FROM scoped WHERE entry_path = ${target})`
+    ? `page_sessions AS (SELECT session_id FROM scoped WHERE ${s.at("entry_path")})`
     : `page_sessions AS (
          SELECT DISTINCT e.session_id AS session_id
          FROM events AS e
          INNER JOIN scoped AS b ON b.session_id = e.session_id
          WHERE e.project_id = ${project} AND e.session_id != '' AND e.type = 'page'
            AND e.timestamp >= ${scanFrom} AND e.timestamp < ${scanTo}
-           AND ${normalizedPath("e.path")} = ${target}
+           AND ${s.view("e.path")}
        )`;
 }
 
@@ -1427,24 +1683,29 @@ interface PageTotals {
   sessions: Delta;
   landing_engagement_rate: RateValue;
   landing_conversion_rate: RateValue;
+  /** Distinct pages viewed, in either period: the rows the All pages table would have for it. One, for a page. */
+  pages_viewed: number;
+  /** Distinct pages landed on, in either period: the rows the Landing pages table would have. */
+  pages_landed: number;
 }
 
-async function pageTotals(w: WebScope, path: string): Promise<PageTotals> {
+async function pageTotals(w: WebScope, subject: SubjectOf): Promise<PageTotals> {
   const { cte, params, project, scanFrom, scanTo } = sessionBase(w);
   const p = new Params("pt");
-  const target = `{${p.add(path)}:String}`;
+  const s = subject(p);
   // Two one-row aggregates side by side rather than a column of scalar subqueries, each
   // of which would re-read the page's views from scratch.
   const [r] = await q<Row>(
     w.scope,
     `${cte},
      views AS (
-       SELECT b.period AS period, b.person_id AS person_id, b.session_id AS session_id, e.title AS title
+       SELECT b.period AS period, b.person_id AS person_id, b.session_id AS session_id, e.title AS title,
+              ${normalizedPath("e.path")} AS path
        FROM events AS e
        INNER JOIN scoped AS b ON b.session_id = e.session_id
        WHERE e.project_id = ${project} AND e.session_id != '' AND e.type = 'page'
          AND e.timestamp >= ${scanFrom} AND e.timestamp < ${scanTo}
-         AND ${normalizedPath("e.path")} = ${target}
+         AND ${s.view("e.path")}
      )
      SELECT v.*, l.*
      FROM (
@@ -1455,7 +1716,8 @@ async function pageTotals(w: WebScope, path: string): Promise<PageTotals> {
          countIf(period = 'current') AS pageviews,
          countIf(period = 'previous') AS prev_pageviews,
          uniqExactIf(session_id, period = 'current') AS visits,
-         uniqExactIf(session_id, period = 'previous') AS prev_visits
+         uniqExactIf(session_id, period = 'previous') AS prev_visits,
+         uniqExact(path) AS n_viewed_pages
        FROM views
      ) AS v
      CROSS JOIN (
@@ -1463,8 +1725,9 @@ async function pageTotals(w: WebScope, path: string): Promise<PageTotals> {
          uniqExactIf(session_id, period = 'current') AS landing,
          uniqExactIf(session_id, period = 'previous') AS prev_landing,
          uniqExactIf(session_id, period = 'current' AND engaged = 1) AS landing_engaged,
-         uniqExactIf(session_id, period = 'current' AND converted = 1) AS landing_converting
-       FROM scoped WHERE entry_path = ${target}
+         uniqExactIf(session_id, period = 'current' AND converted = 1) AS landing_converting,
+         uniqExact(entry_path) AS n_landed_pages
+       FROM scoped WHERE ${s.at("entry_path")}
      ) AS l`,
     { ...params, ...p.values },
   );
@@ -1477,27 +1740,27 @@ async function pageTotals(w: WebScope, path: string): Promise<PageTotals> {
     sessions: delta(num(r?.visits), prevOr(w, num(r?.prev_visits))),
     landing_engagement_rate: rate(num(r?.landing_engaged), landing),
     landing_conversion_rate: rate(num(r?.landing_converting), landing),
+    pages_viewed: num(r?.n_viewed_pages),
+    pages_landed: num(r?.n_landed_pages),
   };
 }
 
-/** One page's went-on, counted exactly the way its table row is. */
-function pageWentOn(w: WebScope, path: string, basis: PageBasis): Promise<WentOn | null> {
-  const p = new Params("pw");
-  const target = `{${p.add(path)}:String}`;
-  return wentOnTotal(
-    w,
-    (b) =>
-      basis === "landing"
-        ? landingTouches("''", `entry_path = ${target}`)
-        : viewTouches("''", b.project, b.scanFrom, b.scanTo, `${normalizedPath("e.path")} = ${target}`),
-    p,
-  );
+/** The touches a subject's went-on is counted from, on a basis: its landings, or its first view in each visit. */
+function subjectTouches(s: Subject, basis: PageBasis): (b: Base) => string {
+  return (b) =>
+    basis === "landing" ? landingTouches("''", s.at("entry_path")) : viewTouches("''", b.project, b.scanFrom, b.scanTo, s.view("e.path"));
 }
 
-async function pageTrend(w: WebScope, path: string, basis: PageBasis): Promise<SeriesPoint[]> {
+/** One page's went-on, counted exactly the way its table row is. */
+function pageWentOn(w: WebScope, subject: SubjectOf, basis: PageBasis): Promise<WentOn | null> {
+  const p = new Params("pw");
+  return wentOnTotal(w, subjectTouches(subject(p), basis), p);
+}
+
+async function pageTrend(w: WebScope, subject: SubjectOf, basis: PageBasis): Promise<SeriesPoint[]> {
   const { cte, params, project, scanFrom, scanTo } = sessionBase(w);
   const p = new Params("pg");
-  const target = `{${p.add(path)}:String}`;
+  const s = subject(p);
   const offset = alignOffsetMs(w.range);
   const bucket = (col: string) => bucketSql(col, w.range.interval, w.range.timezone);
   const shift = `started_at + toIntervalMillisecond({shift:Int64})`;
@@ -1516,10 +1779,10 @@ async function pageTrend(w: WebScope, path: string, basis: PageBasis): Promise<S
          ${denseBuckets(w, p)}
          ${dense(`SELECT bucket, sumIf(v, series = 'current') AS value, sumIf(v, series = 'previous') AS previous FROM (
            SELECT ${bucket("started_at")} AS bucket, 'current' AS series, uniqExact(session_id) AS v
-           FROM scoped WHERE period = 'current' AND entry_path = ${target} GROUP BY bucket
+           FROM scoped WHERE period = 'current' AND ${s.at("entry_path")} GROUP BY bucket
            UNION ALL
            SELECT ${bucket(shift)} AS bucket, 'previous' AS series, uniqExact(session_id) AS v
-           FROM scoped WHERE period = 'previous' AND entry_path = ${target} GROUP BY bucket
+           FROM scoped WHERE period = 'previous' AND ${s.at("entry_path")} GROUP BY bucket
          ) GROUP BY bucket`)}`
       : `${cte},
          ${denseBuckets(w, p)},
@@ -1529,7 +1792,7 @@ async function pageTrend(w: WebScope, path: string, basis: PageBasis): Promise<S
            INNER JOIN scoped AS b ON b.session_id = e.session_id
            WHERE e.project_id = ${project} AND e.type = 'page'
              AND e.timestamp >= ${scanFrom} AND e.timestamp < ${scanTo}
-             AND ${normalizedPath("e.path")} = ${target}
+             AND ${s.view("e.path")}
          )
          ${dense(`SELECT bucket, sumIf(v, series = 'current') AS value, sumIf(v, series = 'previous') AS previous FROM (
            SELECT ${bucket("ts")} AS bucket, 'current' AS series, uniqExact(person_id) AS v
@@ -1614,8 +1877,8 @@ function qualityOf(c: QualityCounts, basis: PageBasis, withGoal: boolean): PageQ
  * pages row, restricted to nothing. Time on the page is summed out of this page's own
  * $page_leave measurements, averaged over the views that reported one, as All pages does.
  */
-function qualityVisitsCtes(basis: PageBasis, target: string, project: string, scanFrom: string, scanTo: string): string {
-  return `${pageSessionsCte(basis, target, project, scanFrom, scanTo)},
+function qualityVisitsCtes(basis: PageBasis, s: Subject, project: string, scanFrom: string, scanTo: string): string {
+  return `${pageSessionsCte(basis, s, project, scanFrom, scanTo)},
      settled AS (
        SELECT session_id FROM scoped WHERE period = 'current'
        GROUP BY session_id HAVING max(ended_at) < now64(3) - toIntervalMillisecond({settled:Int64})
@@ -1637,7 +1900,7 @@ function qualityVisitsCtes(basis: PageBasis, target: string, project: string, sc
        FROM events AS e
        WHERE e.project_id = ${project} AND e.session_id != ''
          AND e.timestamp >= ${scanFrom} AND e.timestamp < ${scanTo}
-         AND ${normalizedPath("e.path")} = ${target}
+         AND ${s.view("e.path")}
          AND e.session_id IN (SELECT session_id FROM page_visits)
        GROUP BY session_id
      ),
@@ -1653,7 +1916,7 @@ function qualityVisitsCtes(basis: PageBasis, target: string, project: string, sc
          v.converted AS converted,
          v.is_settled AS is_settled,
          toUInt8(v.is_settled = 1 AND v.pageviews <= 1) AS is_bounce,
-         toUInt8(v.is_settled = 1 AND v.exit_path = ${target}) AS is_exit,
+         toUInt8(v.is_settled = 1 AND ${s.at("v.exit_path")}) AS is_exit,
          if(v.is_settled = 1, o.views, 0) AS finished_views,
          o.eng_total AS eng_total,
          o.measured AS measured
@@ -1670,16 +1933,16 @@ function qualityVisitsCtes(basis: PageBasis, target: string, project: string, sc
  * rather than asked for separately: a headline that is the sum of the chart beneath it
  * cannot disagree with it.
  */
-async function pageQuality(w: WebScope, path: string, basis: PageBasis): Promise<PageQuality> {
+async function pageQuality(w: WebScope, subject: SubjectOf, basis: PageBasis): Promise<PageQuality> {
   const { cte, params, project, scanFrom, scanTo } = sessionBase(w);
   const p = new Params("pq");
-  const target = `{${p.add(path)}:String}`;
+  const s = subject(p);
   const withGoal = hasGoal(w);
   const rows = await q<Row>(
     w.scope,
     `${cte},
      ${denseBuckets(w, p)},
-     ${qualityVisitsCtes(basis, target, project, scanFrom, scanTo)}
+     ${qualityVisitsCtes(basis, s, project, scanFrom, scanTo)}
      SELECT
        b.bucket AS bucket,
        ${QUALITY_COUNTS.map(([, name]) => `ifNull(a.${name}, 0) AS ${name}`).join(", ")}
@@ -1729,15 +1992,15 @@ const SOURCE_TREE_BRANCHES = 8;
  * whose visits were tagged has no campaigns, and a single "(none)" row would say only
  * that.
  */
-async function pageSourceTree(w: WebScope, path: string, basis: PageBasis): Promise<SourceNode[]> {
+async function pageSourceTree(w: WebScope, subject: SubjectOf, basis: PageBasis): Promise<SourceNode[]> {
   const { cte, params, project, scanFrom, scanTo } = sessionBase(w);
   const p = new Params("px");
-  const target = `{${p.add(path)}:String}`;
+  const s = subject(p);
   const withGoal = hasGoal(w);
   const rows = await q<Row>(
     w.scope,
     `${cte},
-     ${qualityVisitsCtes(basis, target, project, scanFrom, scanTo)}
+     ${qualityVisitsCtes(basis, s, project, scanFrom, scanTo)}
      SELECT 'channel' AS level, k_channel AS k1, '' AS k2, '' AS k3, ${qualityCountsSql}
      FROM quality_visits GROUP BY k1
      UNION ALL
@@ -1817,15 +2080,15 @@ async function pageSourceTree(w: WebScope, path: string, basis: PageBasis): Prom
  * the chart above it and a quiet week reads as a quiet week rather than as no week.
  * Channels are listed biggest first, which is the order of the tree beneath.
  */
-async function pageChannels(w: WebScope, path: string, basis: PageBasis): Promise<{ channels: string[]; points: StackedPoint[] }> {
+async function pageChannels(w: WebScope, subject: SubjectOf, basis: PageBasis): Promise<{ channels: string[]; points: StackedPoint[] }> {
   const { cte, params, project, scanFrom, scanTo } = sessionBase(w);
   const p = new Params("pc");
-  const target = `{${p.add(path)}:String}`;
+  const s = subject(p);
   const rows = await q<Row>(
     w.scope,
     `${cte},
      ${denseBuckets(w, p)},
-     ${pageSessionsCte(basis, target, project, scanFrom, scanTo)},
+     ${pageSessionsCte(basis, s, project, scanFrom, scanTo)},
      visits AS (
        -- Labelled exactly as the source tree labels them, so a band and a row agree.
        SELECT session_id, started_at, if(channel = '', '(none)', channel) AS channel
@@ -1881,12 +2144,25 @@ async function pageChannels(w: WebScope, path: string, basis: PageBasis): Promis
  * account for every settled visit that started here exactly once, and "left the site"
  * is a bounce. On the viewers basis it follows every view of the page, so a visit that
  * came back to it twice and went somewhere different each time appears under both.
+ *
+ * `leaving` asks it of a group instead: not the next view, which is usually another page
+ * of the same group, but where the visit went when it left the group — the view after
+ * the last of each unbroken stretch inside it. On the landing basis that is the first
+ * stretch, the one that began at the landing, once per visit; so "left the site" is
+ * every visit that ended without leaving the group, which is a bounce only when the
+ * stretch was one page long. `labelGroups` names the group each destination belongs to.
  */
-async function nextPagesAfter(w: WebScope, path: string, basis: PageBasis): Promise<NextPageRow[]> {
+async function nextPagesAfter(
+  w: WebScope,
+  subject: SubjectOf,
+  basis: PageBasis,
+  opts: { leaving?: boolean; labelGroups?: PageGroup[] } = {},
+): Promise<NextPageRow[]> {
   const { cte, params, project, scanFrom, scanTo } = sessionBase(w);
   const p = new Params("np");
-  const target = `{${p.add(path)}:String}`;
+  const s = subject(p);
   const landing = basis === "landing";
+  const frame = "OVER (PARTITION BY session_id ORDER BY ts ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)";
   const rows = await q<Row>(
     w.scope,
     `${cte},
@@ -1895,39 +2171,54 @@ async function nextPagesAfter(w: WebScope, path: string, basis: PageBasis): Prom
          e.session_id AS session_id,
          e.timestamp AS ts,
          ${normalizedPath("e.path")} AS path,
-         b.started_at AS started_at
+         toUInt8(${s.view("e.path")}) AS on_subject
        FROM events AS e
        INNER JOIN scoped AS b ON b.session_id = e.session_id
        WHERE e.project_id = ${project} AND e.type = 'page' AND b.period = 'current'
          AND e.timestamp >= ${scanFrom} AND e.timestamp < ${scanTo}
-         ${landing ? `AND b.entry_path = ${target}` : ""}
+         ${landing ? `AND ${s.at("b.entry_path")}` : ""}
      ),
      ordered AS (
        SELECT
          session_id,
-         path,
          ts,
-         leadInFrame(path) OVER (PARTITION BY session_id ORDER BY ts ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS next_path,
-         -- Which view of this path within the visit. The landing basis keeps only the
-         -- first, which in a visit that started here is the landing itself.
-         row_number() OVER (PARTITION BY session_id, path ORDER BY ts ASC) AS nth_view
+         on_subject,
+         leadInFrame(path) ${frame} AS next_path,
+         -- 0 past the last view, as the path is '' there: leaving the site leaves the group.
+         leadInFrame(on_subject) ${frame} AS next_on
        FROM views
+     ),
+     departures AS (
+       -- The views the answer is read from, numbered within the visit: every view of a
+       -- page, or the last view of each stretch in a group. The landing basis keeps only
+       -- the first, which in a visit that started here is the landing itself.
+       SELECT session_id, next_path, row_number() OVER (PARTITION BY session_id ORDER BY ts ASC) AS nth
+       FROM ordered
+       WHERE on_subject = 1 ${opts.leaving ? "AND next_on = 0" : ""}
      ),
      settled AS (
        SELECT session_id FROM scoped WHERE period = 'current'
        GROUP BY session_id HAVING max(ended_at) < now64(3) - toIntervalMillisecond({settled:Int64})
      )
-     SELECT
-       multiIf(next_path != '', next_path, session_id IN (SELECT session_id FROM settled), '', NULL) AS key,
-       uniqExact(session_id) AS sessions
-     FROM ordered
-     WHERE path = ${target} ${landing ? "AND nth_view = 1" : ""}
-     GROUP BY key
-     HAVING isNotNull(key)
+     SELECT key, sessions${opts.labelGroups ? `, ${pageGroupSql(opts.labelGroups, "key", p)} AS dest_group` : ""}
+     FROM (
+       SELECT
+         multiIf(next_path != '', next_path, session_id IN (SELECT session_id FROM settled), '', NULL) AS key,
+         uniqExact(session_id) AS sessions
+       FROM departures
+       ${landing ? "WHERE nth = 1" : ""}
+       GROUP BY key
+       HAVING isNotNull(key)
+     )
      ORDER BY sessions DESC LIMIT 10`,
     { ...params, ...p.values, settled: SESSION_SETTLED_MS },
   );
-  return rows.map((r) => ({ path: String(r.key ?? ""), sessions: num(r.sessions), is_exit: String(r.key ?? "") === "" }));
+  return rows.map((r) => {
+    const path = String(r.key ?? "");
+    const row: NextPageRow = { path, sessions: num(r.sessions), is_exit: path === "" };
+    if (opts.labelGroups && path) row.group = String(r.dest_group ?? "");
+    return row;
+  });
 }
 
 /**
@@ -1935,13 +2226,13 @@ async function nextPagesAfter(w: WebScope, path: string, basis: PageBasis): Prom
  * them — among the visits on the basis on screen, so on the landing basis both the
  * clickers and the viewers they are divided by are people whose visit started here.
  */
-async function pageActions(w: WebScope, path: string, basis: PageBasis): Promise<PageActionRow[]> {
+async function pageActions(w: WebScope, subject: SubjectOf, basis: PageBasis): Promise<PageActionRow[]> {
   // Leaves, so first-match-wins names the specific value rather than the rollup holding it.
   const supporting = leafGoals(w.goals).filter((g) => g.config.type === "supporting");
   if (!supporting.length) return [];
   const { cte, params, project, scanFrom, scanTo } = sessionBase(w);
   const p = new Params("pa");
-  const target = `{${p.add(path)}:String}`;
+  const s = subject(p);
   const branches = supporting.map((g) => `${matchSql(g.config, p)}, {${p.add(g.name)}:String}`).join(", ");
 
   const rows = await q<Row>(
@@ -1953,8 +2244,8 @@ async function pageActions(w: WebScope, path: string, basis: PageBasis): Promise
        INNER JOIN scoped AS b ON b.session_id = e.session_id
        WHERE e.project_id = ${project} AND b.period = 'current'
          AND e.timestamp >= ${scanFrom} AND e.timestamp < ${scanTo}
-         AND ${normalizedPath("e.path")} = ${target}
-         ${basis === "landing" ? `AND b.entry_path = ${target}` : ""}
+         AND ${s.view("e.path")}
+         ${basis === "landing" ? `AND ${s.at("b.entry_path")}` : ""}
      ),
      viewers AS (SELECT uniqExactIf(person_id, type = 'page') AS n FROM on_page)
      SELECT action AS name, uniqExact(person_id) AS clickers, (SELECT n FROM viewers) AS viewers
