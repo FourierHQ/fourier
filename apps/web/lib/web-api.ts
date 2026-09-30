@@ -21,6 +21,7 @@ import type {
   LandingPageRow,
   PageDetail,
   PageGroup,
+  PageGroupDetail,
   PageRow,
   RatePoint,
   SeriesPoint,
@@ -60,6 +61,10 @@ export type {
   LandingPageRow,
   PageDetail,
   PageGroup,
+  PageGroupDetail,
+  GoalWentOn,
+  NextPageRow,
+  PathRule,
   PageRow,
   PageTimePoint,
   SourceNode,
@@ -176,6 +181,13 @@ export interface PageDetailReport {
   detail: Settled<PageDetail>;
 }
 
+export interface PageGroupDetailReport {
+  scope: ScopeEcho;
+  group: string;
+  basis: "landing" | "viewers";
+  detail: Settled<PageGroupDetail>;
+}
+
 export interface GoalDetailReport {
   scope: ScopeEcho;
   definition: string;
@@ -249,6 +261,19 @@ export function useWebPageDetail(path: string | null, basis: "landing" | "viewer
     queryKey: ["web", "page-detail", qs],
     queryFn: () => api<PageDetailReport>(`/api/projects/${PROJECT}/web/page-detail?${qs}`),
     enabled: Boolean(path),
+    placeholderData: (prev) => prev,
+  });
+}
+
+/** One page group, as useWebPageDetail is one page. */
+export function useWebPageGroupDetail(group: string | null, basis: "landing" | "viewers") {
+  const environment = useEnvironmentValue();
+  const { query } = useWebState();
+  const qs = query({ tz: readerTimezone(), group, basis, environment });
+  return useQuery({
+    queryKey: ["web", "group-detail", qs],
+    queryFn: () => api<PageGroupDetailReport>(`/api/projects/${PROJECT}/web/group-detail?${qs}`),
+    enabled: Boolean(group),
     placeholderData: (prev) => prev,
   });
 }

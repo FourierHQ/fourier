@@ -169,12 +169,18 @@ export function WentOnPanel({
   baseline,
   subject,
   loading,
+  label = "This page",
+  nobody = "Nobody reached this page this way in the selected period.",
 }: {
   value: WentOn | null | undefined;
   baseline: WentOn | null | undefined;
   /** Who the page's row is about, for the sentence: "people who landed here". */
   subject: string;
   loading?: boolean;
+  /** The row for the thing itself, beside "Every visitor". */
+  label?: string;
+  /** Said instead when nobody reached it on this basis. */
+  nobody?: string;
 }) {
   if (loading && !value) {
     return (
@@ -185,7 +191,7 @@ export function WentOnPanel({
     );
   }
   if (!value) return null;
-  if (value.people === 0) return <p className="p-4 text-sm text-muted-foreground">Nobody reached this page this way in the selected period.</p>;
+  if (value.people === 0) return <p className="p-4 text-sm text-muted-foreground">{nobody}</p>;
 
   const scale = Math.max(value.rate.rate ?? 0, baseline?.rate.rate ?? 0);
   const n = converted(value);
@@ -194,7 +200,7 @@ export function WentOnPanel({
   return (
     <div className="space-y-3 p-4">
       <Row
-        label="This page"
+        label={label}
         value={value}
         scale={scale}
         segments={WENT_ON_PARTS.map((p) => ({ key: p.key, label: p.label, n: value[p.key], color: p.color }))}
