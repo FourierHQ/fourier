@@ -6,7 +6,7 @@ import { Sheet, SheetDescription, SheetHeader, SheetTitle } from "@/components/u
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { ChannelStack, DurationChart, RateChart, TrendChart, stackColors } from "@/components/web/charts";
+import { ChannelStack, CountChart, DurationChart, RateChart, TrendChart, stackColors } from "@/components/web/charts";
 import { ActiveFilters } from "@/components/web/controls";
 import { DetailSheetContent, DetailStat } from "@/components/web/detail-sheet";
 import { DeltaBadge, MetricLabel, RateCell } from "@/components/web/metric";
@@ -22,7 +22,7 @@ export type Basis = "landing" | "viewers";
 /** What both drawers show: everything a page's drawer has, which a group's has too. */
 export type DetailFigures = Omit<PageDetail, "path" | "title">;
 
-export type ChartKey = "traffic" | "engaged" | "bounce" | "time" | "conversion" | "exit";
+export type ChartKey = "traffic" | "engaged" | "bounce" | "time" | "conversion" | "exit" | "conversions";
 
 /**
  * Everything in a drawer that changes with the basis or with what it is about, in one
@@ -59,6 +59,14 @@ const PAGE_HINTS = {
     "Fourier does not record whether a button was ever scrolled into view, so this is clickers as a share of everyone who viewed the page — not a click-through rate on impressions.",
 };
 
+/**
+ * The Conversions chart's note, for whoever the drawer is about. The same sentence for a
+ * page and a group is what keeps the chart and the strip's Went on to convert figure
+ * reading as one thing: the chart is that figure, spread over time.
+ */
+export const CONVERSIONS_NOTE = (who: string, dated: string) =>
+  `Of the ${who}, how many went on to convert — in that visit, or by coming back — counted once each, ${dated}. The columns add up to the people counted in Went on to convert above. The latest ones read low whatever the page does: people who arrived recently have had less time to come back.`;
+
 const PAGE_EMPTY_ACTIONS = "None of your supporting actions were triggered on this page by these visits.";
 const PAGE_EMPTY_WENT_ON = "Nobody reached this page this way in the selected period.";
 
@@ -81,6 +89,7 @@ const COPY: Record<Basis, DetailCopy> = {
       bounce: "Of the finished visits that started here, the share that saw no other page.",
       time: "Measured time on this page per view, in visits that started here. Where nothing was measured for a while, dots mark the readings and the line joins them.",
       conversion: "Of the visits that started here, the share that converted in that same visit.",
+      conversions: CONVERSIONS_NOTE("people whose visit started on this page", "when that visit began"),
     },
     empty: { sources: "No visits started on this page in the selected period.", actions: PAGE_EMPTY_ACTIONS, wentOn: PAGE_EMPTY_WENT_ON },
   },
@@ -101,6 +110,7 @@ const COPY: Record<Basis, DetailCopy> = {
       traffic: "Distinct people who viewed this page. The previous period is dashed.",
       time: "Measured time on this page per view. Where nothing was measured for a while, dots mark the readings and the line joins them.",
       exit: "Of this page's views in finished visits, the share that were the visit's last page.",
+      conversions: CONVERSIONS_NOTE("people who viewed this page", "when the first visit that viewed it began"),
     },
     empty: { sources: "Nobody viewed this page in the selected period.", actions: PAGE_EMPTY_ACTIONS, wentOn: PAGE_EMPTY_WENT_ON },
   },
@@ -108,10 +118,11 @@ const COPY: Record<Basis, DetailCopy> = {
 
 /**
  * What the Over time chart can draw, per basis: the strip above it, less the figures
- * that are not a series. Engagement, bounce and conversion are offered on the landing
+ * that are not a series. Engagement, bounce and conversion rate are offered on the landing
  * basis only and exit rate on the viewers basis only — over the other population each
  * is either arithmetic or another metric's double (see PageTimePoint in core) — which is
- * why the two lists are not the same list.
+ * why the two lists are not the same list. Conversions is on both: it is the Went on to
+ * convert figure, which both bases have, spread over the period.
  */
 const CHARTS: Record<Basis, { key: ChartKey; label: string }[]> = {
   landing: [
@@ -120,13 +131,18 @@ const CHARTS: Record<Basis, { key: ChartKey; label: string }[]> = {
     { key: "bounce", label: "Bounce rate" },
     { key: "time", label: "Time on page" },
     { key: "conversion", label: "Conv. rate" },
+    { key: "conversions", label: "Conversions" },
   ],
   viewers: [
     { key: "traffic", label: "Viewers" },
     { key: "time", label: "Time on page" },
     { key: "exit", label: "Exit rate" },
+    { key: "conversions", label: "Conversions" },
   ],
 };
+
+/** The measures that are about the goal, and so wait on one being configured. */
+const NEEDS_GOAL: ChartKey[] = ["conversion", "conversions"];
 
 /** One rate from each bucket, as the rate chart draws it. A bucket with nothing to divide has no rate, and the line joins across it. */
 const rateSeries = (points: PageTimePoint[] | undefined, pick: (p: PageTimePoint) => RateValue | null) =>
@@ -359,7 +375,7 @@ export function OverTimeSection({
   // Kept across a switch of basis where the other basis has it too, so moving between
   // the tabs keeps Time on page on screen; where it does not, the chart falls back to
   // traffic rather than drawing a rate the basis lacks.
-  const charts = CHARTS[shown].filter((c) => c.key !== "conversion" || hasGoal);
+  const charts = CHARTS[shown].filter((c) => hasGoal || !NEEDS_GOAL.includes(c.key));
   const chart = charts.find((c) => c.key === chartKey) ?? charts[0];
   const points = detail?.over_time;
   return (
@@ -397,6 +413,22 @@ export function OverTimeSection({
           <RateChart data={rateSeries(points, (p) => p.engagement_rate)} label="Engaged" unit="visits" fullScale interval={interval} loading={loading} className="h-[180px] w-full" />
         ) : chart.key === "bounce" ? (
           <RateChart data={rateSeries(points, (p) => p.bounce_rate)} label="Bounce rate" unit="finished visits" fullScale interval={interval} loading={loading} className="h-[180px] w-full" />
+        ) : chart.key === "conversions" ? (
+          // Nobody converting is an answer, and a row of empty columns on an axis that
+          // runs to 4 does not read as one — it reads as a chart that failed to load.
+          points?.every((p) => !p.converters) ? (
+            <p className="flex h-[180px] items-center justify-center rounded-md border border-dashed px-4 text-center text-sm text-muted-foreground">
+              Nobody among the {copy.subject} went on to convert in this period.
+            </p>
+          ) : (
+            <CountChart
+              data={points?.map((p) => ({ bucket: p.bucket, value: p.converters ?? 0, previous: null }))}
+              label="Went on to convert"
+              interval={interval}
+              loading={loading}
+              className="h-[180px] w-full"
+            />
+          )
         ) : chart.key === "exit" ? (
           <RateChart data={rateSeries(points, (p) => p.exit_rate)} label="Exit rate" unit="views" fullScale interval={interval} loading={loading} className="h-[180px] w-full" />
         ) : (
