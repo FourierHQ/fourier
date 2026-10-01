@@ -54,6 +54,7 @@ export function EventsTable({
   showCompany = true,
   emptyTitle = "No events yet",
   emptyDescription,
+  onFilterProperty,
 }: {
   events: EventRecord[] | undefined;
   loading?: boolean;
@@ -61,6 +62,8 @@ export function EventsTable({
   showCompany?: boolean;
   emptyTitle?: string;
   emptyDescription?: React.ReactNode;
+  /** Where the table sits over a filterable feed: narrow it to one property's value. */
+  onFilterProperty?: (key: string, value: string) => void;
 }) {
   const sourceName = useSourceName();
   // The event name is the thing being read; properties are the supporting detail. With
@@ -179,7 +182,12 @@ export function EventsTable({
                       <div className="grid gap-4 md:grid-cols-2">
                         <div>
                           <h4 className="mb-1.5 text-xs font-medium text-muted-foreground">{e.type === "identify" || e.type === "group" ? "Traits" : "Properties"}</h4>
-                          <JsonView data={e.type === "identify" || e.type === "group" ? e.traits : e.properties} />
+                          {/* Traits are not properties and no property filter reads them,
+                              so only an event's own properties offer to filter by. */}
+                          <JsonView
+                            data={e.type === "identify" || e.type === "group" ? e.traits : e.properties}
+                            onFilter={e.type === "identify" || e.type === "group" ? undefined : onFilterProperty}
+                          />
                         </div>
                         <div>
                           <h4 className="mb-1.5 text-xs font-medium text-muted-foreground">Context</h4>

@@ -1,6 +1,6 @@
 import { eventTimeseries } from "@fourierhq/core";
 import { readScope, resolveProject } from "@/lib/db";
-import { error, handle, int, json, options } from "@/lib/http";
+import { error, handle, int, json, options, propertyFilters } from "@/lib/http";
 import { requireProjectAccess } from "@/lib/auth";
 
 export const runtime = "nodejs";
@@ -15,10 +15,14 @@ export const GET = handle(requireProjectAccess(async (req: Request, { params }: 
   const scope = await readScope(project.id, req);
   const s = new URL(req.url).searchParams;
   const interval = (s.get("interval") ?? "day") as "hour" | "day" | "week" | "month";
+  const properties = propertyFilters(s.get("properties"));
+  if (!properties.ok) return error(properties.error);
   const series = await eventTimeseries(scope, {
     event: s.get("event") ?? undefined,
     groupId: s.get("group_id") ?? undefined,
     sourceId: s.get("source") ?? undefined,
+    search: s.get("q") ?? undefined,
+    properties: properties.value,
     interval,
     from: s.get("from") ?? undefined,
     to: s.get("to") ?? undefined,

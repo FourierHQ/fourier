@@ -1,11 +1,11 @@
 "use client";
 
 import { useMemo } from "react";
-import { Bar, BarChart, CartesianGrid, ComposedChart, Line, LineChart, XAxis, YAxis } from "recharts";
+import { Bar, BarChart, CartesianGrid, ComposedChart, Line, LineChart, XAxis, YAxis, type DotItemDotProps } from "recharts";
 import { ChartContainer, ChartLegend, ChartLegendContent, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
-import { formatDate, formatNumber, formatRate, formatRatio, parseDate } from "@/lib/format";
+import { formatDate, formatDuration, formatNumber, formatRate, formatRatio, parseDate } from "@/lib/format";
 import type { FunnelStep, RatePoint, SeriesPoint } from "@/lib/web-api";
 
 /**
@@ -69,10 +69,108 @@ export function TrendChart({
 }
 
 /**
- * Conversion rate over time, in its own aligned chart rather than on a second axis of
- * the traffic chart. The tooltip carries both counts, so a spike that is two visits out
- * of three is visibly that rather than a 67% success.
+ * Dots on the readings, wherever the line joins across a gap.
+ *
+ * A series can have buckets with nothing in it — no visits to divide, nothing measured —
+ * and the line is joined across them, because a chart of fragments cannot be read as a
+ * trend at all. But a joined stretch is a straight line through buckets that have no
+ * value, and nothing about it says so. So when the series has a gap between its first
+ * reading and its last, every real reading gets a dot, and a stretch between two dots
+ * with none on it reads as the join it is. A series with no gaps draws no dots; leading
+ * and trailing empty buckets are not joined to anything and need none.
  */
+function readingDots(values: (number | null)[], color: string) {
+  let first = -1;
+  let last = -1;
+  values.forEach((v, i) => {
+    if (v == null) return;
+    if (first < 0) first = i;
+    last = i;
+  });
+  const gapped = first >= 0 && values.slice(first, last + 1).some((v) => v == null);
+  if (!gapped) return false;
+  return ({ cx, cy, index }: DotItemDotProps) =>
+    values[index] != null && cx != null && cy != null ? <circle cx={cx} cy={cy} r={2.5} fill={color} /> : <g />;
+}
+
+/** A rate at one bucket, with the working behind it. */
+export interface RateSeriesPoint {
+  bucket: string;
+  /** Null where there was nothing to divide by: joined across, never drawn as a zero. */
+  rate: number | null;
+  numerator: number;
+  denominator: number;
+}
+
+/**
+ * A rate over time, in its own chart rather than on a second axis of a traffic chart.
+ * The tooltip carries both counts, so a spike that is two visits out of three is
+ * visibly that rather than a 67% success.
+ *
+ * `fullScale` draws it on 0–100%. A share that can sit anywhere in that range —
+ * engagement, bounce, exit — is drawn on all of it, so a move from 61% to 64% looks
+ * like three points and not like a cliff. Conversion rates live in the low single
+ * digits and keep the fitted scale, or they would be a line along the floor.
+ */
+export function RateChart({
+  data,
+  label,
+  unit = "sessions",
+  interval = "day",
+  loading,
+  className = "h-[200px] w-full",
+  color = "var(--chart-2)",
+  fullScale = false,
+}: {
+  data: RateSeriesPoint[] | undefined;
+  label: string;
+  /** What the denominator counts, for the tooltip: "12 of 40 visits". */
+  unit?: string;
+  interval?: Interval;
+  loading?: boolean;
+  className?: string;
+  color?: string;
+  fullScale?: boolean;
+}) {
+  const rows = useMemo(() => (data ?? []).map((p) => ({ ...p, t: parseDate(p.bucket)?.getTime() ?? 0 })), [data]);
+  const dot = useMemo(() => readingDots(rows.map((r) => r.rate), color), [rows, color]);
+  const config = { rate: { label, color } } satisfies ChartConfig;
+  if (loading && !data) return <Skeleton className={className} />;
+  const fmt = tickFormatter(interval);
+  return (
+    <ChartContainer config={config} className={className}>
+      <LineChart data={rows} margin={{ left: 0, right: 8, top: 8, bottom: 0 }}>
+        <CartesianGrid vertical={false} strokeDasharray="3 3" />
+        <XAxis dataKey="t" type="number" domain={["dataMin", "dataMax"]} tickFormatter={fmt} tickLine={false} axisLine={false} minTickGap={32} fontSize={11} />
+        <YAxis tickFormatter={(v) => `${v}%`} tickLine={false} axisLine={false} width={44} fontSize={11} domain={fullScale ? [0, 100] : undefined} ticks={fullScale ? [0, 25, 50, 75, 100] : undefined} />
+        <ChartTooltip
+          cursor={false}
+          content={
+            <ChartTooltipContent
+              labelFormatter={(_, p) => fmt((p?.[0]?.payload as { t: number })?.t ?? 0)}
+              formatter={(_v, _n, item) => {
+                const p = item?.payload as RateSeriesPoint | undefined;
+                if (!p) return null;
+                return (
+                  <span className="flex flex-col">
+                    <span className="font-medium">{formatRate(p.rate)}</span>
+                    <span className="text-muted-foreground">{formatRatio(p.numerator, p.denominator, unit)}</span>
+                  </span>
+                );
+              }}
+            />
+          }
+        />
+        {/* Joined across buckets with nothing to divide, with the readings dotted
+            wherever it is (readingDots). Never drawn at zero: an empty bucket has no
+            rate, and a zero would claim that nobody converted. */}
+        <Line dataKey="rate" type="monotone" stroke="var(--color-rate)" strokeWidth={2} dot={dot} activeDot={{ r: 3 }} connectNulls />
+      </LineChart>
+    </ChartContainer>
+  );
+}
+
+/** Conversion rate over time: the rate chart, over converting sessions. */
 export function ConversionRateChart({
   data,
   interval = "day",
@@ -84,8 +182,47 @@ export function ConversionRateChart({
   loading?: boolean;
   className?: string;
 }) {
+  const points = useMemo(() => data?.map((p) => ({ bucket: p.bucket, rate: p.rate, numerator: p.converting, denominator: p.sessions })), [data]);
+  return <RateChart data={points} label="Conversion rate" interval={interval} loading={loading} className={className} />;
+}
+
+/** Measured time at one bucket. */
+export interface DurationPoint {
+  bucket: string;
+  /** Mean milliseconds. Null where nothing was measured: joined across, never zero seconds. */
+  value: number | null;
+  /** How many measurements the mean is over, for the tooltip. */
+  measured: number;
+}
+
+/**
+ * Measured time over time — a mean, so a line. A bucket in which nothing reported a
+ * measurement is not a bucket of nobody reading, and drawing it at zero would show
+ * attention collapsing on every day the SDK was not installed yet; the line is joined
+ * across it instead, with the readings dotted (readingDots). The tooltip says how many
+ * views each mean is over, because a minute averaged over one view and over three
+ * hundred are different findings.
+ */
+export function DurationChart({
+  data,
+  label,
+  unit = "measured views",
+  interval = "day",
+  loading,
+  className = "h-[200px] w-full",
+  color = "var(--chart-1)",
+}: {
+  data: DurationPoint[] | undefined;
+  label: string;
+  unit?: string;
+  interval?: Interval;
+  loading?: boolean;
+  className?: string;
+  color?: string;
+}) {
   const rows = useMemo(() => (data ?? []).map((p) => ({ ...p, t: parseDate(p.bucket)?.getTime() ?? 0 })), [data]);
-  const config = { rate: { label: "Conversion rate", color: "var(--chart-2)" } } satisfies ChartConfig;
+  const dot = useMemo(() => readingDots(rows.map((r) => r.value), color), [rows, color]);
+  const config = { value: { label, color } } satisfies ChartConfig;
   if (loading && !data) return <Skeleton className={className} />;
   const fmt = tickFormatter(interval);
   return (
@@ -93,28 +230,28 @@ export function ConversionRateChart({
       <LineChart data={rows} margin={{ left: 0, right: 8, top: 8, bottom: 0 }}>
         <CartesianGrid vertical={false} strokeDasharray="3 3" />
         <XAxis dataKey="t" type="number" domain={["dataMin", "dataMax"]} tickFormatter={fmt} tickLine={false} axisLine={false} minTickGap={32} fontSize={11} />
-        <YAxis tickFormatter={(v) => `${v}%`} tickLine={false} axisLine={false} width={44} fontSize={11} />
+        <YAxis tickFormatter={(v) => formatDuration(v)} tickLine={false} axisLine={false} width={52} fontSize={11} />
         <ChartTooltip
           cursor={false}
           content={
             <ChartTooltipContent
               labelFormatter={(_, p) => fmt((p?.[0]?.payload as { t: number })?.t ?? 0)}
               formatter={(_v, _n, item) => {
-                const p = item?.payload as RatePoint | undefined;
+                const p = item?.payload as DurationPoint | undefined;
                 if (!p) return null;
                 return (
                   <span className="flex flex-col">
-                    <span className="font-medium">{formatRate(p.rate)}</span>
-                    <span className="text-muted-foreground">{formatRatio(p.converting, p.sessions)}</span>
+                    <span className="font-medium">{formatDuration(p.value)}</span>
+                    <span className="text-muted-foreground">
+                      {p.measured ? `average of ${formatNumber(p.measured)} ${unit}` : "nothing measured"}
+                    </span>
                   </span>
                 );
               }}
             />
           }
         />
-        {/* connectNulls is off: a bucket with no sessions has no rate, and joining
-            across the gap would draw a line through a value that does not exist. */}
-        <Line dataKey="rate" type="monotone" stroke="var(--color-rate)" strokeWidth={2} dot={false} activeDot={{ r: 3 }} connectNulls={false} />
+        <Line dataKey="value" type="monotone" stroke="var(--color-value)" strokeWidth={2} dot={dot} activeDot={{ r: 3 }} connectNulls />
       </LineChart>
     </ChartContainer>
   );
@@ -180,27 +317,44 @@ export function CountChart({
 
 const STACK_COLORS = ["var(--chart-1)", "var(--chart-2)", "var(--chart-3)", "var(--chart-4)", "var(--chart-5)", "var(--muted-foreground)"];
 
+/** The server's name for the band that sums every channel outside the top five (OTHER_CHANNELS in core). */
+const OTHER_BAND = "Other channels";
+
+/**
+ * Each band's colour, by channel name — the one assignment ChannelStack draws with, so a
+ * list beside the chart can key its rows to the bands rather than re-deriving the colours
+ * and drifting from them. A channel with no band of its own is inside "Other channels"
+ * and takes that band's colour; with no such band it has none.
+ */
+export function stackColors(channels: string[] | undefined): (name: string) => string | undefined {
+  const colors = new Map((channels ?? []).map((name, i) => [name, STACK_COLORS[i % STACK_COLORS.length]]));
+  return (name) => colors.get(name) ?? colors.get(OTHER_BAND);
+}
+
 export function ChannelStack({
   channels,
   points,
   interval = "day",
   loading,
   className = "h-[260px] w-full",
+  legend = true,
 }: {
   channels: string[] | undefined;
   points: { bucket: string; values: Record<string, number> }[] | undefined;
   interval?: Interval;
   loading?: boolean;
   className?: string;
+  /** Off where a list keyed with stackColors sits beside the chart and already says which band is which. */
+  legend?: boolean;
 }) {
   // The chart wrapper emits one `--color-<key>` custom property per config key, so the
   // keys have to be valid CSS identifiers. Channel names are not — "Paid Social" would
   // produce `--color-Paid Social`, which the browser discards, and every band would
   // render with no fill. Data keys are slugs; the human name rides along as the label.
-  const series = useMemo(
-    () => (channels ?? []).map((name, i) => ({ name, key: `ch${i}`, color: STACK_COLORS[i % STACK_COLORS.length] })),
-    [channels],
-  );
+  const series = useMemo(() => {
+    const colorOf = stackColors(channels);
+    return (channels ?? []).map((name, i) => ({ name, key: `ch${i}`, color: colorOf(name) }));
+  }, [channels]);
   const rows = useMemo(
     () => (points ?? []).map((p) => ({ t: parseDate(p.bucket)?.getTime() ?? 0, ...Object.fromEntries(series.map((s) => [s.key, p.values[s.name] ?? 0])) })),
     [points, series],
@@ -221,7 +375,7 @@ export function ChannelStack({
         {series.map((s) => (
           <Bar key={s.key} dataKey={s.key} stackId="c" fill={`var(--color-${s.key})`} radius={0} />
         ))}
-        <ChartLegend content={<ChartLegendContent />} />
+        {legend && <ChartLegend content={<ChartLegendContent />} />}
       </BarChart>
     </ChartContainer>
   );
@@ -235,7 +389,8 @@ export function HorizontalBars({
   onSelect,
   formatValue = formatNumber,
 }: {
-  rows: { key: string; value: number; label?: string; sub?: string }[] | undefined;
+  /** `color` marks the row with a swatch, for a list keyed to a chart beside it. */
+  rows: { key: string; value: number; label?: string; sub?: string; color?: string }[] | undefined;
   loading?: boolean;
   emptyLabel?: string;
   onSelect?: (key: string) => void;
@@ -266,7 +421,10 @@ export function HorizontalBars({
         >
           <div className="absolute inset-y-1 left-1 rounded-sm bg-primary/10" style={{ width: `${Math.max((r.value / max) * 100, 1)}%` }} aria-hidden />
           <div className="relative flex items-center justify-between gap-3">
-            <span className="truncate text-sm">{r.label ?? r.key}</span>
+            <span className="flex min-w-0 items-center gap-2">
+              {r.color && <span className="size-2 shrink-0 rounded-[2px]" style={{ background: r.color }} aria-hidden />}
+              <span className="truncate text-sm">{r.label ?? r.key}</span>
+            </span>
             <span className="shrink-0 text-right text-sm tabular-nums">
               {formatValue(r.value)}
               {r.sub && <span className="ml-2 text-[11px] text-muted-foreground">{r.sub}</span>}

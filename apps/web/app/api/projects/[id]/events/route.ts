@@ -1,6 +1,6 @@
 import { listEvents } from "@fourierhq/core";
 import { readScope, resolveProject } from "@/lib/db";
-import { error, handle, int, json, options } from "@/lib/http";
+import { error, handle, int, json, options, propertyFilters } from "@/lib/http";
 import { requireProjectAccess } from "@/lib/auth";
 
 export const runtime = "nodejs";
@@ -14,6 +14,8 @@ export const GET = handle(requireProjectAccess(async (req: Request, { params }: 
   if (!project) return error("Project not found", 404);
   const scope = await readScope(project.id, req);
   const s = new URL(req.url).searchParams;
+  const properties = propertyFilters(s.get("properties"));
+  if (!properties.ok) return error(properties.error);
   const events = await listEvents(scope, {
     event: s.get("event") ?? undefined,
     type: s.get("type") ?? undefined,
@@ -24,6 +26,7 @@ export const GET = handle(requireProjectAccess(async (req: Request, { params }: 
     before: s.get("before") ?? undefined,
     after: s.get("after") ?? undefined,
     search: s.get("q") ?? undefined,
+    properties: properties.value,
     limit: int(s.get("limit"), 50),
   });
   return json({ events, next_before: events.length ? events[events.length - 1].timestamp : null });

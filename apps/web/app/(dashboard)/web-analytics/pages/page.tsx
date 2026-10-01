@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { WebControls, useClearFilters } from "@/components/web/controls";
 import { DeltaBadge, MetricLabel, RateCell } from "@/components/web/metric";
+import { PageGroupDetailSheet } from "@/components/web/group-detail";
 import { PageDetailSheet } from "@/components/web/page-detail";
 import { PageGroupsDialog } from "@/components/web/page-groups";
 import { RankedTable, type Column } from "@/components/web/ranked-table";
@@ -157,6 +158,10 @@ export default function PagesPage() {
   const groupBy = get("group_by") === "group" ? "group" : "page";
   const search = get("q");
   const selected = get("page");
+  // A group's drawer, and the page opened from inside it: the group stays in the URL
+  // while the page is open, so the page's drawer can go back to it.
+  const selectedGroup = get("group");
+  const basis = get("basis") === "viewers" ? "viewers" : "landing";
   const report = useWebPages(tab, groupBy, search, get("sort"), get("dir"));
 
   // What is actually on screen. Deliberately NOT the two above: until the new rows
@@ -384,7 +389,7 @@ export default function PagesPage() {
                   empty={empty}
                   baseline={baseline}
                   {...sorting}
-                  onSelect={isGroups ? undefined : (r) => set({ page: r.path, basis: "viewers" })}
+                  onSelect={(r) => set({ [isGroups ? "group" : "page"]: r.path, basis: "viewers" })}
                 />
               ) : (
                 <RankedTable<LandingPageRow>
@@ -392,8 +397,7 @@ export default function PagesPage() {
                   loading={loading}
                   rowKey={(r) => r.path}
                   barOf={(r) => r.landing_sessions.current / Math.max(...(unwrap(data?.rows) ?? []).map((x) => x.landing_sessions.current), 1)}
-                  // Groups are a rollup, not a page, so there is no page detail behind them.
-                  onSelect={isGroups ? undefined : (r) => set({ page: r.path, basis: "landing" })}
+                  onSelect={(r) => set({ [isGroups ? "group" : "page"]: r.path, basis: "landing" })}
                   columns={landingColumns}
                   empty={empty}
                   {...sorting}
@@ -420,7 +424,20 @@ export default function PagesPage() {
         </Card>
       )}
 
-      <PageDetailSheet path={selected} basis={get("basis") === "viewers" ? "viewers" : "landing"} onBasisChange={(basis) => set({ basis })} onClose={() => set({ page: null, basis: null })} />
+      <PageGroupDetailSheet
+        group={selected ? null : selectedGroup}
+        basis={basis}
+        onBasisChange={(b) => set({ basis: b })}
+        onClose={() => set({ group: null, basis: null })}
+        onSelectPage={(path) => set({ page: path })}
+      />
+      <PageDetailSheet
+        path={selected}
+        basis={basis}
+        onBasisChange={(b) => set({ basis: b })}
+        onClose={() => set({ page: null, group: null, basis: null })}
+        backTo={selectedGroup ? { label: selectedGroup, onBack: () => set({ page: null }) } : null}
+      />
     </div>
   );
 }
