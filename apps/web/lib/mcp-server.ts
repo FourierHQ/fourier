@@ -62,7 +62,7 @@ const environmentArg = z
   .enum(ENVIRONMENTS)
   .optional()
   .describe(
-    "Which environment to read: production, preview or development. Each is a separate database and they share no users, companies or events. Omit for production.",
+    "Which environment to read: production, preview, development or test. Each is a separate database and they share no users, companies or events. Test holds only data imported from Amplitude. Omit for production.",
   );
 
 async function project(id?: string) {
