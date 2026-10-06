@@ -79,49 +79,71 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
 test("engagement: a page reports the foreground time it actually measured", async () => {
   const { f, sent, fire } = await setup();
+  const started = Date.now();
   await f.page();
   await wait(2200);
   fire("window", "pagehide");
+  const elapsed = Date.now() - started;
   await wait(20);
 
   const [leave] = leaves(sent);
   assert.ok(leave, "leaving the page reports what was measured");
   const ms = leave.properties.engaged_ms;
-  // Two seconds of wall clock, allowing for timer jitter in either direction.
-  assert.ok(ms >= 1500 && ms <= 3200, `expected roughly 2s of engagement, got ${ms}ms`);
+  // Two seconds of wall clock. The ceiling is the time this run actually took rather
+  // than a fixed number: a loaded runner that oversleeps the wait leaves the page open
+  // longer and legitimately measures more, but measuring more than the page was open
+  // is always wrong, however slow the machine.
+  assert.ok(ms >= 1500, `expected roughly 2s of engagement, got ${ms}ms`);
+  assert.ok(ms <= elapsed + 300, `cannot measure more than the ${elapsed}ms the page was open, got ${ms}ms`);
   assert.equal(leave.properties.path, "/pricing");
 });
 
 test("engagement: a hidden tab's time is not counted", async () => {
   const { f, sent, fire } = await setup();
+  const started = Date.now();
   await f.page();
   await wait(1200);
   // Away from the tab. The clock must stop rather than keep running in the background.
+  const visibleFor = Date.now() - started;
   globalThis.document.visibilityState = "hidden";
   fire("document", "visibilitychange");
-  await wait(2500);
+  await wait(3000);
   fire("window", "pagehide");
   await wait(20);
 
   const total = leaves(sent).reduce((n, m) => n + m.properties.engaged_ms, 0);
-  assert.ok(total < 2000, `hidden time must not be credited, got ${total}ms across ${leaves(sent).length} beacons`);
+  // Three seconds hidden, so crediting the background would land near four. The
+  // ceiling is the foreground stretch this run actually took: a fixed number is wrong
+  // at both ends here, because a slow runner spends longer in the foreground and may
+  // legitimately measure more than a second, while the number that used to sit here
+  // (2000ms) is exactly what one tick credits when the loop stalls across it — the SDK
+  // caps a tick at twice its interval — so a busy machine failed on the boundary.
+  assert.ok(total <= visibleFor + 300, `hidden time must not be credited: ${total}ms measured over ${visibleFor}ms in the foreground, across ${leaves(sent).length} beacons`);
   assert.ok(total >= 800, `the visible second before hiding should still count, got ${total}ms`);
 });
 
 test("engagement: an idle page stops counting", async () => {
-  // Comfortably above the one-second tick, so there is a window to measure before it
-  // goes idle; an idle timeout equal to the tick would leave nothing to assert about.
-  const { f, sent, fire } = await setup({ engagementIdleTimeout: 2000 });
+  // Four seconds is room for three one-second ticks before the cutoff. A 2000ms
+  // timeout left room for exactly one, landing on 1000ms — simultaneously the idle
+  // cliff and the SDK's reporting floor — so a runner that delayed the very first
+  // tick past 2000ms measured nothing, sent no beacon, and failed the assertion
+  // below. Three ticks of slack means the clock has to lose three seconds, not one,
+  // before this test notices anything but the behaviour it is about.
+  const { f, sent, fire } = await setup({ engagementIdleTimeout: 4000 });
   await f.page();
-  // Never touched. After the idle timeout the clock stops, so five seconds of an
-  // abandoned tab does not become five seconds of reading.
-  await wait(5000);
+  // Never touched. After the idle timeout the clock stops, so eight seconds of an
+  // abandoned tab does not become eight seconds of reading.
+  await wait(8000);
   fire("window", "pagehide");
   await wait(20);
 
   const [leave] = leaves(sent);
+  // A beacon at all means at least ENGAGEMENT_MIN_MS was measured, so this still fails
+  // if the page went idle before anything was credited.
   assert.ok(leave, "some time was measured before it went idle");
-  assert.ok(leave.properties.engaged_ms <= 3000, `idle time must not accumulate, got ${leave.properties.engaged_ms}ms of 5s elapsed`);
+  // Nothing past the 4s cutoff can be credited, so the total sits at roughly half the
+  // time the tab was open — not a hair under it, which is the whole claim.
+  assert.ok(leave.properties.engaged_ms <= 4500, `idle time must not accumulate, got ${leave.properties.engaged_ms}ms of 8s elapsed`);
 });
 
 test("engagement: a route change closes out the page being left, not the new one", async () => {
