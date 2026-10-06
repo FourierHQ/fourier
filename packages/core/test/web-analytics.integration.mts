@@ -795,6 +795,73 @@ test("the page drawer switches between landings and every visit, and matches its
   assert.deepEqual(asViewers.went_on_baseline, await wentOnBaseline(w));
 });
 
+/** The days that have converters in a drawer's chart, as { "2026-01-11": 2 }. Zeros are the chart's empty columns. */
+const convertersByDay = (d: { over_time: { bucket: string; converters: number | null }[] }) =>
+  Object.fromEntries(d.over_time.filter((p) => p.converters).map((p) => [p.bucket.slice(0, 10), p.converters]));
+const totalConverters = (d: { over_time: { converters: number | null }[] }) => d.over_time.reduce((n, p) => n + (p.converters ?? 0), 0);
+
+test("the drawer's conversions are its went-on people, each dated by when they arrived and not when they converted", async () => {
+  await seedJanuary();
+  const w = await january();
+
+  // Every visit that included the guide: wo1 and wo4 read it on the 11th and converted
+  // later — wo4 on the 14th, wo1 after the range ended. Both are the 11th's. wo3 signed
+  // up before reading it and is nobody's.
+  const guide = await pageDetail(w, "/guide", { basis: "viewers" });
+  assert.deepEqual(convertersByDay(guide), { "2026-01-11": 2 });
+  assert.equal(totalConverters(guide), guide.went_on!.same_visit + guide.went_on!.later_visit, "the chart adds up to the strip's figure");
+  assert.equal(guide.over_time.length, guide.trend.length, "the same buckets as the traffic chart, empty days included");
+  assert.ok(guide.over_time.some((p) => p.converters === 0), "a day nobody arrived on is an explicit zero");
+
+  // Same population, split over two days: wo1 arrived on the 11th and converted on a visit
+  // that was never at the features page; wo2 arrived and converted on the 12th.
+  const features = await pageDetail(w, "/features", { basis: "viewers" });
+  assert.deepEqual(convertersByDay(features), { "2026-01-11": 1, "2026-01-12": 1 });
+  assert.equal(totalConverters(features), features.went_on!.same_visit + features.went_on!.later_visit);
+
+  // Landings only: wo1-a and wo4-a started on the guide, and both converted later.
+  const landed = await pageDetail(w, "/guide", { basis: "landing" });
+  assert.deepEqual(convertersByDay(landed), { "2026-01-11": 2 });
+  assert.equal(totalConverters(landed), landed.went_on!.same_visit + landed.went_on!.later_visit);
+
+  // The goal being looked at decides who converted: nobody booked a demo.
+  const onDemo = await pageDetail({ ...w, goal: DEMO }, "/guide", { basis: "viewers" });
+  assert.equal(totalConverters(onDemo), 0);
+  assert.ok(onDemo.over_time.every((p) => p.converters === 0), "a goal nobody completed is zeroes, not a missing series");
+
+  // No goal at all is not a zero.
+  const noGoals = await pageDetail({ ...w, goal: null, goals: [] }, "/guide", { basis: "viewers" });
+  assert.ok(noGoals.over_time.every((p) => p.converters === null));
+});
+
+test("someone who reads a page on two days is one converter, on the first", async () => {
+  const FEB = (day: number, hour = 10) => new Date(Date.UTC(2026, 1, day, hour));
+  await send([
+    // Reads pricing on the 10th, reads it again on the 12th and signs up in that visit.
+    { anonymousId: "cv1", sessionId: "cv1-a", at: FEB(10), pages: [{ path: "/pricing" }] },
+    {
+      anonymousId: "cv1",
+      sessionId: "cv1-b",
+      at: FEB(12),
+      pages: [{ path: "/pricing" }],
+      tracks: [{ event: "Signup Completed", afterMs: 5_000 }],
+    },
+    // Reads it on the 11th and never converts.
+    { anonymousId: "cv2", sessionId: "cv2-a", at: FEB(11), pages: [{ path: "/pricing" }] },
+    // Converts on the 10th, then reads pricing on the 11th: already done, so not a converter.
+    { anonymousId: "cv3", sessionId: "cv3-a", at: FEB(10), pages: [{ path: "/" }], tracks: [{ event: "Signup Completed", afterMs: 1_000 }] },
+    { anonymousId: "cv3", sessionId: "cv3-b", at: FEB(11), pages: [{ path: "/pricing" }] },
+  ]);
+  const w = await web({ range: resolveRange({ preset: "custom", from: "2026-02-09", to: "2026-02-14", now: NOW }) });
+
+  const d = await pageDetail(w, "/pricing", { basis: "viewers" });
+  assert.deepEqual([d.went_on?.people, d.went_on?.same_visit, d.went_on?.later_visit], [3, 1, 0]);
+  assert.deepEqual(convertersByDay(d), { "2026-02-10": 1 }, "cv1 once, on the day of the first visit that reached it — not the 12th, where they signed up");
+  assert.equal(totalConverters(d), 1);
+  // The visit on the 12th is the same visit as the conversion; the person is dated by the first.
+  assert.equal(d.over_time.find((p) => p.bucket.startsWith("2026-02-12"))?.converters, 0);
+});
+
 test("searching the page tables chooses rows and never changes what is on them", async () => {
   await seedJanuary();
   const w = await january();
@@ -1156,6 +1223,9 @@ test("a group's drawer follows visitors out of it, and breaks its conversions do
     // came back to sign up.
     assert.deepEqual([asViewers.went_on?.people, asViewers.went_on?.same_visit, asViewers.went_on?.later_visit], [5, 3, 1]);
     assert.deepEqual([asLanding.went_on?.people, asLanding.went_on?.same_visit, asLanding.went_on?.later_visit], [4, 2, 1], "d3 did not land in the docs");
+    // The group's chart adds up to the same figure, once per person: d1 and d4 read two of its pages.
+    assert.equal(totalConverters(asViewers), 4);
+    assert.equal(totalConverters(asLanding), 3);
 
     // By goal, each row is the drawer with the control bar narrowed to that goal.
     for (const d of [asLanding, asViewers]) {

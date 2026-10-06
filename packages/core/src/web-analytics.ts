@@ -1471,6 +1471,16 @@ export interface PageQualityFigures {
  */
 export interface PageTimePoint extends PageQualityFigures {
   bucket: string;
+  /**
+   * People who reached the subject on the basis and went on to convert: the headline
+   * `went_on`'s same_visit + later_visit, spread over the period. Each person is counted
+   * once, in the bucket of the earliest visit of theirs that reached it, so the buckets
+   * sum to the headline exactly. Offered on either basis, unlike the rates above, because
+   * the headline it adds up to is. The latest buckets read low whatever the page does:
+   * "later" is looked for up to now, and the people in them have had least time to come back.
+   * Null when no goal is configured.
+   */
+  converters: number | null;
 }
 
 /** One row of the source tree: a channel, a referrer within it, or a campaign within that. */
@@ -1938,25 +1948,28 @@ async function pageQuality(w: WebScope, subject: SubjectOf, basis: PageBasis): P
   const p = new Params("pq");
   const s = subject(p);
   const withGoal = hasGoal(w);
-  const rows = await q<Row>(
-    w.scope,
-    `${cte},
-     ${denseBuckets(w, p)},
-     ${qualityVisitsCtes(basis, s, project, scanFrom, scanTo)}
-     SELECT
-       b.bucket AS bucket,
-       ${QUALITY_COUNTS.map(([, name]) => `ifNull(a.${name}, 0) AS ${name}`).join(", ")}
-     FROM buckets AS b
-     LEFT JOIN (
+  const [rows, converters] = await Promise.all([
+    q<Row>(
+      w.scope,
+      `${cte},
+       ${denseBuckets(w, p)},
+       ${qualityVisitsCtes(basis, s, project, scanFrom, scanTo)}
        SELECT
-         ${bucketSql("started_at", w.range.interval, w.range.timezone)} AS bucket,
-         ${qualityCountsSql}
-       FROM quality_visits
-       GROUP BY bucket
-     ) AS a ON a.bucket = b.bucket
-     ORDER BY b.bucket`,
-    { ...params, ...p.values, tz: w.range.timezone, leave: PAGE_LEAVE, settled: SESSION_SETTLED_MS },
-  );
+         b.bucket AS bucket,
+         ${QUALITY_COUNTS.map(([, name]) => `ifNull(a.${name}, 0) AS ${name}`).join(", ")}
+       FROM buckets AS b
+       LEFT JOIN (
+         SELECT
+           ${bucketSql("started_at", w.range.interval, w.range.timezone)} AS bucket,
+           ${qualityCountsSql}
+         FROM quality_visits
+         GROUP BY bucket
+       ) AS a ON a.bucket = b.bucket
+       ORDER BY b.bucket`,
+      { ...params, ...p.values, tz: w.range.timezone, leave: PAGE_LEAVE, settled: SESSION_SETTLED_MS },
+    ),
+    pageConverters(w, subject, basis),
+  ]);
 
   const buckets = rows.map((r) => ({ bucket: String(r.bucket), counts: countsOf(r) }));
   const total = qualityOf(buckets.reduce((t, b) => addCounts(t, b.counts), NO_COUNTS), basis, withGoal);
@@ -1965,8 +1978,66 @@ async function pageQuality(w: WebScope, subject: SubjectOf, basis: PageBasis): P
     measured_views: total.measured_views,
     bounce_rate: total.bounce_rate,
     exit_rate: total.exit_rate,
-    over_time: buckets.map((b) => ({ bucket: b.bucket, ...qualityOf(b.counts, basis, withGoal) })),
+    over_time: buckets.map((b) => ({
+      bucket: b.bucket,
+      ...qualityOf(b.counts, basis, withGoal),
+      converters: converters ? (converters.get(b.bucket) ?? 0) : null,
+    })),
   };
+}
+
+/**
+ * The people behind a drawer's "went on to convert", bucket by bucket: how many of them
+ * first arrived in each.
+ *
+ * It is the headline's own question (wentOnCtes, over the same touches), so the buckets
+ * sum to the headline's numerator by construction rather than by a second definition
+ * that happens to agree. What is new is only the date. A person is dated by the start of
+ * the earliest visit of theirs that reached the subject, not by the moment they reached
+ * it: a visit is dated by when it started everywhere else in this report, and a view that
+ * lands after midnight would otherwise fall out of the last bucket of a range that ends
+ * there. Counting each person once, in one bucket, is what keeps the buckets additive —
+ * someone who read the page on three days is not three converters.
+ *
+ * Null with no goal configured, which is not a series of zeroes.
+ */
+async function pageConverters(w: WebScope, subject: SubjectOf, basis: PageBasis): Promise<Map<string, number> | null> {
+  if (!hasGoal(w)) return null;
+  const b = sessionBase(w);
+  const p = new Params("pc");
+  const touches = subjectTouches(subject(p), basis)(b);
+  const rows = await q<Row>(
+    w.scope,
+    `${b.cte},
+     ${denseBuckets(w, p)},
+     ${wentOnCtes(w, p, b.project, touches)},
+     arrivals AS (
+       SELECT t.person_id AS person_id, min(s.started_at) AS arrived_at
+       FROM touches AS t
+       INNER JOIN scoped AS s ON s.session_id = t.session_id
+       WHERE s.period = 'current'
+       GROUP BY person_id
+     ),
+     converters AS (
+       -- went_on's two halves together: converted in a visit that reached the subject,
+       -- or on a later one, in both cases at or after first reaching it.
+       SELECT r.person_id AS person_id
+       FROM reached AS r
+       LEFT JOIN conv_by_person AS cp ON cp.person_id = r.person_id
+       WHERE r.in_visit = 1 OR (cp.n > 0 AND cp.last_at >= r.first_reached)
+     )
+     SELECT bk.bucket AS bucket, ifNull(a.n, 0) AS n
+     FROM buckets AS bk
+     LEFT JOIN (
+       SELECT ${bucketSql("arrived_at", w.range.interval, w.range.timezone)} AS bucket, uniqExact(person_id) AS n
+       FROM arrivals
+       WHERE person_id IN (SELECT person_id FROM converters)
+       GROUP BY bucket
+     ) AS a ON a.bucket = bk.bucket
+     ORDER BY bk.bucket`,
+    { ...b.params, ...p.values, tz: w.range.timezone },
+  );
+  return new Map(rows.map((r) => [String(r.bucket), num(r.n)]));
 }
 
 /** How many referrers under a channel, and campaigns under a referrer, before the rest are summed into one row. */
