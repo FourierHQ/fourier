@@ -29,6 +29,7 @@ import {
   scope,
   databaseFor,
   ENVIRONMENTS,
+  KEYED_ENVIRONMENTS,
 } from "../src/index";
 
 const cfg = () => ({ ...configFromEnv(), database: BASE });
@@ -74,11 +75,12 @@ test("control tables live only in the base database", async () => {
   }
 });
 
-test("a source gets one write key per environment, and each key resolves to its own", async () => {
+test("a source gets one write key per keyed environment, and each key resolves to its own", async () => {
   const project = await ensureDefaultProject();
   const source = await createSource(project.id, "App");
   const keys = (await listSourceKeys(project.id)).filter((k) => k.source_id === source.id);
-  assert.equal(keys.length, ENVIRONMENTS.length, "expected a key per environment");
+  assert.equal(keys.length, KEYED_ENVIRONMENTS.length, "expected a key per keyed environment");
+  assert.ok(!keys.some((k) => k.environment === "test"), "test is filled by import and must never get a write key");
 
   const seen = new Set<string>();
   for (const k of keys) {
@@ -89,6 +91,20 @@ test("a source gets one write key per environment, and each key resolves to its 
     assert.equal(resolved.environment, k.environment, "key resolved to the wrong environment");
     assert.equal(resolved.source.id, source.id, "key resolved to the wrong source");
   }
+});
+
+test("a key for an environment that issues no keys is refused, never read as production", async () => {
+  const project = await ensureDefaultProject();
+  const source = await createSource(project.id, "Stray");
+  // What a newer build, or a hand-edited row, could leave behind. The old behaviour was
+  // to treat an unknown environment as production, which would make this key a way in.
+  await getClient(cfg()).insert({
+    table: "source_keys",
+    values: [{ project_id: project.id, source_id: source.id, environment: "test", write_key: "fk_stray_test_key" }],
+    format: "JSONEachRow",
+    clickhouse_settings: { async_insert: 0 },
+  });
+  assert.equal(await resolveWriteKey("fk_stray_test_key"), null);
 });
 
 test("the same user id in two environments stays two different people", async () => {

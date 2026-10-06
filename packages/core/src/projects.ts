@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { getControlClient } from "./client";
-import { DEFAULT_ENVIRONMENT, ENVIRONMENTS, type Environment } from "./environments";
+import { DEFAULT_ENVIRONMENT, isKeyedEnvironment, KEYED_ENVIRONMENTS, type Environment } from "./environments";
 
 export interface Project {
   id: string;
@@ -179,7 +179,8 @@ export async function listSourceKeys(projectId: string): Promise<SourceKey[]> {
 }
 
 /**
- * Give a source a key in every environment, creating only what is missing.
+ * Give a source a key in every environment an SDK can write to, creating only what is
+ * missing. Test gets none: it is filled by import, never by a deployed app.
  *
  * Production reuses the source's existing `write_key` rather than minting a new one:
  * a key already pasted into a running production app must keep working, and after
@@ -187,7 +188,7 @@ export async function listSourceKeys(projectId: string): Promise<SourceKey[]> {
  */
 export async function ensureSourceKeys(source: Source): Promise<SourceKey[]> {
   const existing = (await listSourceKeys(source.project_id)).filter((k) => k.source_id === source.id);
-  const missing = ENVIRONMENTS.filter((env) => !existing.some((k) => k.environment === env));
+  const missing = KEYED_ENVIRONMENTS.filter((env) => !existing.some((k) => k.environment === env));
   if (missing.length === 0) return existing;
   const now = new Date().toISOString();
   const rows: SourceKey[] = missing.map((environment) => ({
@@ -243,7 +244,11 @@ export async function resolveWriteKey(writeKey: string): Promise<ResolvedKey | n
   let environment: Environment = DEFAULT_ENVIRONMENT;
 
   if (keyRow) {
-    environment = ENVIRONMENTS.includes(keyRow.environment as Environment) ? (keyRow.environment as Environment) : DEFAULT_ENVIRONMENT;
+    // A key for an environment this build does not issue keys for is refused, not read
+    // as production. Falling back would turn any key minted by a newer build — or one
+    // for an environment that is import-only — into a way to write into live data.
+    if (!isKeyedEnvironment(keyRow.environment)) return null;
+    environment = keyRow.environment;
     project = await getProject(keyRow.project_id);
     source = (await listSources(keyRow.project_id)).find((s) => s.id === keyRow.source_id);
   } else {

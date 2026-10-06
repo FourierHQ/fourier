@@ -89,6 +89,14 @@ export interface IngestMeta {
   receivedAt?: Date;
   /** What the CDN in front of us said about the connecting address. See ./geo. */
   geo?: Geo | null;
+  /**
+   * The caller has already checked every message id against `events` and is sending only
+   * ids it did not find, so ./dedupe is skipped. For the Amplitude import, whose check
+   * covers all time rather than a window, and whose environment can be emptied: the claims
+   * ./dedupe keeps in memory would still call an emptied environment's ids stored, and a
+   * re-import straight after emptying would be dropped as copies of rows that are gone.
+   */
+  idsChecked?: boolean;
 }
 
 function str(v: unknown): string {
@@ -296,7 +304,7 @@ export async function ingest(
   // Before anything is written, so a copy of a stored message moves no rollup, trait or
   // identity. Copies are answered as a success: the sender's message is stored, and telling
   // it otherwise would only make it retry again.
-  const batch = await dedupe(environment, project.id, valid);
+  const batch = meta.idsChecked ? { fresh: valid, duplicates: 0, settle: () => {} } : await dedupe(environment, project.id, valid);
   try {
     const accepted = await write(project, batch.fresh, meta, environment);
     batch.settle(true);
