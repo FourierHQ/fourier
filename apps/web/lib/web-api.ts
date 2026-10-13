@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
   Availability,
   BreakdownRow,
+  CampaignDetail,
   CombineProposal,
   Delta,
   FilterValues,
@@ -41,6 +42,13 @@ import { useWebState } from "./web-state";
 export type {
   Availability,
   BreakdownRow,
+  CampaignBreakdownRow,
+  CampaignDetail,
+  CampaignDimension,
+  CampaignDimensionKey,
+  CampaignRowFilter,
+  CampaignTimePoint,
+  CampaignVisit,
   CombineProposal,
   CreditRow,
   Delta,
@@ -188,6 +196,12 @@ export interface PageGroupDetailReport {
   detail: Settled<PageGroupDetail>;
 }
 
+export interface CampaignDetailReport {
+  scope: ScopeEcho;
+  campaign: string;
+  detail: Settled<CampaignDetail>;
+}
+
 export interface GoalDetailReport {
   scope: ScopeEcho;
   definition: string;
@@ -274,6 +288,19 @@ export function useWebPageGroupDetail(group: string | null, basis: "landing" | "
     queryKey: ["web", "group-detail", qs],
     queryFn: () => api<PageGroupDetailReport>(`/api/projects/${PROJECT}/web/group-detail?${qs}`),
     enabled: Boolean(group),
+    placeholderData: (prev) => prev,
+  });
+}
+
+/** One campaign, as useWebPageDetail is one page. */
+export function useWebCampaignDetail(campaign: string | null) {
+  const environment = useEnvironmentValue();
+  const { query } = useWebState();
+  const qs = query({ tz: readerTimezone(), campaign, environment });
+  return useQuery({
+    queryKey: ["web", "campaign-detail", qs],
+    queryFn: () => api<CampaignDetailReport>(`/api/projects/${PROJECT}/web/campaign-detail?${qs}`),
+    enabled: Boolean(campaign),
     placeholderData: (prev) => prev,
   });
 }

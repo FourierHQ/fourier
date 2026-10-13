@@ -171,6 +171,11 @@ const FILTER_LABELS: Record<string, string> = {
   [P.utmSource]: "Campaign source",
   [P.utmMedium]: "Campaign medium",
   [P.utmCampaign]: "Campaign",
+  [P.utmContent]: "Campaign content",
+  [P.utmTerm]: "Campaign term",
+  // The browser's referrer, tag or no tag — set from a campaign's drawer, where it says
+  // which site an ad's clicks really came from. Not the Referrer above, which names the network.
+  [P.referrerHost]: "Referring site",
   [P.country]: "Country",
   [P.device]: "Device",
   [P.browser]: "Browser",
@@ -290,6 +295,8 @@ function FilterMenu({ scope }: { scope?: ScopeEcho }) {
         {group(P.utmSource, "Campaign source", v?.sources ?? [])}
         {group(P.utmMedium, "Campaign medium", v?.mediums ?? [])}
         {group(P.utmCampaign, "Campaign", v?.campaigns ?? [])}
+        {group(P.utmContent, "Campaign content", v?.contents ?? [])}
+        {group(P.utmTerm, "Campaign term", v?.terms ?? [])}
         {group(P.device, "Device", v?.devices ?? [])}
         {group(P.browser, "Browser", v?.browsers ?? [])}
         {group(P.country, "Country", v?.countries ?? [], (c) => countryName(c) || c)}
