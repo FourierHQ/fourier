@@ -51,6 +51,7 @@ import {
   conversionTrend,
   pageDetail,
   pageGroupDetail,
+  campaignDetail,
   wentOnBaseline,
   filterValues,
   type SourceNode,
@@ -1268,4 +1269,119 @@ test("a group's drawer follows visitors out of it, and breaks its conversions do
   } finally {
     await deleteDefinition(project.id, "page_group", "docs");
   }
+});
+
+// ---------- the campaign drawer ----------
+
+test("the campaign drawer is its row on the Campaigns tab, split every way the campaign varies", async () => {
+  // November 2025, a window nothing else reads. One campaign bought on LinkedIn with two
+  // ads, some of whose clicks arrive from the network and some from exchanges, plus the
+  // same campaign posted organically on X.
+  const NOV = (day: number, hour = 10) => new Date(Date.UTC(2025, 10, day, hour));
+  const paid = (content: string) => ({ source: "linkedin", medium: "paid_social", name: "message-test", content, term: "leaders" });
+  await send([
+    {
+      anonymousId: "cp1",
+      sessionId: "cp1-a",
+      at: NOV(10),
+      referrer: "https://www.linkedin.com/feed/",
+      utm: paid("AD_A"),
+      pages: [{ path: "/launch", engagedMs: 12_000 }, { path: "/pricing", afterMs: 20_000 }],
+      tracks: [{ event: "Signup Completed", afterMs: 30_000 }],
+    },
+    { anonymousId: "cp2", sessionId: "cp2-a", at: NOV(10, 11), referrer: "https://web-cf.ads.aps.amazon-adsystem.com/x", utm: paid("AD_A"), pages: [{ path: "/launch", engagedMs: 2_000 }] },
+    // cp2 comes back two days later, untagged, and converts: a later conversion, not this campaign's visit.
+    { anonymousId: "cp2", sessionId: "cp2-b", at: NOV(12, 9), pages: [{ path: "/pricing" }], tracks: [{ event: "Signup Completed", afterMs: 5_000 }] },
+    { anonymousId: "cp3", sessionId: "cp3-a", at: NOV(11), utm: paid("AD_B"), pages: [{ path: "/launch" }] },
+    { anonymousId: "cp4", sessionId: "cp4-a", at: NOV(11, 12), referrer: "https://onetag-sys.com/", userAgent: UA_MOBILE, utm: paid("AD_B"), pages: [{ path: "/pricing", engagedMs: 4_000 }] },
+    { anonymousId: "cp5", sessionId: "cp5-a", at: NOV(12), referrer: "https://t.co/abc", utm: { source: "x", medium: "social", name: "message-test" }, pages: [{ path: "/launch" }, { path: "/about", afterMs: 5_000 }] },
+    { anonymousId: "cpbot", sessionId: "cpbot-a", at: NOV(11), userAgent: UA_BOT, utm: paid("AD_A"), pages: [{ path: "/launch" }] },
+    { anonymousId: "cpn", sessionId: "cpn-a", at: NOV(11, 9), utm: { source: "linkedin", medium: "paid_social", name: "other-test" }, pages: [{ path: "/launch" }] },
+  ]);
+  // cp2 signs in when they come back, so their anonymous campaign visit is someone with a name.
+  await ingest(
+    project,
+    [{ type: "identify", anonymousId: "cp2", userId: "user-cp2", traits: { name: "Casey Park", email: "casey@example.com" }, timestamp: NOV(12, 9).toISOString() }] as never,
+    { receivedAt: NOW, userAgent: UA_DESKTOP },
+    "production",
+  );
+  const w = await web({ range: resolveRange({ preset: "custom", from: "2025-11-09", to: "2025-11-13", now: NOW }) });
+  const d = await campaignDetail(w, "message-test");
+
+  // The strip is the row it was opened from.
+  const row = (await breakdown(w, "utm_campaign", { limit: 50 })).find((r) => r.key === "message-test")!;
+  assert.equal(d.visits.current, row.sessions.current);
+  assert.equal(d.visits.current, 5, "the bot is not a visit");
+  assert.deepEqual([d.engagement_rate.numerator, d.engagement_rate.denominator], [row.engagement_rate.numerator, row.engagement_rate.denominator]);
+  assert.deepEqual([d.conversion_rate?.numerator, d.conversion_rate?.denominator], [row.conversion_rate.numerator, row.conversion_rate.denominator]);
+  assert.equal(d.converting_sessions, row.converting_sessions);
+  assert.equal(d.visitors.current, 5);
+
+  // Time is per visit and measured, bounce is one page, and both are their rows' working.
+  assert.deepEqual([d.bounce_rate.numerator, d.bounce_rate.denominator], [3, 5]);
+  assert.equal(d.measured_visits, 3, "a visit that never reported a measurement is left out, not counted as zero");
+  assert.equal(d.avg_visit_ms, (12_000 + 2_000 + 4_000) / 3);
+  assert.equal(d.pages_per_visit, 7 / 5);
+
+  // The chart sums to the strip.
+  assert.equal(d.over_time.reduce((t, p) => t + p.visits, 0), d.visits.current);
+  assert.equal(d.trend.reduce((t, p) => t + p.value, 0), d.visits.current);
+  assert.equal(d.over_time.reduce((t, p) => t + (p.bounce_rate.numerator ?? 0), 0), d.bounce_rate.numerator);
+  assert.equal(d.over_time.reduce((t, p) => t + (p.converters ?? 0), 0), (d.went_on?.same_visit ?? 0) + (d.went_on?.later_visit ?? 0));
+
+  // Went on: one converted in the visit, one came back and converted later.
+  assert.deepEqual([d.went_on?.people, d.went_on?.same_visit, d.went_on?.later_visit], [5, 1, 1]);
+  assert.equal(d.went_on_baseline?.people, 6, "every visitor in the report, the campaign not narrowing it");
+
+  // Every split adds up to the campaign, and names what it varies by.
+  const dim = (key: string) => d.breakdown.find((b) => b.key === key)!;
+  assert.deepEqual(d.breakdown.map((b) => b.key), ["content", "term", "source", "landing", "referrer"]);
+  for (const b of d.breakdown) assert.equal(b.rows.reduce((t, r) => t + r.visits, 0), d.visits.current, b.key);
+  assert.deepEqual(dim("content").rows.map((r) => [r.key, r.visits]), [["AD_A", 2], ["AD_B", 2], ["", 1]]);
+  assert.equal(dim("content").values, 3);
+  assert.deepEqual(dim("content").rows[0].filter, { utmContent: "AD_A" });
+  assert.equal(dim("content").rows[2].filter, null, "an untagged ad is not something to filter to");
+  assert.deepEqual(dim("source").rows.map((r) => [r.key, r.visits, r.filter]), [
+    ["linkedin / paid_social", 4, { utmSource: "linkedin", utmMedium: "paid_social" }],
+    ["x / social", 1, { utmSource: "x", utmMedium: "social" }],
+  ]);
+  assert.deepEqual(dim("landing").rows.map((r) => [r.key, r.visits, r.filter]), [["/launch", 4, null], ["/pricing", 1, null]]);
+  // The tag says LinkedIn for four of these; the browser says where each click came from.
+  assert.deepEqual(new Set(dim("referrer").rows.map((r) => r.key)), new Set(["", "linkedin.com", "web-cf.ads.aps.amazon-adsystem.com", "onetag-sys.com", "t.co"]));
+  assert.equal(dim("referrer").values, 5);
+  const adA = dim("content").rows[0];
+  assert.deepEqual([adA.engagement_rate.numerator, adA.bounce_rate.numerator, adA.conversion_rate?.numerator], [1, 1, 1], "each row carries its own visits' figures");
+
+  // Narrowing to a row narrows the whole drawer to it, by the filter the row names.
+  const onA = await campaignDetail({ ...w, filters: { ...w.filters, ...dim("content").rows[0].filter } }, "message-test");
+  assert.equal(onA.visits.current, 2);
+  assert.deepEqual(onA.breakdown.find((b) => b.key === "content")!.rows.map((r) => r.key), ["AD_A"]);
+  assert.equal(onA.went_on_baseline?.people, 6, "the baseline is the report around the campaign, not the ad");
+  const exchange = await campaignDetail({ ...w, filters: { referrerHost: "onetag-sys.com" } }, "message-test");
+  assert.equal(exchange.visits.current, 1);
+  assert.equal(exchange.recent_visits[0].device, "Mobile");
+
+  // The visits themselves, newest first, with what each did.
+  assert.deepEqual(d.recent_visits.map((v) => v.session_id), ["cp5-a", "cp4-a", "cp3-a", "cp2-a", "cp1-a"]);
+  const visit = (id: string) => d.recent_visits.find((v) => v.session_id === id)!;
+  assert.deepEqual(visit("cp1-a").paths, ["/launch", "/pricing"]);
+  assert.deepEqual([visit("cp1-a").converted, visit("cp1-a").converted_later], [true, false]);
+  assert.deepEqual([visit("cp2-a").converted, visit("cp2-a").converted_later], [false, true], "came back two days later and converted");
+  assert.deepEqual([visit("cp3-a").converted, visit("cp3-a").converted_later], [false, false]);
+  assert.equal(visit("cp2-a").referring_host, "web-cf.ads.aps.amazon-adsystem.com");
+  assert.deepEqual([visit("cp1-a").utm_content, visit("cp1-a").utm_term, visit("cp1-a").engaged_ms], ["AD_A", "leaders", 12_000]);
+  // Each visit is someone the drawer can open: the person they turned out to be, by name.
+  assert.deepEqual([visit("cp2-a").person_id, visit("cp2-a").person_identified, visit("cp2-a").traits.name], ["user-cp2", true, "Casey Park"]);
+  assert.deepEqual([visit("cp3-a").person_id, visit("cp3-a").person_identified, visit("cp3-a").traits], ["cp3", false, {}]);
+
+  // With no goal configured, every conversion figure is absent rather than zero.
+  const bare = await campaignDetail({ ...w, goal: null, goals: [] }, "message-test");
+  assert.equal(bare.conversion_rate, null);
+  assert.equal(bare.went_on, null);
+  assert.equal(bare.recent_visits[0].converted, null);
+  assert.equal(bare.over_time[0].converters, null);
+
+  // The new tags are offered in the filter menu.
+  const values = await filterValues(w);
+  assert.ok(values.contents.includes("AD_A") && values.terms.includes("leaders"));
 });

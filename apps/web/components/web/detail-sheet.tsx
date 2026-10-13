@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, type ComponentProps, type ReactNode } from "react";
+import { useEffect, useRef, type ComponentProps, type ReactNode } from "react";
 import { SheetContent } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { formatNumber } from "@/lib/format";
@@ -22,7 +22,13 @@ import { cn } from "@/lib/utils";
  * That is why the Pages drawer was 384px wide for its whole life while its class said
  * 576px. Same prefix, same specificity, last one wins.
  */
-const DETAIL_SHEET = "w-full gap-0 overflow-y-auto data-[side=right]:sm:max-w-3xl";
+const DETAIL_SHEET = cn(
+  "w-full gap-0 overflow-y-auto data-[side=right]:sm:max-w-3xl",
+  // The close button stays put while a page scrolls beneath it (DetailSheetPages), so it
+  // sits above the pages on the panel's own colour rather than over whatever row is
+  // passing. Not while hovered, where the ghost button's own hover colour belongs.
+  "[&>[data-slot=sheet-close]]:z-10 [&>[data-slot=sheet-close]:not(:hover)]:bg-popover",
+);
 
 /**
  * The panel both drilldowns open in.
@@ -55,6 +61,56 @@ export function DetailSheetContent({ className, children, ...props }: ComponentP
     >
       {children}
     </SheetContent>
+  );
+}
+
+/**
+ * A drawer that turns to another page — one person, from a list of them — and back.
+ *
+ * The page it turned from is kept, not rebuilt. It stays mounted underneath, invisible
+ * and inert, in a scroll area of its own, so Back returns to it exactly as it was left:
+ * scrolled to the row that was clicked, on the tab that was chosen, with its charts not
+ * drawing themselves in again. Rebuilding it put the reader back at the top of a long
+ * drawer every time they looked at one person, which is the step drilling down repeats
+ * most.
+ *
+ * The page on top is keyed, so turning to a second person starts at the top of them
+ * rather than at the first one's scroll position. Focus goes to it when it opens and
+ * comes back to whatever opened it — the row — when it closes, so a keyboard reader is
+ * returned to their place too.
+ */
+export function DetailSheetPages({ over, overKey, children }: { over: ReactNode | null; overKey?: string | null; children: ReactNode }) {
+  const top = useRef<HTMLDivElement>(null);
+  // The last thing focused on the page underneath — the row that opened the page on top.
+  // Tracked as it happens rather than read when the page opens, because making the page
+  // underneath inert takes focus away from that row before an effect could ask.
+  const opener = useRef<HTMLElement | null>(null);
+  const open = over != null;
+  const wasOpen = useRef(open);
+
+  useEffect(() => {
+    if (open) top.current?.focus({ preventScroll: true });
+    else if (wasOpen.current && opener.current?.isConnected) opener.current.focus({ preventScroll: true });
+    wasOpen.current = open;
+  }, [open, overKey]);
+
+  return (
+    // Fills the panel. Each page scrolls itself, and the panel does not.
+    <div className="relative min-h-0 flex-1">
+      <div
+        className={cn("absolute inset-0 overflow-y-auto", open && "invisible")}
+        inert={open}
+        aria-hidden={open || undefined}
+        onFocus={(e) => (opener.current = e.target as HTMLElement)}
+      >
+        {children}
+      </div>
+      {open && (
+        <div key={overKey ?? undefined} ref={top} tabIndex={-1} className="absolute inset-0 overflow-y-auto outline-none">
+          {over}
+        </div>
+      )}
+    </div>
   );
 }
 

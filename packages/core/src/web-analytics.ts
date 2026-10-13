@@ -22,7 +22,7 @@
  */
 
 import { getDataClient } from "./client";
-import { browserSql, channelSql, deviceSql, referrerSql } from "./classify";
+import { browserSql, channelSql, deviceSql, referrerSql, referringHostSql } from "./classify";
 import {
   type Goal,
   type GoalConfig,
@@ -151,8 +151,14 @@ export interface WebFilters {
   utmSource?: string | null;
   utmMedium?: string | null;
   utmCampaign?: string | null;
+  /** The ad or link variant a campaign was tagged with, exactly as typed. */
+  utmContent?: string | null;
+  /** The keyword or audience a campaign was tagged with, exactly as typed. */
+  utmTerm?: string | null;
   /** The site or app that sent the visit, as classifyReferrer names it: "X", "LinkedIn", "someblog.dev". */
   referrer?: string | null;
+  /** The host the browser reported the click coming from, tag or no tag, as referringHost gives it. */
+  referrerHost?: string | null;
   country?: string | null;
   device?: string | null;
   browser?: string | null;
@@ -255,7 +261,10 @@ function sessionBase(w: WebScope): Base {
   eq("s.utm_source", filters.utmSource);
   eq("s.utm_medium", filters.utmMedium);
   eq("s.utm_campaign", filters.utmCampaign);
+  eq("s.utm_content", filters.utmContent);
+  eq("s.utm_term", filters.utmTerm);
   eq(referrerSql({ utm_source: "s.utm_source", referrer_host: "s.referrer_host", entry_host: "s.entry_host" }), filters.referrer);
+  eq(referringHostSql({ referrer_host: "s.referrer_host", entry_host: "s.entry_host" }), filters.referrerHost);
   eq("s.country", filters.country);
   eq(deviceSql("s.user_agent"), filters.device);
   eq(browserSql("s.user_agent"), filters.browser);
@@ -317,9 +326,14 @@ function sessionBase(w: WebScope): Base {
       s.utm_source AS utm_source,
       s.utm_medium AS utm_medium,
       s.utm_campaign AS utm_campaign,
+      s.utm_content AS utm_content,
+      s.utm_term AS utm_term,
       s.referrer_host AS referrer_host,
       ${referrerSql({ utm_source: "s.utm_source", referrer_host: "s.referrer_host", entry_host: "s.entry_host" })} AS referrer,
+      ${referringHostSql({ referrer_host: "s.referrer_host", entry_host: "s.entry_host" })} AS referring_host,
       s.country AS country,
+      s.region AS region,
+      s.city AS city,
       ${deviceSql("s.user_agent")} AS device,
       ${browserSql("s.user_agent")} AS browser,
       if(s.started_at >= ${curFrom}, 'current', 'previous') AS period,
@@ -2001,11 +2015,16 @@ async function pageQuality(w: WebScope, subject: SubjectOf, basis: PageBasis): P
  *
  * Null with no goal configured, which is not a series of zeroes.
  */
-async function pageConverters(w: WebScope, subject: SubjectOf, basis: PageBasis): Promise<Map<string, number> | null> {
+function pageConverters(w: WebScope, subject: SubjectOf, basis: PageBasis): Promise<Map<string, number> | null> {
+  const p = new Params("pc");
+  return convertersByBucket(w, p, subjectTouches(subject(p), basis));
+}
+
+/** pageConverters for any touches: the went-on people, each in the bucket they first arrived in. */
+async function convertersByBucket(w: WebScope, p: Params, touchesOf: (b: Base) => string): Promise<Map<string, number> | null> {
   if (!hasGoal(w)) return null;
   const b = sessionBase(w);
-  const p = new Params("pc");
-  const touches = subjectTouches(subject(p), basis)(b);
+  const touches = touchesOf(b);
   const rows = await q<Row>(
     w.scope,
     `${b.cte},
@@ -2331,6 +2350,514 @@ async function pageActions(w: WebScope, subject: SubjectOf, basis: PageBasis): P
   });
 }
 
+// ---------- campaign detail ----------
+
+/**
+ * One campaign, as the page drawer describes one page.
+ *
+ * A campaign is the visits whose first page view carried its utm_campaign — exactly what
+ * its row on the Campaigns tab counts — and the drawer is that row opened up. The
+ * campaign is applied as a filter rather than threaded through as a subject: the scope is
+ * narrowed to it and the reports that already exist run under it, so the visits at the
+ * top are the row's by construction, and its pages and actions are the Pages and
+ * Conversions reports' own rows for these visits rather than near relations of them.
+ *
+ * Four things are added because a campaign is not a page. Time is measured per visit,
+ * across every page of it: time per view would describe whichever page people happened to
+ * read. The breakdown splits the campaign by the ways one campaign varies inside itself —
+ * the ad, the audience, where it ran, where it landed, which site the click really came
+ * from. The went-on question is asked of the visits rather than of a page. And the visits
+ * themselves are listed, because for a test that bought twenty clicks, twenty rows say
+ * more than any rate can.
+ */
+export interface CampaignDetail extends CampaignQuality {
+  campaign: string;
+  visits: Delta;
+  visitors: Delta;
+  /** Null when no goal is configured. */
+  converting_sessions: number | null;
+  /** For the campaign's visitors. Null when no goal is configured. */
+  went_on: WentOn | null;
+  /** Every visitor in the report, the campaign's own narrowing taken off, to read `went_on` against. */
+  went_on_baseline: WentOn | null;
+  /** Visits by the bucket they started in, with the previous period shifted onto it. */
+  trend: SeriesPoint[];
+  /** The quality figures, bucket by bucket. Every bucket in the period; the totals above are their sums. */
+  over_time: CampaignTimePoint[];
+  /** Every way the campaign can be split, in a fixed order, whether or not it varies here. */
+  breakdown: CampaignDimension[];
+  /** The All pages rows for these visits: what they read, busiest first. */
+  pages: PageRow[];
+  /** Supporting actions completed in these visits. */
+  actions: SupportingActionRow[];
+  /** The latest visits, newest first. `visits.current` is how many there are in all. */
+  recent_visits: CampaignVisit[];
+}
+
+/**
+ * How a slice of a campaign's visits did: the whole of it, one bucket of the chart, or
+ * one row of the breakdown. Every figure is a count over visits or a sum of a per-visit
+ * measurement, and a visit belongs to one bucket and one row of each split, so a total is
+ * the sum of its parts.
+ */
+export interface CampaignQuality {
+  /** The Acquisition table's Engaged: two pages, ten measured seconds, or a primary goal. */
+  engagement_rate: RateValue;
+  /** Finished visits that saw one page, over finished visits. Someone still reading has not bounced. */
+  bounce_rate: RateValue;
+  /**
+   * Mean foreground time the SDK measured across the whole visit, every page of it. Over
+   * the visits that reported a measurement; null when none did, which is not zero.
+   */
+  avg_visit_ms: number | null;
+  /** Visits that reported a measurement: the denominator of `avg_visit_ms`. */
+  measured_visits: number;
+  /** Page views per visit, reloads included — a visit that reloaded the landing page ten times read ten pages here. */
+  pages_per_visit: number | null;
+  /** Converting visits over visits, the row's own rate. Null when no goal is configured. */
+  conversion_rate: RateValue | null;
+}
+
+export interface CampaignTimePoint extends CampaignQuality {
+  bucket: string;
+  visits: number;
+  /**
+   * The went-on people, each in the bucket of their first visit from the campaign — the
+   * page drawer's Conversions chart, asked of a campaign. Null when no goal is configured.
+   */
+  converters: number | null;
+}
+
+/** The ways one campaign varies inside itself, in the order the drawer offers them. */
+export const CAMPAIGN_DIMENSIONS = ["content", "term", "source", "landing", "referrer"] as const;
+export type CampaignDimensionKey = (typeof CAMPAIGN_DIMENSIONS)[number];
+
+export interface CampaignDimension {
+  key: CampaignDimensionKey;
+  /** Distinct values among the visits, an empty one included: one means the campaign does not vary this way. */
+  values: number;
+  /** Busiest first, then one row summing the rest. */
+  rows: CampaignBreakdownRow[];
+}
+
+/** The filters that narrow every report to one row of the breakdown. */
+export type CampaignRowFilter = Partial<Pick<WebFilters, "utmContent" | "utmTerm" | "utmSource" | "utmMedium" | "referrerHost">>;
+
+export interface CampaignBreakdownRow extends CampaignQuality {
+  /**
+   * The value: the tag as typed, the landing path, the referring host. Empty where the
+   * visits had none — an untagged ad, a click with no referrer. A source row reads
+   * "source / medium".
+   */
+  key: string;
+  visits: number;
+  /** Of the campaign's visits, 0-100. */
+  share: number;
+  /** The row summing whatever is past the biggest few. Not a value, so not one to filter by. */
+  rest: boolean;
+  /**
+   * What narrows the report to this row, or null where nothing can: the rest row, a
+   * landing page (there is no landing-page filter), and an empty value, since a filter on
+   * nothing is no filter at all.
+   */
+  filter: CampaignRowFilter | null;
+}
+
+/** One visit from the campaign, as the drawer lists it. */
+export interface CampaignVisit {
+  session_id: string;
+  /** The visitor resolved through identity_map: the id the user page is keyed on. */
+  person_id: string;
+  /**
+   * Whether the visitor has identified, then or since — so a visit made anonymously by
+   * someone who signed up later is labelled with who they turned out to be.
+   */
+  person_identified: boolean;
+  /** Their latest traits, for a name or an email to label them by. Empty for an anonymous visitor. */
+  traits: Record<string, unknown>;
+  /** ClickHouse's UTC rendering, as every timestamp here is returned. */
+  started_at: string;
+  /** Wall clock from first message to last. Not engaged time. */
+  duration_ms: number;
+  pageviews: number;
+  /** Measured foreground time across the visit; 0 when nothing was measured. */
+  engaged_ms: number;
+  /** The pages viewed, in order, reloads included; the first few only. */
+  paths: string[];
+  utm_source: string;
+  utm_medium: string;
+  utm_content: string;
+  utm_term: string;
+  /** As referringHost gives it: the browser's referrer, not the tag. */
+  referring_host: string;
+  country: string;
+  region: string;
+  city: string;
+  device: string;
+  browser: string;
+  /** First seen in this period. */
+  is_new: boolean;
+  identified: boolean;
+  engaged: boolean;
+  /** Completed the counted goal in this visit. Null when no goal is configured. */
+  converted: boolean | null;
+  /** Did not, but completed it in a later visit. Null when no goal is configured. */
+  converted_later: boolean | null;
+}
+
+/** How many rows of each split are named before the rest are summed into one. */
+const CAMPAIGN_BREAKDOWN_ROWS = 20;
+/** How many visits the drawer lists. */
+export const CAMPAIGN_VISIT_LIMIT = 100;
+/** How many page views of each listed visit are spelled out. */
+const CAMPAIGN_VISIT_PATHS = 12;
+
+/**
+ * The filters a campaign drawer adds on top of the report it was opened from. Taken off
+ * again for the baseline it is read against, so "every visitor" is the report around the
+ * campaign rather than the campaign compared with itself. The campaign source and medium
+ * stay on: they are the Acquisition trail the campaign was reached through.
+ */
+const CAMPAIGN_NARROWING: (keyof WebFilters)[] = ["utmCampaign", "utmContent", "utmTerm", "referrerHost"];
+
+interface CampaignCounts {
+  visits: number;
+  engaged: number;
+  converting: number;
+  finished: number;
+  bounced: number;
+  eng_total: number;
+  measured: number;
+  pageviews: number;
+}
+
+/** Prefixed for the reason QUALITY_COUNTS is: an -If condition resolves SELECT aliases first. */
+const CAMPAIGN_COUNTS: [keyof CampaignCounts, string, string][] = [
+  ["visits", "c_visits", "uniqExact(session_id)"],
+  ["engaged", "c_engaged", "uniqExactIf(session_id, engaged = 1)"],
+  ["converting", "c_converting", "uniqExactIf(session_id, converted = 1)"],
+  ["finished", "c_finished", "uniqExactIf(session_id, is_settled = 1)"],
+  ["bounced", "c_bounced", "uniqExactIf(session_id, is_settled = 1 AND pageviews <= 1)"],
+  ["eng_total", "c_eng_total", "sumIf(engaged_ms, engaged_ms > 0)"],
+  ["measured", "c_measured", "countIf(engaged_ms > 0)"],
+  ["pageviews", "c_pageviews", "sum(pageviews)"],
+];
+const campaignCountsSql = CAMPAIGN_COUNTS.map(([, name, expr]) => `${expr} AS ${name}`).join(",\n       ");
+const campaignCountsOf = (r: Row): CampaignCounts =>
+  Object.fromEntries(CAMPAIGN_COUNTS.map(([key, name]) => [key, num(r[name])])) as unknown as CampaignCounts;
+const addCampaignCounts = (a: CampaignCounts, b: CampaignCounts, sign = 1): CampaignCounts =>
+  Object.fromEntries(CAMPAIGN_COUNTS.map(([key]) => [key, a[key] + sign * b[key]])) as unknown as CampaignCounts;
+const NO_CAMPAIGN_COUNTS = Object.fromEntries(CAMPAIGN_COUNTS.map(([key]) => [key, 0])) as unknown as CampaignCounts;
+
+function campaignQualityOf(c: CampaignCounts, withGoal: boolean): CampaignQuality {
+  return {
+    engagement_rate: rate(c.engaged, c.visits),
+    bounce_rate: rate(c.bounced, c.finished),
+    avg_visit_ms: c.measured > 0 ? c.eng_total / c.measured : null,
+    measured_visits: c.measured,
+    pages_per_visit: c.visits > 0 ? c.pageviews / c.visits : null,
+    conversion_rate: withGoal ? rate(c.converting, c.visits) : null,
+  };
+}
+
+/**
+ * The campaign's visits in the current period, one row each. `scoped` is already narrowed
+ * to the campaign, so this is only the period and the one judgement the base row lacks:
+ * whether the visit has gone quiet long enough to have bounced.
+ */
+const CAMPAIGN_VISITS_CTE = `campaign_visits AS (
+     SELECT session_id, started_at, engaged, converted, pageviews, engaged_ms,
+            utm_content, utm_term, utm_source, utm_medium, entry_path, referring_host,
+            toUInt8(ended_at < now64(3) - toIntervalMillisecond({settled:Int64})) AS is_settled
+     FROM scoped
+     WHERE period = 'current'
+   )`;
+
+export function campaignScope(w: WebScope, campaign: string): WebScope {
+  return { ...w, filters: { ...w.filters, utmCampaign: campaign } };
+}
+
+export async function campaignDetail(w: WebScope, campaign: string): Promise<CampaignDetail> {
+  const wc = campaignScope(w, campaign);
+  const around: WebScope = { ...w, filters: { ...w.filters, ...Object.fromEntries(CAMPAIGN_NARROWING.map((k) => [k, null])) } };
+  const withGoal = hasGoal(w);
+  const [head, series, quality, splits, went, baseline, pages, actions, recent] = await Promise.all([
+    headline(wc),
+    trend(wc),
+    campaignQuality(wc),
+    campaignSplits(wc),
+    wentOnBaseline(wc),
+    wentOnBaseline(around),
+    allPages(wc, { limit: 10 }),
+    supportingActions(wc),
+    campaignVisits(wc, CAMPAIGN_VISIT_LIMIT),
+  ]);
+  return {
+    campaign,
+    visits: head.sessions,
+    visitors: head.visitors,
+    converting_sessions: withGoal ? head.converting_sessions.current : null,
+    ...campaignQualityOf(quality.total, withGoal),
+    went_on: went,
+    went_on_baseline: baseline,
+    trend: series.sessions,
+    over_time: quality.over_time,
+    breakdown: campaignBreakdown(splits, quality.total, withGoal),
+    pages,
+    actions,
+    recent_visits: recent,
+  };
+}
+
+/**
+ * The quality figures per bucket, and their total. One scan, summed in TypeScript, for
+ * the reason pageQuality gives: a headline that is the sum of the chart beneath it cannot
+ * disagree with it.
+ */
+async function campaignQuality(w: WebScope): Promise<{ total: CampaignCounts; over_time: CampaignTimePoint[] }> {
+  const { cte, params } = sessionBase(w);
+  const p = new Params("cq");
+  const withGoal = hasGoal(w);
+  const [rows, converters] = await Promise.all([
+    q<Row>(
+      w.scope,
+      `${cte},
+       ${denseBuckets(w, p)},
+       ${CAMPAIGN_VISITS_CTE}
+       SELECT
+         b.bucket AS bucket,
+         ${CAMPAIGN_COUNTS.map(([, name]) => `ifNull(a.${name}, 0) AS ${name}`).join(", ")}
+       FROM buckets AS b
+       LEFT JOIN (
+         SELECT
+           ${bucketSql("started_at", w.range.interval, w.range.timezone)} AS bucket,
+           ${campaignCountsSql}
+         FROM campaign_visits
+         GROUP BY bucket
+       ) AS a ON a.bucket = b.bucket
+       ORDER BY b.bucket`,
+      { ...params, ...p.values, tz: w.range.timezone, settled: SESSION_SETTLED_MS },
+    ),
+    // Every visit in the narrowed scope is one of the campaign's, so its touches are the
+    // baseline's touches: each visit reaches the campaign when it starts.
+    convertersByBucket(w, new Params("cn"), () => everyVisitTouches),
+  ]);
+  const buckets = rows.map((r) => ({ bucket: String(r.bucket), counts: campaignCountsOf(r) }));
+  return {
+    total: buckets.reduce((t, b) => addCampaignCounts(t, b.counts), NO_CAMPAIGN_COUNTS),
+    over_time: buckets.map((b) => ({
+      bucket: b.bucket,
+      visits: b.counts.visits,
+      ...campaignQualityOf(b.counts, withGoal),
+      converters: converters ? (converters.get(b.bucket) ?? 0) : null,
+    })),
+  };
+}
+
+interface CampaignSplitRow {
+  dim: CampaignDimensionKey;
+  k1: string;
+  k2: string;
+  counts: CampaignCounts;
+}
+
+/** Each split's values with their counts, busiest first, and how many values each has in all. */
+async function campaignSplits(w: WebScope): Promise<{ rows: CampaignSplitRow[]; values: Record<CampaignDimensionKey, number> }> {
+  const { cte, params } = sessionBase(w);
+  const extra = { settled: SESSION_SETTLED_MS };
+  // Listed past the named rows by one, so the rest row's existence is known without a
+  // second question; its counts are derived by subtraction from the total.
+  const branch = (dim: CampaignDimensionKey, k1: string, k2 = "''") =>
+    `SELECT * FROM (
+       SELECT '${dim}' AS dim, ${k1} AS k1, ${k2} AS k2, ${campaignCountsSql}
+       FROM campaign_visits GROUP BY k1, k2
+       ORDER BY c_visits DESC, k1 ASC, k2 ASC LIMIT ${CAMPAIGN_BREAKDOWN_ROWS + 1}
+     )`;
+  const [rows, [distinct]] = await Promise.all([
+    q<Row>(
+      w.scope,
+      `${cte},
+       ${CAMPAIGN_VISITS_CTE}
+       ${branch("content", "utm_content")}
+       UNION ALL ${branch("term", "utm_term")}
+       UNION ALL ${branch("source", "utm_source", "utm_medium")}
+       UNION ALL ${branch("landing", "entry_path")}
+       UNION ALL ${branch("referrer", "referring_host")}`,
+      { ...params, ...extra },
+    ),
+    q<Row>(
+      w.scope,
+      `${cte},
+       ${CAMPAIGN_VISITS_CTE}
+       SELECT uniqExact(utm_content) AS content, uniqExact(utm_term) AS term, uniqExact(utm_source, utm_medium) AS source,
+              uniqExact(entry_path) AS landing, uniqExact(referring_host) AS referrer
+       FROM campaign_visits`,
+      { ...params, ...extra },
+    ),
+  ]);
+  return {
+    rows: rows.map((r) => ({ dim: r.dim as CampaignDimensionKey, k1: String(r.k1), k2: String(r.k2), counts: campaignCountsOf(r) })),
+    values: Object.fromEntries(CAMPAIGN_DIMENSIONS.map((d) => [d, num(distinct?.[d])])) as Record<CampaignDimensionKey, number>,
+  };
+}
+
+/** The splits as the drawer shows them: each value named, the rest summed, and what would filter to each. */
+function campaignBreakdown(
+  splits: { rows: CampaignSplitRow[]; values: Record<CampaignDimensionKey, number> },
+  total: CampaignCounts,
+  withGoal: boolean,
+): CampaignDimension[] {
+  return CAMPAIGN_DIMENSIONS.map((dim) => {
+    const all = splits.rows
+      .filter((r) => r.dim === dim)
+      .sort((a, b) => b.counts.visits - a.counts.visits || (a.k1 + a.k2).localeCompare(b.k1 + b.k2));
+    const named = all.slice(0, CAMPAIGN_BREAKDOWN_ROWS);
+    const row = (key: string, counts: CampaignCounts, rest: boolean, filter: CampaignRowFilter | null): CampaignBreakdownRow => ({
+      key,
+      visits: counts.visits,
+      share: total.visits > 0 ? (counts.visits / total.visits) * 100 : 0,
+      rest,
+      filter,
+      ...campaignQualityOf(counts, withGoal),
+    });
+    const rows = named.map((r) => row(splitKey(dim, r), r.counts, false, splitFilter(dim, r, all)));
+    const rest = named.reduce((t, r) => addCampaignCounts(t, r.counts, -1), total);
+    if (rest.visits > 0) rows.push(row("", rest, true, null));
+    return { key: dim, values: splits.values[dim], rows };
+  });
+}
+
+/** A source row is its source and medium together, since one campaign can run as paid on one network and organic on another. */
+function splitKey(dim: CampaignDimensionKey, r: Pick<CampaignSplitRow, "k1" | "k2">): string {
+  if (dim !== "source" || !r.k2) return r.k1;
+  return `${r.k1 || "(no source)"} / ${r.k2}`;
+}
+
+function splitFilter(dim: CampaignDimensionKey, r: CampaignSplitRow, all: CampaignSplitRow[]): CampaignRowFilter | null {
+  switch (dim) {
+    case "content":
+      return r.k1 ? { utmContent: r.k1 } : null;
+    case "term":
+      return r.k1 ? { utmTerm: r.k1 } : null;
+    case "referrer":
+      return r.k1 ? { referrerHost: r.k1 } : null;
+    case "landing":
+      return null;
+    case "source": {
+      if (r.k1 && r.k2) return { utmSource: r.k1, utmMedium: r.k2 };
+      // An empty half cannot be filtered on, so the other half alone narrows to this row
+      // only when no other row shares it — otherwise it would bring those rows along.
+      const shared = (k: "k1" | "k2") => all.some((o) => o !== r && o[k] === r[k]);
+      if (r.k1 && !shared("k1")) return { utmSource: r.k1 };
+      if (r.k2 && !shared("k2")) return { utmMedium: r.k2 };
+      return null;
+    }
+  }
+}
+
+/**
+ * The latest visits, newest first, with what each did.
+ *
+ * "Converted later" is read person by person and up to now, as went-on is: a visit that
+ * did not convert, from someone who completed the goal at some point after it started.
+ */
+async function campaignVisits(w: WebScope, limit: number): Promise<CampaignVisit[]> {
+  const b = sessionBase(w);
+  const p = new Params("cv");
+  const withGoal = hasGoal(w);
+  const conversion = conversionMatchSql(w, p);
+  const from = `{${p.add(chTime(w.range.current.from))}:DateTime64(3,'UTC')}`;
+  const rows = await q<Row>(
+    w.scope,
+    `${b.cte},
+     listed AS (
+       SELECT session_id, person_id, started_at, ended_at, pageviews, engaged_ms, utm_source, utm_medium, utm_content,
+              utm_term, referring_host, country, region, city, device, browser, is_new, identified, engaged, converted
+       FROM scoped
+       WHERE period = 'current'
+       ORDER BY started_at DESC, session_id ASC
+       LIMIT {${p.add(limit)}:UInt32}
+     ),
+     viewed AS (
+       SELECT session_id, arraySlice(arrayMap(x -> x.2, arraySort(x -> x.1, groupArray((timestamp, ${normalizedPath("path")})))), 1, ${CAMPAIGN_VISIT_PATHS}) AS paths
+       FROM events
+       WHERE project_id = ${b.project} AND type = 'page'
+         AND timestamp >= ${b.scanFrom} AND timestamp < ${b.scanTo}
+         AND session_id IN (SELECT session_id FROM listed)
+       GROUP BY session_id
+     ),
+     conv_events AS (
+       -- No upper bound, as for went-on: a return visit next week is still "later".
+       SELECT session_id, timestamp AS ts
+       FROM events
+       WHERE project_id = ${b.project} AND session_id != '' AND timestamp >= ${from} AND (${conversion})
+     ),
+     conv_by_person AS (
+       SELECT r.person_id AS person_id, max(c.ts) AS last_at, count() AS n
+       FROM conv_events AS c
+       INNER JOIN (
+         SELECT session_id, person_id FROM sessions_resolved
+         WHERE project_id = ${b.project} AND session_id IN (SELECT session_id FROM conv_events)
+       ) AS r ON r.session_id = c.session_id
+       GROUP BY person_id
+     )
+     SELECT
+       l.session_id AS session_id, l.person_id AS person_id, l.started_at AS started_at,
+       ifNull(st.is_identified, 0) AS person_identified, ifNull(tr.traits, '') AS traits,
+       toInt64(dateDiff('millisecond', l.started_at, l.ended_at)) AS duration_ms,
+       l.pageviews AS pageviews, l.engaged_ms AS engaged_ms, ifNull(v.paths, []) AS paths,
+       l.utm_source AS utm_source, l.utm_medium AS utm_medium, l.utm_content AS utm_content, l.utm_term AS utm_term,
+       l.referring_host AS referring_host, l.country AS country, l.region AS region, l.city AS city,
+       l.device AS device, l.browser AS browser, l.is_new AS is_new, l.identified AS identified,
+       l.engaged AS engaged, l.converted AS converted,
+       -- Guarded on the join having matched: an unmatched row carries the epoch and a zero count.
+       toUInt8(ifNull(cp.n, 0) > 0 AND cp.last_at >= l.started_at) AS converted_since
+     FROM listed AS l
+     LEFT JOIN viewed AS v ON v.session_id = l.session_id
+     LEFT JOIN conv_by_person AS cp ON cp.person_id = l.person_id
+     -- Who each visitor is, labelled the way the goal drawer labels its people.
+     LEFT JOIN (
+       SELECT person_id, is_identified FROM person_stats
+       WHERE project_id = ${b.project} AND person_id IN (SELECT person_id FROM listed)
+     ) AS st ON st.person_id = l.person_id
+     LEFT JOIN (
+       SELECT user_id, traits FROM user_traits FINAL
+       WHERE project_id = ${b.project} AND user_id IN (SELECT person_id FROM listed)
+     ) AS tr ON tr.user_id = l.person_id
+     ORDER BY l.started_at DESC, l.session_id ASC`,
+    { ...b.params, ...p.values },
+  );
+  return rows.map((r) => {
+    const converted = num(r.converted) === 1;
+    return {
+      session_id: String(r.session_id),
+      person_id: String(r.person_id),
+      person_identified: num(r.person_identified) === 1,
+      traits: parseTraits(r.traits),
+      started_at: String(r.started_at),
+      duration_ms: Math.max(0, num(r.duration_ms)),
+      pageviews: num(r.pageviews),
+      engaged_ms: num(r.engaged_ms),
+      paths: Array.isArray(r.paths) ? r.paths.map(String) : [],
+      utm_source: String(r.utm_source ?? ""),
+      utm_medium: String(r.utm_medium ?? ""),
+      utm_content: String(r.utm_content ?? ""),
+      utm_term: String(r.utm_term ?? ""),
+      referring_host: String(r.referring_host ?? ""),
+      country: String(r.country ?? ""),
+      region: String(r.region ?? ""),
+      city: String(r.city ?? ""),
+      device: String(r.device ?? ""),
+      browser: String(r.browser ?? ""),
+      is_new: num(r.is_new) === 1,
+      identified: num(r.identified) === 1,
+      engaged: num(r.engaged) === 1,
+      converted: withGoal ? converted : null,
+      converted_later: withGoal ? !converted && num(r.converted_since) === 1 : null,
+    };
+  });
+}
+
 // ---------- conversions ----------
 
 export interface GoalSummaryRow {
@@ -2611,6 +3138,8 @@ export interface FilterValues {
   referrers: string[];
   campaigns: string[];
   mediums: string[];
+  contents: string[];
+  terms: string[];
   countries: string[];
 }
 
@@ -2635,7 +3164,8 @@ export async function filterValues(w: WebScope): Promise<FilterValues> {
     w.scope,
     `${cte}
      SELECT ${pick("utm_source")} AS sources, ${pick("referrer")} AS referrers, ${pick("utm_campaign")} AS campaigns,
-            ${pick("utm_medium")} AS mediums, ${pick("country")} AS countries
+            ${pick("utm_medium")} AS mediums, ${pick("utm_content")} AS contents, ${pick("utm_term")} AS terms,
+            ${pick("country")} AS countries
      FROM scoped`,
     params,
   );
@@ -2645,6 +3175,8 @@ export async function filterValues(w: WebScope): Promise<FilterValues> {
     referrers: list(r?.referrers),
     campaigns: list(r?.campaigns),
     mediums: list(r?.mediums),
+    contents: list(r?.contents),
+    terms: list(r?.terms),
     countries: list(r?.countries),
   };
 }

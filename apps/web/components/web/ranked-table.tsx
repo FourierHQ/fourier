@@ -32,6 +32,7 @@ export function RankedTable<T>({
   loading,
   barOf,
   onSelect,
+  canSelect,
   rowKey,
   sort,
   sortDir = "desc",
@@ -45,6 +46,8 @@ export function RankedTable<T>({
   /** 0–1, how far the bar behind the first column extends. */
   barOf?: (row: T) => number;
   onSelect?: (row: T) => void;
+  /** Rows that are not something to open — an untagged remainder, a summed rest — stay plain. Every row, if unset. */
+  canSelect?: (row: T) => boolean;
   rowKey: (row: T) => string;
   sort?: string;
   /** Which way `sort` runs. Descending unless a table says otherwise. */
@@ -122,13 +125,14 @@ export function RankedTable<T>({
         <TableBody>
           {rows.map((row) => {
             const share = barOf ? Math.max(Math.min(barOf(row), 1), 0) : 0;
+            const select = onSelect && (canSelect?.(row) ?? true) ? () => onSelect(row) : undefined;
             return (
               <TableRow
                 key={rowKey(row)}
-                className={cn(onSelect && "cursor-pointer")}
-                onClick={onSelect ? () => onSelect(row) : undefined}
-                tabIndex={onSelect ? 0 : undefined}
-                onKeyDown={onSelect ? (e) => (e.key === "Enter" ? onSelect(row) : undefined) : undefined}
+                className={cn(select && "cursor-pointer")}
+                onClick={select}
+                tabIndex={select ? 0 : undefined}
+                onKeyDown={select ? (e) => (e.key === "Enter" ? select() : undefined) : undefined}
               >
                 {columns.map((c, i) => (
                   <TableCell

@@ -383,8 +383,9 @@ export function OverTimeSection({
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
         <h3 className="text-sm font-medium">Over time</h3>
         {/* Five measures do not fit a phone-width drawer; they scroll rather than push the
-            whole panel sideways. */}
-        <Tabs value={chart.key} onValueChange={(v) => onChartKey(v as ChartKey)} className="max-w-full overflow-x-auto">
+            whole panel sideways. Sideways only: overflow-x alone makes the other axis
+            scroll too, and the trigger's hidden underline sits a pixel below the list. */}
+        <Tabs value={chart.key} onValueChange={(v) => onChartKey(v as ChartKey)} className="max-w-full overflow-x-auto overflow-y-hidden">
           <TabsList className="h-7">
             {charts.map((c) => (
               <TabsTrigger key={c.key} value={c.key} className="px-2 text-[11px]">

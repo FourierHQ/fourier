@@ -171,6 +171,7 @@ export function WentOnPanel({
   loading,
   label = "This page",
   nobody = "Nobody reached this page this way in the selected period.",
+  caveat = "people already on their way to converting read the pages that sit on the way.",
 }: {
   value: WentOn | null | undefined;
   baseline: WentOn | null | undefined;
@@ -181,6 +182,8 @@ export function WentOnPanel({
   label?: string;
   /** Said instead when nobody reached it on this basis. */
   nobody?: string;
+  /** Why the association is not a cause, for the thing the panel is about. */
+  caveat?: string;
 }) {
   if (loading && !value) {
     return (
@@ -229,7 +232,7 @@ export function WentOnPanel({
             )}
           </>
         )}{" "}
-        An association, not a cause: people already on their way to converting read the pages that sit on the way.
+        An association, not a cause: {caveat}
       </p>
     </div>
   );

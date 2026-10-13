@@ -5,6 +5,7 @@ import { ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { CampaignDetailSheet } from "@/components/web/campaign-detail";
 import { ChannelStack, HorizontalBars } from "@/components/web/charts";
 import { WebControls, useClearFilters } from "@/components/web/controls";
 import { DeltaBadge, MetricLabel, RateCell } from "@/components/web/metric";
@@ -21,7 +22,17 @@ import { P, WEB_ROOT, useWebState } from "@/lib/web-state";
  * sidebar entries. Drilling in — Paid Social, then LinkedIn, then a campaign — adds a
  * filter to the shared control bar rather than navigating somewhere new, so the way
  * back out is the same chip you would use anywhere else in the section.
+ *
+ * A campaign is the bottom of that trail, so selecting one opens it in a drawer instead:
+ * its ads, its audiences, where its clicks came from and the visits themselves.
  */
+
+/**
+ * Narrowing from inside a campaign's drawer — one ad, one referring site. Below the
+ * campaign in the trail, so stepping back up it lets go of them too, rather than leaving
+ * an ad filter behind that empties every row but one.
+ */
+const BELOW_CAMPAIGN = [P.utmContent, P.utmTerm, P.referrerHost];
 
 const GROUPS = [
   { value: "channel", label: "Channels", column: "Channel", param: P.channel },
@@ -40,6 +51,12 @@ export default function AcquisitionPage() {
 
   // What the reader asked for; the tabs render from this so a click responds at once.
   const grouping = (get("group_by") as GroupValue) ?? "channel";
+  // The campaign whose drawer is open. Its own parameter, not utm_campaign: opening a
+  // campaign is not narrowing the table behind it to that campaign.
+  const openCampaign = get("campaign");
+  // And which of its visitors the drawer has turned to, as the goal drawer does: in the
+  // URL, so the view can be linked to and survives a reload.
+  const openPerson = get("person");
   const sort = get("sort") ?? "sessions";
   const report = useWebAcquisition(grouping, sort);
 
@@ -95,7 +112,12 @@ export default function AcquisitionPage() {
 
       {trail.length > 0 && (
         <div className="flex flex-wrap items-center gap-1 text-sm">
-          <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => set({ [P.channel]: null, [P.utmSource]: null, [P.utmCampaign]: null, group_by: "channel" })}>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 px-2"
+            onClick={() => set({ [P.channel]: null, [P.utmSource]: null, [P.utmCampaign]: null, ...Object.fromEntries(BELOW_CAMPAIGN.map((k) => [k, null])), group_by: "channel" })}
+          >
             All traffic
           </Button>
           {trail.map((t, i) => (
@@ -107,7 +129,7 @@ export default function AcquisitionPage() {
                 className="h-7 px-2 font-medium"
                 // Stepping back to a level drops everything below it, so the scope on
                 // screen always matches the trail above it.
-                onClick={() => set(Object.fromEntries(trail.slice(i + 1).map((x) => [x.param, null])))}
+                onClick={() => set(Object.fromEntries([...trail.slice(i + 1).map((x) => x.param), ...BELOW_CAMPAIGN].map((k) => [k, null])))}
               >
                 {t.label}
               </Button>
@@ -166,13 +188,15 @@ export default function AcquisitionPage() {
                   barOf={(r) => r.share / 100}
                   sort={sort}
                   onSort={(k) => set({ sort: k })}
-                  onSelect={shown === "campaign" ? undefined : drill}
+                  onSelect={shown === "campaign" ? (r) => set({ campaign: r.key, person: null }) : drill}
+                  // Not tagged is every visit without a campaign: no one campaign to open.
+                  canSelect={(r) => shown !== "campaign" || r.key !== "(none)"}
                   empty={<p className="px-6 py-6 text-sm text-muted-foreground">Nothing recorded for this grouping in the selected period.</p>}
                   caption={
                     <>
                       Conversion rates are shown with the number of sessions behind them. A high rate on a handful of visits is
                       noise, not a winner.
-                      {shown !== "campaign" && " Select a row to drill in."}
+                      {shown === "campaign" ? " Select a campaign for its ads, where its clicks came from, and its visits." : " Select a row to drill in."}
                     </>
                   }
                   columns={[
@@ -234,6 +258,14 @@ export default function AcquisitionPage() {
           )}
         </>
       )}
+
+      <CampaignDetailSheet
+        campaign={openCampaign}
+        person={openPerson}
+        onSelectPerson={(id) => set({ person: id })}
+        onBack={() => set({ person: null })}
+        onClose={() => set({ campaign: null, person: null })}
+      />
     </div>
   );
 }

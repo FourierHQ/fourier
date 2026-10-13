@@ -29,6 +29,8 @@ import {
   getAdminClient,
   isBot,
   referrerSql,
+  referringHost,
+  referringHostSql,
   type Entry,
 } from "../src/index";
 
@@ -163,6 +165,28 @@ test("referrers: SQL and TypeScript return the same answer, and it is the intend
   const fromSql = await evaluate<string>(referrerSql({ utm_source: "utm_source", referrer_host: "referrer_host", entry_host: "entry_host" }), rows, cols);
   REFERRER_CASES.forEach(([c, want], i) => {
     assert.equal(classifyReferrer(c), want, `TypeScript, case ${i}: ${JSON.stringify(c)}`);
+    assert.equal(fromSql[i], want, `SQL, case ${i}: ${JSON.stringify(c)}`);
+  });
+});
+
+// The browser's referrer alone, tag or no tag: what an ad's clicks really came from.
+const REFERRING_HOST_CASES: [Entry, string][] = [
+  // Tagged as LinkedIn, served on an exchange: the tag is not the answer here.
+  [{ pageviews: 1, utm_source: "linkedin", referrer_host: "web-cf-event-cell8001.ads.aps.amazon-adsystem.com", entry_host: "example.com" }, "web-cf-event-cell8001.ads.aps.amazon-adsystem.com"],
+  [{ pageviews: 1, utm_source: "linkedin", referrer_host: "www.linkedin.com", entry_host: "example.com" }, "linkedin.com"],
+  [{ pageviews: 1, referrer_host: " WWW.Example.org ", entry_host: "example.com" }, "example.org"],
+  // A tag with no referrer has no referring site; nor does the site's own page.
+  [{ pageviews: 1, utm_source: "linkedin", entry_host: "example.com" }, ""],
+  [{ pageviews: 1, referrer_host: "Example.com", entry_host: "example.com" }, ""],
+  [{ pageviews: 0, entry_host: "example.com" }, ""],
+];
+
+test("referring hosts: SQL and TypeScript agree, and ignore the tag", async () => {
+  const cols = ["referrer_host", "entry_host"];
+  const rows = REFERRING_HOST_CASES.map(([c]) => ({ referrer_host: c.referrer_host ?? "", entry_host: c.entry_host ?? "" }));
+  const fromSql = await evaluate<string>(referringHostSql({ referrer_host: "referrer_host", entry_host: "entry_host" }), rows, cols);
+  REFERRING_HOST_CASES.forEach(([c, want], i) => {
+    assert.equal(referringHost(c), want, `TypeScript, case ${i}: ${JSON.stringify(c)}`);
     assert.equal(fromSql[i], want, `SQL, case ${i}: ${JSON.stringify(c)}`);
   });
 });

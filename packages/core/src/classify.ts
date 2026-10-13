@@ -414,6 +414,28 @@ export function referrerSql(c: { utm_source: string; referrer_host: string; entr
     '')`;
 }
 
+/**
+ * The site the browser says the click came from, whatever the link was tagged with.
+ *
+ * classifyReferrer answers "which network?" and lets the tag speak first, which is right
+ * for a channel report and wrong for checking an ad: every visit tagged utm_source=linkedin
+ * is "LinkedIn" there, including the ones LinkedIn served on an exchange or in another
+ * app. This is the browser's referrer host alone — lowercased, without its "www.", and
+ * empty when there was none or it was the site's own page — so a campaign can be split
+ * by where its clicks actually came from.
+ */
+export function referringHost(e: Pick<Entry, "referrer_host" | "entry_host">): string {
+  const refHost = lc(e.referrer_host);
+  if (!refHost || refHost === lc(e.entry_host)) return "";
+  return refHost.replace(/^www\./, "");
+}
+
+/** ClickHouse expression returning referringHost's answer over the two columns it reads. */
+export function referringHostSql(c: { referrer_host: string; entry_host: string }): string {
+  const ref = `lower(trimBoth(${c.referrer_host}))`;
+  return `if(${ref} = '' OR ${ref} = lower(trimBoth(${c.entry_host})), '', replaceRegexpOne(${ref}, '^www\\\\.', ''))`;
+}
+
 // ---------- device and browser ----------
 //
 // Filter dimensions only. Fourier deliberately has no device or browser report — that

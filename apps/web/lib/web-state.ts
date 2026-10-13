@@ -35,7 +35,10 @@ export const P = {
   utmSource: "utm_source",
   utmMedium: "utm_medium",
   utmCampaign: "utm_campaign",
+  utmContent: "utm_content",
+  utmTerm: "utm_term",
   referrer: "referrer",
+  referrerHost: "referrer_host",
   country: "country",
   device: "device",
   browser: "browser",
@@ -52,7 +55,7 @@ const CARRIED: string[] = Object.values(P);
  * campaign filter looks exactly like a source with no visitors, and the reader has no
  * way to tell which they are seeing.
  */
-const SITE_SPECIFIC: string[] = [P.channel, P.utmSource, P.utmMedium, P.utmCampaign, P.referrer, P.goal];
+const SITE_SPECIFIC: string[] = [P.channel, P.utmSource, P.utmMedium, P.utmCampaign, P.utmContent, P.utmTerm, P.referrer, P.referrerHost, P.goal];
 
 export type ParamPatch = Record<string, string | null | undefined>;
 
@@ -122,7 +125,7 @@ export function useWebState() {
 
   const activeFilters = useMemo(
     () =>
-      ([P.channel, P.referrer, P.utmSource, P.utmMedium, P.utmCampaign, P.country, P.device, P.browser, P.visitor] as string[])
+      ([P.channel, P.referrer, P.referrerHost, P.utmSource, P.utmMedium, P.utmCampaign, P.utmContent, P.utmTerm, P.country, P.device, P.browser, P.visitor] as string[])
         .map((key) => ({ key, value: search.get(key) }))
         .filter((f): f is { key: string; value: string } => Boolean(f.value)),
     [search],
