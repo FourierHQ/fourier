@@ -9,7 +9,7 @@ import { RelativeTime } from "@/components/relative-time";
 import { PersonLabel } from "@/components/users-table";
 import { CopyButton } from "@/components/copy-button";
 import { CountChart } from "@/components/web/charts";
-import { DetailSheetContent, DetailStat } from "@/components/web/detail-sheet";
+import { DetailSheetContent, DetailSheetPages, DetailStat } from "@/components/web/detail-sheet";
 import { GoalMark } from "@/components/web/goal-mark";
 import { MetricLabel } from "@/components/web/metric";
 import { PersonPage } from "@/components/web/person-page";
@@ -63,88 +63,84 @@ export function GoalDetailSheet({
   return (
     <Sheet open={Boolean(definition)} onOpenChange={(open) => !open && onClose()}>
       <DetailSheetContent>
-        {person ? (
-          <PersonPage personId={person} onBack={onBack} backLabel={detail?.name} />
-        ) : (
-          <>
-            <SheetHeader>
-              <SheetTitle className="flex items-center gap-2 pr-8 text-sm">
-                <GoalMark type={detail?.type ?? "primary"} />
-                <span className="truncate">{detail?.name ?? "Goal"}</span>
-                {isSupporting && (
-                  <Badge variant="outline" className="shrink-0 font-normal">
-                    Supporting
-                  </Badge>
-                )}
-              </SheetTitle>
-              <SheetDescription>
-                {isSupporting
-                  ? "Who triggered this action, under the filters currently on screen"
-                  : "Who converted, under the filters currently on screen"}
-              </SheetDescription>
-              {split && <SplitOrigin split={split} type={detail?.type ?? "primary"} />}
-            </SheetHeader>
-
-            <div className="space-y-6 p-4">
-              {error ? (
-                <QueryError message={error} onRetry={() => report.refetch()} />
-              ) : (
-                <>
-                  <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-                    <DetailStat label="People" value={detail?.people.current} loading={loading} />
-                    <DetailStat
-                      label={isSupporting ? "Visits" : "Converting visits"}
-                      value={detail?.sessions.current}
-                      loading={loading}
-                    />
-                    <DetailStat
-                      label={<MetricLabel hint="Every completion, counting repeats — so it sits above the visit count whenever someone completed the goal more than once in one visit.">Completions</MetricLabel>}
-                      value={detail?.completions.current}
-                      loading={loading}
-                    />
-                    <DetailStat
-                      label={isSupporting ? "Of all visits" : "Conversion rate"}
-                      value={formatRate(detail?.rate.rate)}
-                      sub={detail && formatRatio(detail.rate.numerator, detail.rate.denominator, "visits")}
-                      loading={loading}
-                    />
-                  </div>
-
-                  <section>
-                    <h3 className="mb-2 text-sm font-medium">{isSupporting ? "Visits with this action" : "Conversions"} over time</h3>
-                    <CountChart
-                      data={detail?.trend}
-                      label={isSupporting ? "Visits" : "Converting visits"}
-                      interval={scope?.range.interval ?? "day"}
-                      loading={loading}
-                      className="h-[180px] w-full"
-                    />
-                  </section>
-
-                  <section>
-                    <div className="mb-2 flex items-end justify-between gap-2">
-                      <h3 className="text-sm font-medium">People</h3>
-                      {detail && detail.total_people > detail.converters.length && (
-                        <span className="text-xs text-muted-foreground">
-                          Most recent {formatNumber(detail.converters.length)} of {formatNumber(detail.total_people)}
-                        </span>
-                      )}
-                    </div>
-                    <p className="mb-2 text-xs leading-relaxed text-muted-foreground">
-                      Ordered by when they last completed it. Anonymous browsing that later identified is one person here,
-                      not two — these are resolved visitors, the same unit the reports count.
-                    </p>
-                    <div className="rounded-md border">
-                      <ConvertersTable rows={detail?.converters} loading={loading} onSelect={onSelectPerson} />
-                    </div>
-                  </section>
-
-                  <GoalFootnote goal={config} scope={scope} isSupporting={isSupporting} />
-                </>
+        <DetailSheetPages over={person ? <PersonPage personId={person} onBack={onBack} backLabel={detail?.name} /> : null} overKey={person}>
+          <SheetHeader>
+            <SheetTitle className="flex items-center gap-2 pr-8 text-sm">
+              <GoalMark type={detail?.type ?? "primary"} />
+              <span className="truncate">{detail?.name ?? "Goal"}</span>
+              {isSupporting && (
+                <Badge variant="outline" className="shrink-0 font-normal">
+                  Supporting
+                </Badge>
               )}
-            </div>
-          </>
-        )}
+            </SheetTitle>
+            <SheetDescription>
+              {isSupporting
+                ? "Who triggered this action, under the filters currently on screen"
+                : "Who converted, under the filters currently on screen"}
+            </SheetDescription>
+            {split && <SplitOrigin split={split} type={detail?.type ?? "primary"} />}
+          </SheetHeader>
+
+          <div className="space-y-6 p-4">
+            {error ? (
+              <QueryError message={error} onRetry={() => report.refetch()} />
+            ) : (
+              <>
+                <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+                  <DetailStat label="People" value={detail?.people.current} loading={loading} />
+                  <DetailStat
+                    label={isSupporting ? "Visits" : "Converting visits"}
+                    value={detail?.sessions.current}
+                    loading={loading}
+                  />
+                  <DetailStat
+                    label={<MetricLabel hint="Every completion, counting repeats — so it sits above the visit count whenever someone completed the goal more than once in one visit.">Completions</MetricLabel>}
+                    value={detail?.completions.current}
+                    loading={loading}
+                  />
+                  <DetailStat
+                    label={isSupporting ? "Of all visits" : "Conversion rate"}
+                    value={formatRate(detail?.rate.rate)}
+                    sub={detail && formatRatio(detail.rate.numerator, detail.rate.denominator, "visits")}
+                    loading={loading}
+                  />
+                </div>
+
+                <section>
+                  <h3 className="mb-2 text-sm font-medium">{isSupporting ? "Visits with this action" : "Conversions"} over time</h3>
+                  <CountChart
+                    data={detail?.trend}
+                    label={isSupporting ? "Visits" : "Converting visits"}
+                    interval={scope?.range.interval ?? "day"}
+                    loading={loading}
+                    className="h-[180px] w-full"
+                  />
+                </section>
+
+                <section>
+                  <div className="mb-2 flex items-end justify-between gap-2">
+                    <h3 className="text-sm font-medium">People</h3>
+                    {detail && detail.total_people > detail.converters.length && (
+                      <span className="text-xs text-muted-foreground">
+                        Most recent {formatNumber(detail.converters.length)} of {formatNumber(detail.total_people)}
+                      </span>
+                    )}
+                  </div>
+                  <p className="mb-2 text-xs leading-relaxed text-muted-foreground">
+                    Ordered by when they last completed it. Anonymous browsing that later identified is one person here,
+                    not two — these are resolved visitors, the same unit the reports count.
+                  </p>
+                  <div className="rounded-md border">
+                    <ConvertersTable rows={detail?.converters} loading={loading} onSelect={onSelectPerson} />
+                  </div>
+                </section>
+
+                <GoalFootnote goal={config} scope={scope} isSupporting={isSupporting} />
+              </>
+            )}
+          </div>
+        </DetailSheetPages>
       </DetailSheetContent>
     </Sheet>
   );

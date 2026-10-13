@@ -55,7 +55,7 @@ export default function AcquisitionPage() {
   // campaign is not narrowing the table behind it to that campaign.
   const openCampaign = get("campaign");
   // And which of its visitors the drawer has turned to, as the goal drawer does: in the
-  // URL, so Back in the browser steps back through the drawer too.
+  // URL, so the view can be linked to and survives a reload.
   const openPerson = get("person");
   const sort = get("sort") ?? "sessions";
   const report = useWebAcquisition(grouping, sort);

@@ -10,7 +10,7 @@ import { RelativeTime } from "@/components/relative-time";
 import { PersonLabel } from "@/components/users-table";
 import { CountChart, DurationChart, RateChart, TrendChart } from "@/components/web/charts";
 import { ActiveFilters } from "@/components/web/controls";
-import { DetailSheetContent, DetailStat } from "@/components/web/detail-sheet";
+import { DetailSheetContent, DetailSheetPages, DetailStat } from "@/components/web/detail-sheet";
 import { DeltaBadge, MetricLabel, RateCell } from "@/components/web/metric";
 import { CONVERSIONS_NOTE, hasPrimaryGoal } from "@/components/web/page-detail";
 import { PersonPage } from "@/components/web/person-page";
@@ -168,60 +168,56 @@ export function CampaignDetailSheet({
   return (
     <Sheet open={Boolean(campaign)} onOpenChange={(open) => !open && onClose()}>
       <DetailSheetContent>
-        {person ? (
-          <PersonPage personId={person} onBack={onBack} backLabel={campaign ?? undefined} />
-        ) : (
-          <>
-            <SheetHeader>
-              <SheetTitle className="truncate pr-8">{campaign}</SheetTitle>
-              <SheetDescription>Visits that arrived tagged with this campaign</SheetDescription>
-              {/* The control bar is behind the drawer, so what the drawer is narrowed to has
-                  to be said in it — and undone from it. */}
-              <div className="pt-1 empty:hidden">
-                <ActiveFilters scope={scope} />
-              </div>
-            </SheetHeader>
-
-            <div className={stale ? "space-y-6 p-4 opacity-60 transition-opacity" : "space-y-6 p-4 transition-opacity"}>
-              {errorOf(report.data?.detail) ? (
-                <QueryError message={errorOf(report.data?.detail)} onRetry={() => report.refetch()} />
-              ) : (
-                <>
-                  <Strip detail={detail} hasGoal={hasGoal} loading={loading} />
-
-                  {hasGoal && (
-                    <section>
-                      <h3 className="mb-2 text-sm font-medium">
-                        <MetricLabel hint={HINTS.wentOn}>Did they go on to convert?</MetricLabel>
-                      </h3>
-                      <p className="mb-2 text-xs text-muted-foreground">
-                        Of the people this campaign brought, who converted afterwards — before they left, or by coming back — against
-                        every visitor in the period.
-                      </p>
-                      <div className="rounded-md border">
-                        <WentOnPanel
-                          value={detail?.went_on}
-                          baseline={detail?.went_on_baseline}
-                          subject="people this campaign brought"
-                          loading={loading}
-                          label="This campaign"
-                          nobody="Nobody arrived through this campaign in the selected period."
-                          caveat="a campaign aimed at people already looking for you would read well whatever its ad said."
-                        />
-                      </div>
-                    </section>
-                  )}
-
-                  <OverTime detail={detail} hasGoal={hasGoal} scope={scope} chartKey={chartKey} onChartKey={setChartKey} loading={loading} />
-                  <Splits detail={detail} loading={loading} />
-                  <Visits detail={detail} hasGoal={hasGoal} loading={loading} onSelectPerson={onSelectPerson} />
-                  <Pages detail={detail} loading={loading} />
-                  <Actions detail={detail} scope={scope} loading={loading} />
-                </>
-              )}
+        <DetailSheetPages over={person ? <PersonPage personId={person} onBack={onBack} backLabel={campaign ?? undefined} /> : null} overKey={person}>
+          <SheetHeader>
+            <SheetTitle className="truncate pr-8">{campaign}</SheetTitle>
+            <SheetDescription>Visits that arrived tagged with this campaign</SheetDescription>
+            {/* The control bar is behind the drawer, so what the drawer is narrowed to has
+                to be said in it — and undone from it. */}
+            <div className="pt-1 empty:hidden">
+              <ActiveFilters scope={scope} />
             </div>
-          </>
-        )}
+          </SheetHeader>
+
+          <div className={stale ? "space-y-6 p-4 opacity-60 transition-opacity" : "space-y-6 p-4 transition-opacity"}>
+            {errorOf(report.data?.detail) ? (
+              <QueryError message={errorOf(report.data?.detail)} onRetry={() => report.refetch()} />
+            ) : (
+              <>
+                <Strip detail={detail} hasGoal={hasGoal} loading={loading} />
+
+                {hasGoal && (
+                  <section>
+                    <h3 className="mb-2 text-sm font-medium">
+                      <MetricLabel hint={HINTS.wentOn}>Did they go on to convert?</MetricLabel>
+                    </h3>
+                    <p className="mb-2 text-xs text-muted-foreground">
+                      Of the people this campaign brought, who converted afterwards — before they left, or by coming back — against
+                      every visitor in the period.
+                    </p>
+                    <div className="rounded-md border">
+                      <WentOnPanel
+                        value={detail?.went_on}
+                        baseline={detail?.went_on_baseline}
+                        subject="people this campaign brought"
+                        loading={loading}
+                        label="This campaign"
+                        nobody="Nobody arrived through this campaign in the selected period."
+                        caveat="a campaign aimed at people already looking for you would read well whatever its ad said."
+                      />
+                    </div>
+                  </section>
+                )}
+
+                <OverTime detail={detail} hasGoal={hasGoal} scope={scope} chartKey={chartKey} onChartKey={setChartKey} loading={loading} />
+                <Splits detail={detail} loading={loading} />
+                <Visits detail={detail} hasGoal={hasGoal} loading={loading} onSelectPerson={onSelectPerson} />
+                <Pages detail={detail} loading={loading} />
+                <Actions detail={detail} scope={scope} loading={loading} />
+              </>
+            )}
+          </div>
+        </DetailSheetPages>
       </DetailSheetContent>
     </Sheet>
   );
