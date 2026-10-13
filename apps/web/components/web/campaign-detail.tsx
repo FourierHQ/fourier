@@ -277,7 +277,7 @@ function OverTime({
     <section>
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
         <h3 className="text-sm font-medium">Over time</h3>
-        <Tabs value={chart.key} onValueChange={(v) => onChartKey(v as ChartKey)} className="max-w-full overflow-x-auto">
+        <Tabs value={chart.key} onValueChange={(v) => onChartKey(v as ChartKey)} className="max-w-full overflow-x-auto overflow-y-hidden">
           <TabsList className="h-7">
             {charts.map((c) => (
               <TabsTrigger key={c.key} value={c.key} className="px-2 text-[11px]">
@@ -358,7 +358,7 @@ function Splits({ detail, loading }: { detail: CampaignDetail | undefined; loadi
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
         <h3 className="text-sm font-medium">How it splits</h3>
         {varying.length > 1 && (
-          <Tabs value={dim?.key} onValueChange={(v) => setChosen(v as CampaignDimensionKey)} className="max-w-full overflow-x-auto">
+          <Tabs value={dim?.key} onValueChange={(v) => setChosen(v as CampaignDimensionKey)} className="max-w-full overflow-x-auto overflow-y-hidden">
             <TabsList className="h-7">
               {varying.map((d) => (
                 <TabsTrigger key={d.key} value={d.key} className="px-2 text-[11px]">
