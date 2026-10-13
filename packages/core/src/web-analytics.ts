@@ -2468,6 +2468,13 @@ export interface CampaignVisit {
   session_id: string;
   /** The visitor resolved through identity_map: the id the user page is keyed on. */
   person_id: string;
+  /**
+   * Whether the visitor has identified, then or since — so a visit made anonymously by
+   * someone who signed up later is labelled with who they turned out to be.
+   */
+  person_identified: boolean;
+  /** Their latest traits, for a name or an email to label them by. Empty for an anonymous visitor. */
+  traits: Record<string, unknown>;
   /** ClickHouse's UTC rendering, as every timestamp here is returned. */
   started_at: string;
   /** Wall clock from first message to last. Not engaged time. */
@@ -2796,6 +2803,7 @@ async function campaignVisits(w: WebScope, limit: number): Promise<CampaignVisit
      )
      SELECT
        l.session_id AS session_id, l.person_id AS person_id, l.started_at AS started_at,
+       ifNull(st.is_identified, 0) AS person_identified, ifNull(tr.traits, '') AS traits,
        toInt64(dateDiff('millisecond', l.started_at, l.ended_at)) AS duration_ms,
        l.pageviews AS pageviews, l.engaged_ms AS engaged_ms, ifNull(v.paths, []) AS paths,
        l.utm_source AS utm_source, l.utm_medium AS utm_medium, l.utm_content AS utm_content, l.utm_term AS utm_term,
@@ -2807,6 +2815,15 @@ async function campaignVisits(w: WebScope, limit: number): Promise<CampaignVisit
      FROM listed AS l
      LEFT JOIN viewed AS v ON v.session_id = l.session_id
      LEFT JOIN conv_by_person AS cp ON cp.person_id = l.person_id
+     -- Who each visitor is, labelled the way the goal drawer labels its people.
+     LEFT JOIN (
+       SELECT person_id, is_identified FROM person_stats
+       WHERE project_id = ${b.project} AND person_id IN (SELECT person_id FROM listed)
+     ) AS st ON st.person_id = l.person_id
+     LEFT JOIN (
+       SELECT user_id, traits FROM user_traits FINAL
+       WHERE project_id = ${b.project} AND user_id IN (SELECT person_id FROM listed)
+     ) AS tr ON tr.user_id = l.person_id
      ORDER BY l.started_at DESC, l.session_id ASC`,
     { ...b.params, ...p.values },
   );
@@ -2815,6 +2832,8 @@ async function campaignVisits(w: WebScope, limit: number): Promise<CampaignVisit
     return {
       session_id: String(r.session_id),
       person_id: String(r.person_id),
+      person_identified: num(r.person_identified) === 1,
+      traits: parseTraits(r.traits),
       started_at: String(r.started_at),
       duration_ms: Math.max(0, num(r.duration_ms)),
       pageviews: num(r.pageviews),

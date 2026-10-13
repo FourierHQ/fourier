@@ -1,24 +1,23 @@
 "use client";
 
 import { useState, type ReactNode } from "react";
-import Link from "next/link";
-import { ArrowUpRight } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Sheet, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Location } from "@/components/location";
 import { RelativeTime } from "@/components/relative-time";
+import { PersonLabel } from "@/components/users-table";
 import { CountChart, DurationChart, RateChart, TrendChart } from "@/components/web/charts";
 import { ActiveFilters } from "@/components/web/controls";
 import { DetailSheetContent, DetailStat } from "@/components/web/detail-sheet";
 import { DeltaBadge, MetricLabel, RateCell } from "@/components/web/metric";
 import { CONVERSIONS_NOTE, hasPrimaryGoal } from "@/components/web/page-detail";
+import { PersonPage } from "@/components/web/person-page";
 import { RankedTable } from "@/components/web/ranked-table";
 import { QueryError } from "@/components/web/states";
 import { WentOnPanel } from "@/components/web/went-on";
-import { formatDuration, formatNumber, formatRate, formatRatio, shortPath } from "@/lib/format";
+import { displayName, formatDuration, formatNumber, formatRate, formatRatio, shortPath } from "@/lib/format";
 import {
   errorOf,
   unwrap,
@@ -139,9 +138,24 @@ const DIMENSION_PARAMS: Record<CampaignDimensionKey, string[]> = {
  *
  * And the visits themselves. For a campaign of twenty clicks, a list of twenty visits —
  * where each came from, what device, what it read, for how long — is the answer, and any
- * rate above it is a summary of too few things to mean much.
+ * rate above it is a summary of too few things to mean much. Each one opens its visitor
+ * in the drawer, as the goal drawer opens a converter: the last step down, from a rate to
+ * a row to the person behind it.
  */
-export function CampaignDetailSheet({ campaign, onClose }: { campaign: string | null; onClose: () => void }) {
+export function CampaignDetailSheet({
+  campaign,
+  person,
+  onSelectPerson,
+  onBack,
+  onClose,
+}: {
+  campaign: string | null;
+  person: string | null;
+  onSelectPerson: (personId: string) => void;
+  onBack: () => void;
+  onClose: () => void;
+}) {
+  // Kept loading behind the person page so Back is instant rather than a second wait.
   const report = useWebCampaignDetail(campaign);
   const detail = unwrap(report.data?.detail);
   const scope = report.data?.scope;
@@ -154,54 +168,60 @@ export function CampaignDetailSheet({ campaign, onClose }: { campaign: string | 
   return (
     <Sheet open={Boolean(campaign)} onOpenChange={(open) => !open && onClose()}>
       <DetailSheetContent>
-        <SheetHeader>
-          <SheetTitle className="truncate pr-8">{campaign}</SheetTitle>
-          <SheetDescription>Visits that arrived tagged with this campaign</SheetDescription>
-          {/* The control bar is behind the drawer, so what the drawer is narrowed to has
-              to be said in it — and undone from it. */}
-          <div className="pt-1 empty:hidden">
-            <ActiveFilters scope={scope} />
-          </div>
-        </SheetHeader>
+        {person ? (
+          <PersonPage personId={person} onBack={onBack} backLabel={campaign ?? undefined} />
+        ) : (
+          <>
+            <SheetHeader>
+              <SheetTitle className="truncate pr-8">{campaign}</SheetTitle>
+              <SheetDescription>Visits that arrived tagged with this campaign</SheetDescription>
+              {/* The control bar is behind the drawer, so what the drawer is narrowed to has
+                  to be said in it — and undone from it. */}
+              <div className="pt-1 empty:hidden">
+                <ActiveFilters scope={scope} />
+              </div>
+            </SheetHeader>
 
-        <div className={stale ? "space-y-6 p-4 opacity-60 transition-opacity" : "space-y-6 p-4 transition-opacity"}>
-          {errorOf(report.data?.detail) ? (
-            <QueryError message={errorOf(report.data?.detail)} onRetry={() => report.refetch()} />
-          ) : (
-            <>
-              <Strip detail={detail} hasGoal={hasGoal} loading={loading} />
+            <div className={stale ? "space-y-6 p-4 opacity-60 transition-opacity" : "space-y-6 p-4 transition-opacity"}>
+              {errorOf(report.data?.detail) ? (
+                <QueryError message={errorOf(report.data?.detail)} onRetry={() => report.refetch()} />
+              ) : (
+                <>
+                  <Strip detail={detail} hasGoal={hasGoal} loading={loading} />
 
-              {hasGoal && (
-                <section>
-                  <h3 className="mb-2 text-sm font-medium">
-                    <MetricLabel hint={HINTS.wentOn}>Did they go on to convert?</MetricLabel>
-                  </h3>
-                  <p className="mb-2 text-xs text-muted-foreground">
-                    Of the people this campaign brought, who converted afterwards — before they left, or by coming back — against
-                    every visitor in the period.
-                  </p>
-                  <div className="rounded-md border">
-                    <WentOnPanel
-                      value={detail?.went_on}
-                      baseline={detail?.went_on_baseline}
-                      subject="people this campaign brought"
-                      loading={loading}
-                      label="This campaign"
-                      nobody="Nobody arrived through this campaign in the selected period."
-                      caveat="a campaign aimed at people already looking for you would read well whatever its ad said."
-                    />
-                  </div>
-                </section>
+                  {hasGoal && (
+                    <section>
+                      <h3 className="mb-2 text-sm font-medium">
+                        <MetricLabel hint={HINTS.wentOn}>Did they go on to convert?</MetricLabel>
+                      </h3>
+                      <p className="mb-2 text-xs text-muted-foreground">
+                        Of the people this campaign brought, who converted afterwards — before they left, or by coming back — against
+                        every visitor in the period.
+                      </p>
+                      <div className="rounded-md border">
+                        <WentOnPanel
+                          value={detail?.went_on}
+                          baseline={detail?.went_on_baseline}
+                          subject="people this campaign brought"
+                          loading={loading}
+                          label="This campaign"
+                          nobody="Nobody arrived through this campaign in the selected period."
+                          caveat="a campaign aimed at people already looking for you would read well whatever its ad said."
+                        />
+                      </div>
+                    </section>
+                  )}
+
+                  <OverTime detail={detail} hasGoal={hasGoal} scope={scope} chartKey={chartKey} onChartKey={setChartKey} loading={loading} />
+                  <Splits detail={detail} loading={loading} />
+                  <Visits detail={detail} hasGoal={hasGoal} loading={loading} onSelectPerson={onSelectPerson} />
+                  <Pages detail={detail} loading={loading} />
+                  <Actions detail={detail} scope={scope} loading={loading} />
+                </>
               )}
-
-              <OverTime detail={detail} hasGoal={hasGoal} scope={scope} chartKey={chartKey} onChartKey={setChartKey} loading={loading} />
-              <Splits detail={detail} loading={loading} />
-              <Visits detail={detail} hasGoal={hasGoal} loading={loading} />
-              <Pages detail={detail} loading={loading} />
-              <Actions detail={detail} scope={scope} loading={loading} />
-            </>
-          )}
-        </div>
+            </div>
+          </>
+        )}
       </DetailSheetContent>
     </Sheet>
   );
@@ -438,7 +458,17 @@ function pathTrail(paths: string[]): string {
   return runs.map((r) => `${shortPath(r.path, 28)}${r.n > 1 ? ` ×${r.n}` : ""}`).join(" → ");
 }
 
-function Visits({ detail, hasGoal, loading }: { detail: CampaignDetail | undefined; hasGoal: boolean; loading?: boolean }) {
+function Visits({
+  detail,
+  hasGoal,
+  loading,
+  onSelectPerson,
+}: {
+  detail: CampaignDetail | undefined;
+  hasGoal: boolean;
+  loading?: boolean;
+  onSelectPerson: (personId: string) => void;
+}) {
   const visits = detail?.recent_visits;
   const total = detail?.visits.current ?? 0;
   // The ad column earns its place only when there is more than one ad to tell apart.
@@ -448,7 +478,8 @@ function Visits({ detail, hasGoal, loading }: { detail: CampaignDetail | undefin
       <h3 className="mb-2 text-sm font-medium">Visits</h3>
       <p className="mb-2 text-xs text-muted-foreground">
         {visits && total > visits.length ? `The latest ${formatNumber(visits.length)} of ${formatNumber(total)} visits` : "Every visit"}, newest first. Time is
-        what the SDK measured across the visit; a dash means nothing was measured. Open a visitor for everything they did.
+        what the SDK measured across the visit; a dash means nothing was measured. Select a visit for everything its visitor
+        did, before and since.
       </p>
       <div className="rounded-md border">
         {loading && !detail ? (
@@ -463,16 +494,16 @@ function Visits({ detail, hasGoal, loading }: { detail: CampaignDetail | undefin
           <Table className="table-fixed">
             <TableHeader>
               <TableRow>
-                <TableHead>Visit</TableHead>
+                <TableHead>Visitor</TableHead>
                 <TableHead className="hidden w-[16%] sm:table-cell">Device</TableHead>
                 <TableHead className="hidden w-[30%] sm:table-cell">{showAd ? "Ad · referring site" : "Referring site"}</TableHead>
                 <TableHead className="w-[56px] text-right">Time</TableHead>
-                <TableHead className="w-[84px] text-right">Outcome</TableHead>
+                <TableHead className="w-[76px] text-right">Outcome</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {visits.map((v) => (
-                <VisitRow key={v.session_id} v={v} showAd={showAd} hasGoal={hasGoal} />
+                <VisitRow key={v.session_id} v={v} showAd={showAd} hasGoal={hasGoal} onSelect={() => onSelectPerson(v.person_id)} />
               ))}
             </TableBody>
           </Table>
@@ -482,17 +513,30 @@ function Visits({ detail, hasGoal, loading }: { detail: CampaignDetail | undefin
   );
 }
 
-function VisitRow({ v, showAd, hasGoal }: { v: CampaignVisit; showAd: boolean; hasGoal: boolean }) {
+function VisitRow({ v, showAd, hasGoal, onSelect }: { v: CampaignVisit; showAd: boolean; hasGoal: boolean; onSelect: () => void }) {
   const ad = v.utm_content || <span className="text-muted-foreground">Not tagged</span>;
   const from = v.referring_host || <span className="font-sans text-muted-foreground">No referrer</span>;
   return (
-    <TableRow>
+    <TableRow className="cursor-pointer" onClick={onSelect} tabIndex={0} onKeyDown={(e) => (e.key === "Enter" ? onSelect() : undefined)}>
       <TableCell className="overflow-hidden align-top">
-        <div className="flex min-w-0 items-center gap-1.5 text-sm">
+        {/* Named the way the goal drawer and the Events view name people, so the same
+            person reads the same everywhere. Where they were for this visit, not where they
+            were last seen. */}
+        <PersonLabel
+          label={displayName(v.traits, v.person_id)}
+          personId={v.person_id}
+          identified={v.person_identified}
+          country={v.country}
+          city={v.city}
+          mono={false}
+          className="text-sm font-medium"
+        />
+        <div className="mt-0.5 flex min-w-0 items-baseline gap-1 text-[11px] text-muted-foreground">
           <RelativeTime value={v.started_at} className="shrink-0 tabular-nums" />
-          <Location country={v.country} city={v.city} text="city" className="text-xs text-muted-foreground" />
+          {v.city && <span className="truncate">· {v.city}</span>}
         </div>
-        <div className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground" title={v.paths.join(" → ")}>
+        {/* A line of its own, so a reload loop's "×11" is never the part that gets cut off. */}
+        <div className="truncate font-mono text-[11px] text-muted-foreground" title={v.paths.join(" → ")}>
           {formatNumber(v.pageviews)} {v.pageviews === 1 ? "page" : "pages"} · {pathTrail(v.paths)}
         </div>
         {/* A phone has no room for the next two columns, so what they say folds in here. */}
@@ -513,16 +557,7 @@ function VisitRow({ v, showAd, hasGoal }: { v: CampaignVisit; showAd: boolean; h
       </TableCell>
       <TableCell className="text-right align-top text-xs tabular-nums">{v.engaged_ms > 0 ? formatDuration(v.engaged_ms) : <span className="text-muted-foreground">—</span>}</TableCell>
       <TableCell className="text-right align-top">
-        <div className="flex flex-col items-end gap-1">
-          <Outcome v={v} hasGoal={hasGoal} />
-          <Link
-            href={`/users/${encodeURIComponent(v.person_id)}`}
-            className="inline-flex items-center gap-0.5 text-[11px] text-muted-foreground hover:text-foreground"
-            aria-label="Open this visitor"
-          >
-            Visitor <ArrowUpRight className="size-3" />
-          </Link>
-        </div>
+        <Outcome v={v} hasGoal={hasGoal} />
       </TableCell>
     </TableRow>
   );

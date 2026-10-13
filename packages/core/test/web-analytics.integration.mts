@@ -1298,6 +1298,13 @@ test("the campaign drawer is its row on the Campaigns tab, split every way the c
     { anonymousId: "cpbot", sessionId: "cpbot-a", at: NOV(11), userAgent: UA_BOT, utm: paid("AD_A"), pages: [{ path: "/launch" }] },
     { anonymousId: "cpn", sessionId: "cpn-a", at: NOV(11, 9), utm: { source: "linkedin", medium: "paid_social", name: "other-test" }, pages: [{ path: "/launch" }] },
   ]);
+  // cp2 signs in when they come back, so their anonymous campaign visit is someone with a name.
+  await ingest(
+    project,
+    [{ type: "identify", anonymousId: "cp2", userId: "user-cp2", traits: { name: "Casey Park", email: "casey@example.com" }, timestamp: NOV(12, 9).toISOString() }] as never,
+    { receivedAt: NOW, userAgent: UA_DESKTOP },
+    "production",
+  );
   const w = await web({ range: resolveRange({ preset: "custom", from: "2025-11-09", to: "2025-11-13", now: NOW }) });
   const d = await campaignDetail(w, "message-test");
 
@@ -1363,6 +1370,9 @@ test("the campaign drawer is its row on the Campaigns tab, split every way the c
   assert.deepEqual([visit("cp3-a").converted, visit("cp3-a").converted_later], [false, false]);
   assert.equal(visit("cp2-a").referring_host, "web-cf.ads.aps.amazon-adsystem.com");
   assert.deepEqual([visit("cp1-a").utm_content, visit("cp1-a").utm_term, visit("cp1-a").engaged_ms], ["AD_A", "leaders", 12_000]);
+  // Each visit is someone the drawer can open: the person they turned out to be, by name.
+  assert.deepEqual([visit("cp2-a").person_id, visit("cp2-a").person_identified, visit("cp2-a").traits.name], ["user-cp2", true, "Casey Park"]);
+  assert.deepEqual([visit("cp3-a").person_id, visit("cp3-a").person_identified, visit("cp3-a").traits], ["cp3", false, {}]);
 
   // With no goal configured, every conversion figure is absent rather than zero.
   const bare = await campaignDetail({ ...w, goal: null, goals: [] }, "message-test");

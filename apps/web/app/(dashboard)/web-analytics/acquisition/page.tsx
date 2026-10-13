@@ -54,6 +54,9 @@ export default function AcquisitionPage() {
   // The campaign whose drawer is open. Its own parameter, not utm_campaign: opening a
   // campaign is not narrowing the table behind it to that campaign.
   const openCampaign = get("campaign");
+  // And which of its visitors the drawer has turned to, as the goal drawer does: in the
+  // URL, so Back in the browser steps back through the drawer too.
+  const openPerson = get("person");
   const sort = get("sort") ?? "sessions";
   const report = useWebAcquisition(grouping, sort);
 
@@ -185,7 +188,7 @@ export default function AcquisitionPage() {
                   barOf={(r) => r.share / 100}
                   sort={sort}
                   onSort={(k) => set({ sort: k })}
-                  onSelect={shown === "campaign" ? (r) => set({ campaign: r.key }) : drill}
+                  onSelect={shown === "campaign" ? (r) => set({ campaign: r.key, person: null }) : drill}
                   // Not tagged is every visit without a campaign: no one campaign to open.
                   canSelect={(r) => shown !== "campaign" || r.key !== "(none)"}
                   empty={<p className="px-6 py-6 text-sm text-muted-foreground">Nothing recorded for this grouping in the selected period.</p>}
@@ -256,7 +259,13 @@ export default function AcquisitionPage() {
         </>
       )}
 
-      <CampaignDetailSheet campaign={openCampaign} onClose={() => set({ campaign: null })} />
+      <CampaignDetailSheet
+        campaign={openCampaign}
+        person={openPerson}
+        onSelectPerson={(id) => set({ person: id })}
+        onBack={() => set({ person: null })}
+        onClose={() => set({ campaign: null, person: null })}
+      />
     </div>
   );
 }
