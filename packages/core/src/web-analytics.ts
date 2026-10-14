@@ -2482,6 +2482,8 @@ export interface CampaignVisit {
   pageviews: number;
   /** Measured foreground time across the visit; 0 when nothing was measured. */
   engaged_ms: number;
+  /** What `engaged_ms` can be read as. See CampaignVisitTime. */
+  time: CampaignVisitTime;
   /** The pages viewed, in order, reloads included; the first few only. */
   paths: string[];
   utm_source: string;
@@ -2504,6 +2506,29 @@ export interface CampaignVisit {
   /** Did not, but completed it in a later visit. Null when no goal is configured. */
   converted_later: boolean | null;
 }
+
+/**
+ * What a visit's measured time can be read as. A zero is four different answers, and the
+ * list has to say which:
+ *
+ *  - `measured`: engaged_ms is the attention it held.
+ *  - `under_a_second`: it has finished, it came from an SDK that measures attention, and
+ *    no page reached the one second that SDK reports from — someone who glanced and left.
+ *    A visit whose closing report was lost on the way reads the same, which is why the
+ *    label says "under a second" and not "zero".
+ *  - `in_progress`: it has not gone quiet yet, so the report may simply not have arrived.
+ *  - `not_measured`: whatever sent it does not measure attention (another analytics.js
+ *    library, an SDK older than ENGAGEMENT_SDK).
+ */
+export type CampaignVisitTime = "measured" | "under_a_second" | "in_progress" | "not_measured";
+
+/**
+ * The first SDK to measure attention. 0.2.0 began sending `$page_leave`, and only once a
+ * page has held attention for a second (ENGAGEMENT_MIN_MS in @fourierhq/sdk): below that
+ * it sends nothing at all, so for this SDK an absent report on a finished visit means
+ * under a second rather than unknown.
+ */
+const ENGAGEMENT_SDK = { name: "fourier", since: [0, 2, 0] } as const;
 
 /** How many rows of each split are named before the rest are summed into one. */
 const CAMPAIGN_BREAKDOWN_ROWS = 20;
@@ -2779,7 +2804,11 @@ async function campaignVisits(w: WebScope, limit: number): Promise<CampaignVisit
        LIMIT {${p.add(limit)}:UInt32}
      ),
      viewed AS (
-       SELECT session_id, arraySlice(arrayMap(x -> x.2, arraySort(x -> x.1, groupArray((timestamp, ${normalizedPath("path")})))), 1, ${CAMPAIGN_VISIT_PATHS}) AS paths
+       SELECT session_id, arraySlice(arrayMap(x -> x.2, arraySort(x -> x.1, groupArray((timestamp, ${normalizedPath("path")})))), 1, ${CAMPAIGN_VISIT_PATHS}) AS paths,
+              -- Whether the SDK that sent these views measures attention, compared as
+              -- version numbers so that 0.10 is later than 0.2.
+              max(library_name = {${p.add(ENGAGEMENT_SDK.name)}:String}
+                  AND arrayMap(x -> toUInt32OrZero(x), splitByChar('.', library_version)) >= [${ENGAGEMENT_SDK.since.join(", ")}]) AS measures
        FROM events
        WHERE project_id = ${b.project} AND type = 'page'
          AND timestamp >= ${b.scanFrom} AND timestamp < ${b.scanTo}
@@ -2805,7 +2834,8 @@ async function campaignVisits(w: WebScope, limit: number): Promise<CampaignVisit
        l.session_id AS session_id, l.person_id AS person_id, l.started_at AS started_at,
        ifNull(st.is_identified, 0) AS person_identified, ifNull(tr.traits, '') AS traits,
        toInt64(dateDiff('millisecond', l.started_at, l.ended_at)) AS duration_ms,
-       l.pageviews AS pageviews, l.engaged_ms AS engaged_ms, ifNull(v.paths, []) AS paths,
+       l.pageviews AS pageviews, l.engaged_ms AS engaged_ms, ifNull(v.paths, []) AS paths, ifNull(v.measures, 0) AS measures,
+       toUInt8(l.ended_at < now64(3) - toIntervalMillisecond({${p.add(SESSION_SETTLED_MS)}:Int64})) AS settled,
        l.utm_source AS utm_source, l.utm_medium AS utm_medium, l.utm_content AS utm_content, l.utm_term AS utm_term,
        l.referring_host AS referring_host, l.country AS country, l.region AS region, l.city AS city,
        l.device AS device, l.browser AS browser, l.is_new AS is_new, l.identified AS identified,
@@ -2838,6 +2868,7 @@ async function campaignVisits(w: WebScope, limit: number): Promise<CampaignVisit
       duration_ms: Math.max(0, num(r.duration_ms)),
       pageviews: num(r.pageviews),
       engaged_ms: num(r.engaged_ms),
+      time: visitTime(num(r.engaged_ms), num(r.measures) === 1, num(r.settled) === 1),
       paths: Array.isArray(r.paths) ? r.paths.map(String) : [],
       utm_source: String(r.utm_source ?? ""),
       utm_medium: String(r.utm_medium ?? ""),
@@ -2856,6 +2887,13 @@ async function campaignVisits(w: WebScope, limit: number): Promise<CampaignVisit
       converted_later: withGoal ? !converted && num(r.converted_since) === 1 : null,
     };
   });
+}
+
+/** CampaignVisitTime, from what the visit reported and what could have reported it. */
+export function visitTime(engagedMs: number, measures: boolean, settled: boolean): CampaignVisitTime {
+  if (engagedMs > 0) return "measured";
+  if (!measures) return "not_measured";
+  return settled ? "under_a_second" : "in_progress";
 }
 
 // ---------- conversions ----------
