@@ -474,8 +474,9 @@ function Visits({
       <h3 className="mb-2 text-sm font-medium">Visits</h3>
       <p className="mb-2 text-xs text-muted-foreground">
         {visits && total > visits.length ? `The latest ${formatNumber(visits.length)} of ${formatNumber(total)} visits` : "Every visit"}, newest first. Time is
-        what the SDK measured across the visit; a dash means nothing was measured. Select a visit for everything its visitor
-        did, before and since.
+        the attention the SDK measured across the visit. &ldquo;&lt;1s&rdquo; is a visit that left before any page held it for a
+        second; a dash is one still in progress, or from a browser that does not measure it. Select a visit for everything
+        its visitor did, before and since.
       </p>
       <div className="rounded-md border">
         {loading && !detail ? (
@@ -551,11 +552,37 @@ function VisitRow({ v, showAd, hasGoal, onSelect }: { v: CampaignVisit; showAd: 
           {from}
         </span>
       </TableCell>
-      <TableCell className="text-right align-top text-xs tabular-nums">{v.engaged_ms > 0 ? formatDuration(v.engaged_ms) : <span className="text-muted-foreground">—</span>}</TableCell>
+      <TableCell className="text-right align-top text-xs tabular-nums">
+        <VisitTime v={v} />
+      </TableCell>
       <TableCell className="text-right align-top">
         <Outcome v={v} hasGoal={hasGoal} />
       </TableCell>
     </TableRow>
+  );
+}
+
+/**
+ * A visit's time, saying which kind of nothing a zero is. The SDK reports attention from
+ * one second up, so a finished visit it measured with no report is a glance — not a gap
+ * in the data, which is what a bare dash beside it would have suggested.
+ */
+const TIME_NOTES: Record<CampaignVisit["time"], string> = {
+  measured: "Foreground time the SDK measured across the visit.",
+  under_a_second:
+    "Under a second of attention: no page held it for a full second, which is where the SDK starts reporting. A visit whose closing report was lost in transit reads the same way.",
+  in_progress: "Still in progress: time is reported as the visitor leaves each page.",
+  not_measured: "Not measured: whatever sent this visit does not report attention.",
+};
+
+function VisitTime({ v }: { v: CampaignVisit }) {
+  const note = TIME_NOTES[v.time];
+  if (v.time === "measured") return <span title={note}>{formatDuration(v.engaged_ms)}</span>;
+  if (v.time === "under_a_second") return <span title={note}>&lt;1s</span>;
+  return (
+    <span className="text-muted-foreground" title={note}>
+      —
+    </span>
   );
 }
 

@@ -87,6 +87,8 @@ interface Visit {
   utm?: Record<string, string>;
   userAgent?: string;
   userId?: string;
+  /** The library the browser says sent it, as context.library. Omitted, there is none. */
+  library?: { name: string; version: string };
 }
 
 /** Turn a described visit into the messages a browser would actually have sent. */
@@ -99,6 +101,7 @@ function messagesFor(v: Visit) {
     userAgent: ua,
     session: { id: v.sessionId, isNew: first },
     ...(v.utm && first ? { campaign: v.utm } : {}),
+    ...(v.library ? { library: v.library } : {}),
   });
   for (const p of v.pages) {
     const at = new Date(v.at.getTime() + (p.afterMs ?? 0));
@@ -1384,4 +1387,36 @@ test("the campaign drawer is its row on the Campaigns tab, split every way the c
   // The new tags are offered in the filter menu.
   const values = await filterValues(w);
   assert.ok(values.contents.includes("AD_A") && values.terms.includes("leaders"));
+});
+
+test("a visit that left before a second of attention reads as under a second, not as unmeasured", async () => {
+  // December 2025, a window nothing else reads. The SDK sends no $page_leave below a
+  // second, so on a finished visit from an SDK that measures, an absent report is an answer.
+  const DEC = (day: number, hour = 10) => new Date(Date.UTC(2025, 11, day, hour));
+  const sdk = { name: "fourier", version: "0.2.1" };
+  const tag = { source: "linkedin", medium: "paid_social", name: "glance-test" };
+  await send([
+    { anonymousId: "gl1", sessionId: "gl1-a", at: DEC(10), utm: tag, library: sdk, pages: [{ path: "/launch" }] },
+    { anonymousId: "gl2", sessionId: "gl2-a", at: DEC(10, 11), utm: tag, library: sdk, pages: [{ path: "/launch", engagedMs: 4_000 }] },
+    // An SDK from before attention was measured, and a library that never measures it.
+    { anonymousId: "gl3", sessionId: "gl3-a", at: DEC(10, 12), utm: tag, library: { name: "fourier", version: "0.1.9" }, pages: [{ path: "/launch" }] },
+    { anonymousId: "gl4", sessionId: "gl4-a", at: DEC(10, 13), utm: tag, library: { name: "analytics.js", version: "4.1.0" }, pages: [{ path: "/launch" }] },
+    // Compared as numbers, not text: 0.10 is later than 0.2.
+    { anonymousId: "gl5", sessionId: "gl5-a", at: DEC(10, 14), utm: tag, library: { name: "fourier", version: "0.10.0" }, pages: [{ path: "/launch" }] },
+  ]);
+  const w = await web({ range: resolveRange({ preset: "custom", from: "2025-12-09", to: "2025-12-11", now: NOW }) });
+  const time = Object.fromEntries((await campaignDetail(w, "glance-test")).recent_visits.map((v) => [v.session_id, [v.time, v.engaged_ms]]));
+  assert.deepEqual(time["gl1-a"], ["under_a_second", 0], "finished, measured by the SDK, and nothing reached a second");
+  assert.deepEqual(time["gl2-a"], ["measured", 4_000]);
+  assert.deepEqual(time["gl3-a"], ["not_measured", 0], "0.1.9 never sent a report to be missing");
+  assert.deepEqual(time["gl4-a"], ["not_measured", 0]);
+  assert.deepEqual(time["gl5-a"], ["under_a_second", 0]);
+
+  // Someone still on the page has not had the chance to report yet.
+  const now = new Date();
+  await ingest(project, messagesFor({ anonymousId: "gl6", sessionId: "gl6-a", at: now, utm: tag, library: sdk, pages: [{ path: "/launch" }] }) as never, { receivedAt: now, userAgent: UA_DESKTOP }, "production");
+  await getDataClient("production").command({ query: `OPTIMIZE TABLE sessions FINAL` });
+  const day = now.toISOString().slice(0, 10);
+  const live = await campaignDetail(await web({ range: resolveRange({ preset: "custom", from: day, to: day, now }) }), "glance-test");
+  assert.deepEqual(live.recent_visits.map((v) => [v.session_id, v.time]), [["gl6-a", "in_progress"]]);
 });
